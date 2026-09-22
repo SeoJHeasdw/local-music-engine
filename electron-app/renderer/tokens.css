@@ -1,0 +1,90 @@
+/* ============================================================================
+   Music Studio — 디자인 토큰
+   Voice Studio(local-tts-engine)·Assets Studio(local-assets-engine)와 같은 깊이·
+   글자·여백 단계를 쓴다. 강조색만 하늘색으로 바꿔 세 앱을 나란히 띄워도 구분된다.
+   하늘색은 "재생된 소리", 보라색은 "고친 구간"만 뜻한다. 새 값이 필요하면 토큰을
+   늘리기 전에 기존 단계 중 하나를 고른다.
+   ========================================================================== */
+:root {
+  color-scheme: dark;
+
+  /* 표면: 깊이 순서. well이 가장 낮고 float가 가장 높다 */
+  --well: #0b0d0a;
+  --nav: #0a0c09;
+  --bg: #0f1110;
+  --surface: #161915;
+  --raised: #1d211b;
+  --float: #262b23;
+
+  /* 글자: 네 단계 */
+  --text: #eef1ea;
+  --text-2: #b7beb0;
+  --text-3: #8d9587;
+  --text-4: #6b7266;
+
+  --line: rgba(238, 242, 231, .10);
+  --line-2: rgba(238, 242, 231, .18);
+
+  /* 강조: 재생·선택·주 행동 */
+  --accent: #7cc4ff;
+  --accent-hi: #a8d9ff;
+  --ink: #06131f;
+  --accent-wash: rgba(124, 196, 255, .05);
+  --accent-soft: rgba(124, 196, 255, .12);
+  --accent-edge: rgba(124, 196, 255, .34);
+
+  /* 고친 구간 */
+  --edit: #c6a8ff;
+  --edit-soft: rgba(198, 168, 255, .13);
+  --edit-edge: rgba(198, 168, 255, .34);
+
+  --ok: #9be37a;
+  --ok-soft: rgba(155, 227, 122, .12);
+  --ok-edge: rgba(155, 227, 122, .30);
+  --warn: #ffd166;
+  --warn-soft: rgba(255, 209, 102, .11);
+  --warn-edge: rgba(255, 209, 102, .28);
+  --danger: #ff8a80;
+  --danger-soft: rgba(255, 138, 128, .12);
+  --danger-edge: rgba(255, 138, 128, .30);
+
+  /* 파형의 아직 재생하지 않은 막대 */
+  --wave-muted: rgba(238, 242, 231, .30);
+  --wave-muted-hi: rgba(238, 242, 231, .52);
+
+  --fs-micro: 11px;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 21px;
+  --fs-2xl: 28px;
+
+  --sans: Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --r-full: 999px;
+
+  --h-sm: 32px;
+  --h-md: 40px;
+  --h-lg: 48px;
+  --sidebar-w: 224px;
+  --titlebar-h: 28px;
+
+  --shadow-md: 0 12px 32px rgba(0, 0, 0, .28);
+  --shadow-lg: 0 28px 80px rgba(0, 0, 0, .5);
+  --motion: 180ms cubic-bezier(.2, .7, .2, 1);
+
+  font-family: var(--sans);
+}

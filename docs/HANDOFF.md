@@ -2,49 +2,61 @@
 
 업데이트: 2026-09-22
 
+## Astra 추가 개선
+
+생성 중 즉시 평가 저장, 최초 입력 고정, 특정 작업 재개, SIGKILL 복구, 부모 버전 기반 수정,
+불변 export, 구간을 바로 듣는 QC를 추가했다. Python 62개·앱 9개 회귀 테스트와 실제 ACE
+30초 × 2, 120초 × 4, repaint, Electron 복구·동시 메모 저장을 확인했다.
+변경 계약·재현 명령·실측 수치는 [검증 기록](VALIDATION-ASTRA.md)에 있다.
+
 ## 완료
 
 - P0: M4 Max에서 ACE-Step v0.1.8의 native MLX text-to-music와 repaint 실제 실행
-- P1: 버전 있는 project/request/job/artifact/candidate/finding/revision 계약
-- P1: 순차 후보, 개별 실패, SHA-256, PCM QC, 선택/되돌리기, WAV export, 재열기
-- P1: 명시적 `resume`에서 완료 artifact 검증 후 재사용, 실패 seed 재실행
-- P3 기반: CLI repaint 후보, 부모 계보, 선택 범위와 전체 문맥 범위 분리
-- P2 일부: Electron 후보 카드, 파형, 동기 위치 전환, QC/청취 기록, 선택, 최근 프로젝트 복원
+- P1: 버전 있는 project/request/job/artifact/candidate/finding/revision 계약, 순차 후보, 개별
+  실패, SHA-256, PCM QC, 선택/되돌리기, WAV export, 재열기, 명시적 `resume`
+- P3 기반: repaint 후보, 부모 계보, 선택 범위와 전체 문맥 범위 분리
+- 앱 재설계: 내 곡·새 곡 만들기·작업실·설정 네 화면, 앱이 ACE 서버를 켜고 끄는 소유 경로,
+  생성·구간 수정 진행과 취소, Finder 열기, WAV 내보내기, 설정 저장
+- 수정 루프: 파형 드래그로 구간 선택 → 일상어 피드백 → 수정안(태그 변경·구간·강도) 확인 →
+  실행 → 원본/수정본 같은 위치 비교 → 평가·최종본. 피드백과 수정안은 `project.json`에 남는다
+- repaint 요청 방식 교정: 자유 문장 `instruction` 대신 캡션 + `repaint_strength`
+- 초안: 로컬 LLM이 있으면 제목·태그·한글 가사, 없으면 영어 질의 기반 엔진 캡션
+
+## 이번 실측 (2026-09-22, 실제 ACE 서버·실제 Ollama)
+
+앱을 원격 디버깅 포트로 띄워 DOM 클릭과 실제 포인터 드래그로 조작했다. 임시 앱 데이터와 임시 곡
+폴더를 써서 사용자 설정은 건드리지 않았다.
+
+| 단계 | 결과 |
+| --- | --- |
+| 앱 시작 → ACE 자동 시작 | 모델 준비까지 32–42초 |
+| 한국어 설명 → qwen3.6:27b 초안 | 24–40초, 제목·태그·한글 가사 |
+| 30초 버전 2개 | 36–54초 |
+| 자유 문장 피드백 → LLM 수정안 | 22초 |
+| 6.6초 구간 repaint | 28–36초, 수정본 자동으로 열림 |
+| 원본↔수정본 전환 | 재생 위치 유지하며 계속 재생 |
+| export + inspect | 해시 일치, `restorable: true` |
+| ⌘Q / SIGTERM | 앱이 켠 ACE가 2초 안에 종료 |
+
+청취 판단(발음·음악성·연결부)은 아직 사람이 하지 않았다. 위 결과는 동작 검증일 뿐 품질 판정이
+아니다.
 
 ## 실행
 
 ```bash
-uv sync --python 3.12.12 --group dev
-./scripts/bootstrap_ace.sh
-./scripts/start_ace_api.sh
-npm install
-npm run start:app
+./app.sh          # 처음이면 환경 준비 후 앱 실행. 앱이 ACE 서버를 켠다
 ```
 
-다른 터미널:
-
-```bash
-uv run music-engine init projects/my-song \
-  --title "내 노래" --lyrics-file lyrics.txt \
-  --style "Korean indie pop, clear vocal" --duration 120
-
-uv run music-engine generate projects/my-song --seeds 101,102,103,104
-uv run music-engine candidates projects/my-song
-uv run music-engine review projects/my-song <candidate-id> --status listened --note "청취 메모"
-uv run music-engine select projects/my-song <candidate-id>
-uv run music-engine repaint projects/my-song --start 30 --end 42 \
-  --instruction "Keep arrangement and improve Korean diction" --seed 201
-uv run music-engine export projects/my-song --output exports/my-song.wav
-uv run music-engine inspect projects/my-song
-```
+ACE 런타임이 없으면 먼저 `./scripts/bootstrap_ace.sh`. 로컬 LLM 도우미는 앱의 설정 → AI 도우미에서
+Ollama와 모델을 고른다.
 
 ## 남은 작업
 
-1. 사용자가 P0 세 후보와 repaint를 실제로 듣고 발음·음악성·연결부 판정을 남긴다.
-2. 실제 2–3분 곡을 4 seeds로 생성해 시간·메모리·장곡 구조 문제를 측정한다.
-3. 라이선스와 Mac 동작을 확인한 분리기·한국어 ASR을 채택하고 의심 구간 contract/UI를 추가한다.
-4. Electron에 생성 진행과 앱 소유 런타임/중지 경로를 연결한다.
-5. 청취 결과가 Turbo 한계를 보일 때만 SFT/XL 비교 다운로드와 실험량을 먼저 고지한다.
-
-공식 REST API에는 개별 task 취소 endpoint가 없으므로 앱이 서버/작업자 프로세스 수명을
-소유하기 전에는 `Ctrl-C` 후 원격 생성이 잠시 계속될 수 있다.
+1. 사람이 p0와 새 곡의 버전·수정본을 듣고 발음·음악성·연결부를 평가한다. 특히 캡션+강도 방식의
+   repaint가 예전 `instruction` 방식보다 나은지 같은 구간으로 비교한다.
+2. 2분 곡 4 seeds 생성은 179.39초에 성공했다. 장곡 구조의 청취 평가, 메모리 정량 측정,
+   LLM 도우미와 ACE를 함께 쓸 때의 여유 측정이 남았다.
+3. 분리기·한국어 ASR을 채택해 가사 의심 구간을 수정안 입력(범위)으로 연결한다.
+4. 청취 평가가 쌓이면 규칙 사전과 LLM 프롬프트를 실제 좋아요/별로 기록으로 조정한다.
+5. 앱이 비정상 종료되면 앱이 켠 ACE 서버가 남을 수 있다. 다음 실행은 그 서버를 외부 소유로 쓰며
+   앱에서 끌 수 없다.

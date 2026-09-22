@@ -12,6 +12,7 @@
 | Python | CPython `3.12.12` | PSF 라이선스 | 제품과 ACE 환경을 별도 venv로 고정 |
 | Electron | `44.4.3` | MIT, <https://github.com/electron/electron> | 후보 비교 desktop shell |
 | TypeScript / esbuild | `7.0.2` / `0.28.2` | Apache-2.0 / MIT | 타입 검사와 세 진입점 번들 |
+| 로컬 LLM 도우미 (선택) | Ollama 기본 API 또는 OpenAI 호환 loopback 서버. 실측 모델 `qwen3.6:27b` | 사용자가 설치한 런타임·모델의 조건을 따른다 | 의존성이 아닌 선택 기능. 없으면 규칙 도우미와 엔진 초안으로 동작 |
 
 통합 묶음은 1.7B LM도 포함한다. 0.6B를 초기 선택해도 공식 main snapshot 때문에 디스크에는
 1.7B가 함께 내려왔지만 서버는 0.6B를 로드한다. 실측 모델 폴더는 약 11GB다.
@@ -34,7 +35,7 @@
   훈련 데이터의 사용 조건에 대한 upstream 답변이 명확하지 않다. weight 조건을 특정하지 못한
   상태에서 기본 의존성으로 채택하지 않는다.
 - SongEval: README와 LICENSE 표기 범위가 명확해질 때까지 필수 평가기로 쓰지 않는다.
-- FastAPI: 생성 진행을 앱에서 직접 실행할 단계에 loopback 인증과 함께 추가한다.
+- FastAPI: 앱은 CLI를 자식 프로세스로 실행하고 `project.json`으로 진행을 읽는다. 여러 클라이언트가 동시에 붙어야 할 때 loopback 인증과 함께 추가한다.
 
 코드 저장소 라이선스와 가중치·데이터·생성 결과물의 조건은 같은 것으로 취급하지 않는다.
 사용자가 넣는 가사와 참조 오디오의 권리는 사용자가 확인해야 한다.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 import uuid
@@ -34,6 +35,7 @@ def canonical_json(value: Any) -> bytes:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
 
 
@@ -51,7 +53,7 @@ def sha256_file(path: Path) -> str:
 
 def atomic_write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    payload = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
@@ -90,8 +92,12 @@ class ProjectStore:
         structure: str | None = None,
     ) -> "ProjectStore":
         store = cls(root)
-        if store.manifest_path.exists():
-            raise FileExistsError(f"project already exists: {store.manifest_path}")
+        if not math.isfinite(target_duration_seconds) or not 10 <= target_duration_seconds <= 600:
+            raise ValueError("duration must be between 10 and 600 seconds")
+        if not style_prompt.strip():
+            raise ValueError("style prompt must not be empty")
+        if not lyrics.strip():
+            raise ValueError("lyrics must not be empty; use [Instrumental] for no vocals")
         store.root.mkdir(parents=True, exist_ok=True)
         created_at = utc_now()
         project = {
@@ -115,7 +121,10 @@ class ProjectStore:
             "jobs": [],
             "revisions": [],
         }
-        store.save(project)
+        with store.locked():
+            if store.manifest_path.exists():
+                raise FileExistsError(f"project already exists: {store.manifest_path}")
+            store.save(project)
         return store
 
     def load(self) -> dict[str, Any]:
@@ -123,6 +132,8 @@ class ProjectStore:
             data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         except FileNotFoundError as error:
             raise FileNotFoundError(f"project not found: {self.manifest_path}") from error
+        if not isinstance(data, dict):
+            raise ValueError("project must be a JSON object")
         if data.get("schemaVersion") != SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported project schema: {data.get('schemaVersion')!r}; "
@@ -141,6 +152,11 @@ class ProjectStore:
         missing = required.difference(data)
         if missing:
             raise ValueError(f"project is missing fields: {', '.join(sorted(missing))}")
+        if not isinstance(data["inputs"], dict):
+            raise ValueError("project inputs must be an object")
+        for field in ("requests", "artifacts", "findings", "candidates", "jobs", "revisions"):
+            if not isinstance(data[field], list) or any(not isinstance(item, dict) for item in data[field]):
+                raise ValueError(f"project {field} must be a list of records")
         return data
 
     @contextmanager
@@ -161,6 +177,49 @@ class ProjectStore:
         project["updatedAt"] = utc_now()
         atomic_write_json(self.manifest_path, project)
 
+    @contextmanager
+    def transaction(self):
+        """Reload under the short manifest lock; never save a stale generation snapshot."""
+
+        with self.locked():
+            project = self.load()
+            yield project
+            self.save(project)
+
+    @contextmanager
+    def generation_lock(self):
+        """One generator per project, independent of short listening/edit transactions.
+
+        flock ownership is released by the OS even after SIGKILL. Do not unlink the
+        file: replacing its inode would allow a second owner to bypass the lock.
+        """
+
+        self.load()  # A typo must not create an empty project directory.
+        with (self.root / ".generation.lock").open("a+b") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RuntimeError("project generation is already running") from error
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def generation_active(self) -> bool:
+        """Probe ownership without creating files or relying on a possibly reused PID."""
+
+        try:
+            handle = (self.root / ".generation.lock").open("rb")
+        except FileNotFoundError:
+            return False
+        with handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+
     def relative_path(self, path: Path | str) -> str:
         resolved = Path(path).expanduser().resolve()
         try:
@@ -169,6 +228,8 @@ class ProjectStore:
             raise ValueError(f"artifact must be inside project: {resolved}") from error
 
     def resolve_artifact(self, artifact: dict[str, Any]) -> Path:
+        if Path(artifact["path"]).is_absolute():
+            raise ValueError("artifact path must be project-relative")
         candidate = (self.root / artifact["path"]).resolve()
         try:
             candidate.relative_to(self.root)
@@ -228,7 +289,7 @@ class ProjectStore:
         job["status"] = status
         if status == "running" and job["startedAt"] is None:
             job["startedAt"] = utc_now()
-        if status in {"succeeded", "partial", "failed", "cancelled"}:
+        if status in {"succeeded", "partial", "failed", "cancelled", "interrupted"}:
             job["finishedAt"] = utc_now()
         if stage is not None:
             job["stage"] = stage

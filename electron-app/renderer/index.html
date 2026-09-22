@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; media-src 'self' music-artifact:; connect-src 'self' music-artifact:; img-src 'self' data:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Music Studio</title>
+    <link rel="stylesheet" href="./tokens.css" />
+    <link rel="stylesheet" href="./app.css" />
+  </head>
+  <body>
+    <!-- 제목 막대가 없는 창이라 맨 위 띠를 잡아 창을 옮긴다. -->
+    <div class="window-drag" aria-hidden="true"></div>
+    <div class="shell" id="shell">
+      <button class="sidebar-toggle" type="button" id="sidebar-toggle" aria-controls="sidebar" aria-expanded="true" data-tip="사이드바 접기 (⌘\)"></button>
+      <nav class="sidebar" id="sidebar" aria-label="화면"></nav>
+      <main class="content" id="content">
+        <section class="view" id="view-library" hidden></section>
+        <section class="view" id="view-create" hidden></section>
+        <section class="view view-studio" id="view-studio" hidden></section>
+        <section class="view" id="view-settings" hidden></section>
+      </main>
+    </div>
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+    <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

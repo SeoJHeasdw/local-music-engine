@@ -30,7 +30,7 @@ await Promise.all([
     sourcemap: true,
   }),
   build({
-    entryPoints: [path.join(appRoot, "renderer.ts")],
+    entryPoints: [path.join(appRoot, "renderer", "app.ts")],
     outfile: path.join(output, "renderer.js"),
     bundle: true,
     platform: "browser",
@@ -40,7 +40,8 @@ await Promise.all([
   }),
 ]);
 
-await Promise.all([
-  copyFile(path.join(appRoot, "index.html"), path.join(output, "index.html")),
-  copyFile(path.join(appRoot, "styles.css"), path.join(output, "styles.css")),
-]);
+await Promise.all(
+  ["index.html", "tokens.css", "app.css"].map((file) =>
+    copyFile(path.join(appRoot, "renderer", file), path.join(output, file)),
+  ),
+);

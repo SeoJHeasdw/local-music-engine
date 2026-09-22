@@ -7,6 +7,7 @@
   "scripts": {
     "build:app": "node electron-app/build.mjs",
     "check:app": "tsc --noEmit -p electron-app/tsconfig.json",
+    "test:app": "node electron-app/test.mjs",
     "start:app": "npm run build:app && electron ."
   },
   "devDependencies": {

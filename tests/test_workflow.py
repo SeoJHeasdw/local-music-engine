@@ -4,12 +4,17 @@ import wave
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from local_music_engine.storage import ProjectStore
+from local_music_engine.views import library, project_status
 from local_music_engine.workflow import (
     export_selected,
     generate_candidates,
+    repaint_candidate,
     resume_latest_batch,
     review_candidate,
+    revise_inputs,
     select_candidate,
     undo_selection,
 )
@@ -133,3 +138,96 @@ def test_review_select_undo_and_export_preserve_source(tmp_path: Path) -> None:
 
     undo_selection(root)
     assert ProjectStore(root).load()["selectedCandidateId"] is None
+
+
+def test_feedback_regeneration_revises_inputs_and_links_feedback(tmp_path: Path) -> None:
+    root = tmp_path / "song"
+    make_project(root)
+    FakeAceClient.fail_seeds = set()
+    first = generate_candidates(root, seeds=[1], client_factory=FakeAceClient)
+    source_id = first["candidateIds"][0]
+    feedback = {"text": "드럼이 너무 세요", "candidateId": source_id, "plan": {"action": "regenerate"}}
+    second = generate_candidates(
+        root,
+        seeds=[2],
+        style_prompt="Korean pop, light drums",
+        feedback=feedback,
+        client_factory=FakeAceClient,
+    )
+
+    store = ProjectStore(root)
+    project = store.load()
+    assert project["inputs"]["stylePrompt"] == "Korean pop, light drums"
+    change = [item for item in project["revisions"] if item["kind"] == "inputs-change"][-1]
+    assert change["before"] == {"stylePrompt": "Korean pop"}
+    record = project["feedback"][0]
+    assert record["text"] == "드럼이 너무 세요"
+    assert record["jobId"] == second["batchJobId"]
+
+    status = project_status(store, project)
+    rows = {row["candidateId"]: row for row in status["candidates"]}
+    assert rows[source_id]["stylePrompt"] == "Korean pop"
+    assert rows[second["candidateIds"][0]]["stylePrompt"] == "Korean pop, light drums"
+    assert rows[second["candidateIds"][0]]["feedbackId"] == record["feedbackId"]
+
+
+def test_repaint_uses_caption_and_strength_not_free_instruction(tmp_path: Path) -> None:
+    root = tmp_path / "song"
+    make_project(root)
+    FakeAceClient.fail_seeds = set()
+    parent = generate_candidates(root, seeds=[3], client_factory=FakeAceClient)["candidateIds"][0]
+    select_candidate(root, parent)
+    result = repaint_candidate(
+        root,
+        start_seconds=2,
+        end_seconds=4,
+        seed=4,
+        style_prompt="Korean pop, clear Korean diction",
+        strength="light",
+        feedback={"text": "발음", "candidateId": parent, "range": {"startSeconds": 2, "endSeconds": 4}},
+        client_factory=FakeAceClient,
+    )
+    project = ProjectStore(root).load()
+    request = project["requests"][-1]["parameters"]
+    assert request["prompt"] == "Korean pop, clear Korean diction"
+    assert request["repaint_strength"] == 0.25
+    assert "instruction" not in request
+    assert project["inputs"]["stylePrompt"] == "Korean pop"
+    assert project["selectedCandidateId"] == parent
+    assert project["feedback"][0]["jobId"] == result["jobId"]
+
+
+def test_cancelled_batch_does_not_leave_running_jobs(tmp_path: Path) -> None:
+    root = tmp_path / "song"
+    make_project(root)
+
+    class InterruptingClient(FakeAceClient):
+        def wait(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        generate_candidates(root, seeds=[5, 6], client_factory=InterruptingClient)
+    jobs = ProjectStore(root).load()["jobs"]
+    assert {job["status"] for job in jobs} == {"cancelled"}
+
+
+def test_revise_inputs_records_history_and_rejects_empty_lyrics(tmp_path: Path) -> None:
+    root = tmp_path / "song"
+    make_project(root)
+    revision = revise_inputs(root, title="새 제목", duration_seconds=30, bpm=92, reason="manual")
+    assert revision["after"] == {"title": "새 제목", "targetDurationSeconds": 30.0, "bpm": 92}
+    assert revise_inputs(root, title="새 제목") is None
+    with pytest.raises(ValueError, match="Instrumental"):
+        revise_inputs(root, lyrics="  ")
+    assert revise_inputs(root, bpm=0)["after"] == {"bpm": None}
+
+
+def test_library_summarizes_without_hashing(tmp_path: Path) -> None:
+    make_project(tmp_path / "a")
+    (tmp_path / "not-a-song").mkdir()
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / "project.json").write_text("{", encoding="utf-8")
+    rows = library(tmp_path)
+    titles = sorted(row["title"] for row in rows)
+    assert titles == ["broken", "곡"]
+    assert next(row for row in rows if row["title"] == "broken")["error"]

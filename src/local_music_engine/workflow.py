@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import tempfile
@@ -10,12 +11,20 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .ace_adapter import AceStepClient
+from .execution import execute_candidate
+from .jobs import (ACTIVE_STATUSES, frozen_batch_payloads, recover_jobs, reusable_candidates, resume_source)
 from .qc import artifact_and_findings, inspect_wav
 from .storage import ProjectStore, fingerprint, new_id, sha256_file, utc_now
 
 DEFAULT_BASE_URL = "http://127.0.0.1:18001"
 DEFAULT_DIT_MODEL = "acestep-v15-turbo"
 DEFAULT_LM_MODEL = "acestep-5Hz-lm-0.6B"
+
+# ACE's balanced repaint mode takes 0 (keep the source) to 1 (pure diffusion).
+REPAINT_STRENGTHS = {"light": 0.25, "medium": 0.5, "strong": 0.8}
+INSTRUMENTAL_LYRICS = "[Instrumental]"
+# ACE reads these optional musical metas; the project stores them under its own names.
+_META_FIELDS = (("bpm", "bpm"), ("keyScale", "key_scale"), ("timeSignature", "time_signature"))
 
 
 def _frozen_generation_payload(
@@ -28,10 +37,12 @@ def _frozen_generation_payload(
     parent_artifact_sha256: str | None = None,
     edit_range: dict[str, float] | None = None,
     instruction: str | None = None,
+    style_prompt: str | None = None,
+    repaint_strength: float | None = None,
 ) -> dict[str, Any]:
     inputs = project["inputs"]
     payload: dict[str, Any] = {
-        "prompt": inputs["stylePrompt"],
+        "prompt": style_prompt if style_prompt is not None else inputs["stylePrompt"],
         "lyrics": inputs["lyricsNormalized"],
         "thinking": task_type == "text2music",
         "vocal_language": "ko",
@@ -47,6 +58,11 @@ def _frozen_generation_payload(
         "task_type": task_type,
         "project_structure": inputs.get("structure"),
     }
+    # Only present metas enter the payload so fingerprints of older projects stay stable.
+    for source, target in _META_FIELDS:
+        value = inputs.get(source)
+        if value not in (None, ""):
+            payload[target] = value
     if task_type == "text2music":
         payload.update(
             {
@@ -58,7 +74,12 @@ def _frozen_generation_payload(
     if edit_range is not None:
         payload["repainting_start"] = edit_range["startSeconds"]
         payload["repainting_end"] = edit_range["endSeconds"]
+    if repaint_strength is not None:
+        payload["repaint_mode"] = "balanced"
+        payload["repaint_strength"] = float(repaint_strength)
     if instruction:
+        # ACE treats this as the DiT task template, not a free-form request. Steering
+        # belongs in the caption; this override exists only for deliberate experiments.
         payload["instruction"] = instruction
     if parent_artifact_sha256:
         # Provenance only; the adapter removes it before calling the ACE API.
@@ -87,9 +108,111 @@ def _api_payload(frozen: dict[str, Any]) -> dict[str, Any]:
         "constrained_decoding",
         "repainting_start",
         "repainting_end",
+        "repaint_mode",
+        "repaint_strength",
         "instruction",
+        "bpm",
+        "key_scale",
+        "time_signature",
     }
     return {key: value for key, value in frozen.items() if key in allowed}
+
+
+def _revise_inputs(
+    project: dict[str, Any],
+    *,
+    title: str | None = None,
+    style_prompt: str | None = None,
+    lyrics: str | None = None,
+    duration_seconds: float | None = None,
+    bpm: int | None = None,
+    key_scale: str | None = None,
+    time_signature: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any] | None:
+    """Change project inputs in place and record the before/after as a revision.
+
+    Past requests froze their own parameters, so earlier candidates keep their
+    provenance. ``bpm=0`` and empty key/time strings clear the stored meta.
+    """
+
+    inputs = project["inputs"]
+    before: dict[str, Any] = {}
+    after: dict[str, Any] = {}
+
+    def change(key: str, value: Any) -> None:
+        if inputs.get(key) != value:
+            before[key] = inputs.get(key)
+            after[key] = value
+            inputs[key] = value
+
+    if title is not None:
+        cleaned = title.strip() or "Untitled"
+        if project["title"] != cleaned:
+            before["title"] = project["title"]
+            after["title"] = cleaned
+            project["title"] = cleaned
+    if style_prompt is not None:
+        if not style_prompt.strip():
+            raise ValueError("style prompt must not be empty")
+        change("stylePrompt", style_prompt.strip())
+    if lyrics is not None:
+        if not lyrics.strip():
+            raise ValueError("lyrics must not be empty; use [Instrumental] for no vocals")
+        change("lyricsOriginal", lyrics)
+        change("lyricsNormalized", lyrics.replace("\r\n", "\n").replace("\r", "\n"))
+    if duration_seconds is not None:
+        if not math.isfinite(duration_seconds) or duration_seconds < 10 or duration_seconds > 600:
+            raise ValueError("duration must be between 10 and 600 seconds")
+        change("targetDurationSeconds", float(duration_seconds))
+    if bpm is not None:
+        if bpm and not 30 <= bpm <= 300:
+            raise ValueError("bpm must be between 30 and 300")
+        change("bpm", bpm or None)
+    if key_scale is not None:
+        change("keyScale", key_scale.strip() or None)
+    if time_signature is not None:
+        change("timeSignature", time_signature.strip() or None)
+    if not after:
+        return None
+    revision = {
+        "revisionId": new_id("revision"),
+        "kind": "inputs-change",
+        "previousRevisionId": (
+            project["revisions"][-1]["revisionId"] if project["revisions"] else None
+        ),
+        "before": before,
+        "after": after,
+        "reason": reason,
+        "createdAt": utc_now(),
+    }
+    project["revisions"].append(revision)
+    return revision
+
+
+def _append_feedback(
+    project: dict[str, Any], feedback: dict[str, Any], *, job_id: str
+) -> dict[str, Any]:
+    """Keep the listener's own words next to the plan that was actually executed."""
+
+    text = str(feedback.get("text") or "").strip()
+    edit_range = feedback.get("range")
+    if edit_range is not None:
+        edit_range = {
+            "startSeconds": float(edit_range["startSeconds"]),
+            "endSeconds": float(edit_range["endSeconds"]),
+        }
+    record = {
+        "feedbackId": new_id("feedback"),
+        "candidateId": feedback.get("candidateId"),
+        "text": text[:2000],
+        "range": edit_range,
+        "plan": deepcopy(feedback.get("plan")),
+        "jobId": job_id,
+        "createdAt": utc_now(),
+    }
+    project.setdefault("feedback", []).append(record)
+    return record
 
 
 def _append_request(
@@ -117,66 +240,80 @@ def _append_request(
     return request
 
 
-def _find_reusable_candidate(
-    store: ProjectStore, project: dict[str, Any], request_fingerprint: str
-) -> dict[str, Any] | None:
-    request_ids = {
-        record["requestId"]
-        for record in project["requests"]
-        if record.get("fingerprint") == request_fingerprint
-    }
-    for candidate in reversed(project["candidates"]):
-        if candidate["requestId"] not in request_ids or candidate["status"] != "ready":
-            continue
-        artifact = store.find_by_id(
-            project, "artifacts", "artifactId", candidate["artifactId"]
-        )
-        valid, _ = store.verify_artifact(artifact)
-        if valid:
-            return candidate
-    return None
-
-
-def _record_generated_candidate(
+def _run_batch(
     store: ProjectStore,
-    project: dict[str, Any],
     *,
-    request: dict[str, Any],
-    job: dict[str, Any],
-    destination: Path,
-    parent_candidate_id: str | None,
-    edit_range: dict[str, float] | None,
-    context_range: dict[str, float] | None,
+    batch_id: str,
+    payloads: list[dict[str, Any]],
+    reusable: dict[int, str],
+    client: AceStepClient,
+    poll_seconds: float,
+    timeout_seconds: float,
 ) -> dict[str, Any]:
-    artifact, findings = artifact_and_findings(
-        path=destination,
-        project_relative_path=store.relative_path(destination),
-        artifact_kind="candidate-audio",
-        created_by_job_id=job["jobId"],
-        requested_duration_seconds=float(request["parameters"]["audio_duration"]),
-    )
-    project["artifacts"].append(artifact)
-    project["findings"].extend(findings)
-    candidate = {
-        "candidateId": new_id("candidate"),
-        "requestId": request["requestId"],
-        "artifactId": artifact["artifactId"],
-        "findingIds": [finding["findingId"] for finding in findings],
-        "status": "ready",
-        "parentCandidateId": parent_candidate_id,
-        "editRange": deepcopy(edit_range),
-        "contextRange": deepcopy(context_range),
-        "humanReview": {
-            "status": "unreviewed",
-            "rating": None,
-            "notes": [],
-            "updatedAt": None,
-        },
-        "createdAt": utc_now(),
+    """Caller owns the generation lease. Every write reloads the current manifest."""
+
+    adapter_info = None
+    try:
+        for index, frozen in enumerate(payloads):
+            seed = frozen["seed"]
+            if seed in reusable:
+                with store.transaction() as project:
+                    batch = store.find_by_id(project, "jobs", "jobId", batch_id)
+                    candidate_id = reusable[seed]
+                    batch["resultRefs"].append(candidate_id)
+                    batch["reusedCandidateIds"].append(candidate_id)
+                    batch.update(progress=(index + 1) / len(payloads), stage=f"reused seed {seed}")
+                continue
+            if adapter_info is None:
+                adapter_info = client.health()
+            with store.transaction() as project:
+                request = _append_request(project, frozen, adapter_info=adapter_info)
+                job = store.append_job(
+                    project, kind="generate-candidate",
+                    parameters={"requestId": request["requestId"], "seed": seed},
+                    parent_job_id=batch_id,
+                )
+                store.transition_job(job, "running", stage="submitting")
+            try:
+                execute_candidate(
+                    store, client, request=request, job_id=job["jobId"],
+                    api_payload=_api_payload(frozen), batch_id=batch_id,
+                    index=index, total=len(payloads), poll_seconds=poll_seconds,
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as error:
+                with store.transaction() as project:
+                    batch = store.find_by_id(project, "jobs", "jobId", batch_id)
+                    batch["failures"].append({"seed": str(seed), "error": f"{type(error).__name__}: {error}"})
+                    batch["progress"] = (index + 1) / len(payloads)
+        with store.transaction() as project:
+            batch = store.find_by_id(project, "jobs", "jobId", batch_id)
+            state = "partial" if batch["failures"] and batch["resultRefs"] else "failed" if batch["failures"] else "succeeded"
+            store.transition_job(batch, state, stage="verified" if state == "succeeded" else state, progress=1.0)
+    except (Exception, KeyboardInterrupt) as error:
+        with store.transaction() as project:
+            batch = store.find_by_id(project, "jobs", "jobId", batch_id)
+            if batch["status"] in ACTIVE_STATUSES:
+                cancelled = isinstance(error, KeyboardInterrupt)
+                batch["cancelRequested"] = cancelled
+                state = "cancelled" if cancelled else "failed"
+                store.transition_job(batch, state, stage=state, error=f"{type(error).__name__}: {error}")
+        raise
+    return {
+        "batchJobId": batch_id,
+        "status": batch["status"],
+        "candidateIds": batch["resultRefs"],
+        "newCandidateIds": [item for item in batch["resultRefs"] if item not in batch["reusedCandidateIds"]],
+        "reusedCandidateIds": batch["reusedCandidateIds"],
+        "failures": batch["failures"],
     }
-    project["candidates"].append(candidate)
-    job["resultRefs"] = [candidate["candidateId"], artifact["artifactId"]]
-    return candidate
+
+
+def _new_batch(store: ProjectStore, project: dict[str, Any], parameters: dict[str, Any]) -> dict[str, Any]:
+    batch = store.append_job(project, kind="candidate-batch", parameters=parameters)
+    batch.update(failures=[], reusedCandidateIds=[])
+    store.transition_job(batch, "running", stage="preparing")
+    return batch
 
 
 def generate_candidates(
@@ -188,178 +325,72 @@ def generate_candidates(
     lm_model: str = DEFAULT_LM_MODEL,
     poll_seconds: float = 1.0,
     timeout_seconds: float = 1800.0,
-    explicit_resume: bool = False,
+    style_prompt: str | None = None,
+    lyrics: str | None = None,
+    bpm: int | None = None,
+    feedback: dict[str, Any] | None = None,
+    source_candidate_id: str | None = None,
     client_factory: Callable[..., AceStepClient] = AceStepClient,
 ) -> dict[str, Any]:
     store = ProjectStore(project_root)
     seed_list = [int(seed) for seed in seeds]
     if not seed_list:
         raise ValueError("at least one seed is required")
-    with store.locked():
-        project = store.load()
-        client = client_factory(base_url)
-        adapter_info = client.health()
-        batch = store.append_job(
-            project,
-            kind="candidate-batch",
-            parameters={
-                "seeds": seed_list,
-                "model": model,
-                "lmModel": lm_model,
-                "baseUrl": base_url,
-                "explicitResume": explicit_resume,
-            },
-        )
-        store.transition_job(batch, "running", stage="preparing", progress=0.0)
-        store.save(project)
-
-        completed: list[str] = []
-        reused: list[str] = []
-        failures: list[dict[str, str]] = []
-        try:
-            for index, seed in enumerate(seed_list):
-                frozen = _frozen_generation_payload(
-                    project, seed=seed, model=model, lm_model=lm_model
-                )
-                prospective_fingerprint = fingerprint(
-                    {
-                        "adapterVersion": "ace-rest-v1",
-                        "adapterInfo": adapter_info,
-                        "parameters": frozen,
-                    }
-                )
-                if explicit_resume:
-                    reusable = _find_reusable_candidate(
-                        store, project, prospective_fingerprint
-                    )
-                    if reusable is not None:
-                        reused.append(reusable["candidateId"])
-                        completed.append(reusable["candidateId"])
-                        batch["progress"] = (index + 1) / len(seed_list)
-                        batch["stage"] = f"reused seed {seed}"
-                        store.save(project)
-                        continue
-
-                request = _append_request(
-                    project, frozen, adapter_info=adapter_info
-                )
-                job = store.append_job(
-                    project,
-                    kind="generate-candidate",
-                    parameters={"requestId": request["requestId"], "seed": seed},
-                    parent_job_id=batch["jobId"],
-                )
-                store.transition_job(job, "running", stage="submitting", progress=0.0)
-                store.save(project)
-                try:
-                    task_id = client.submit(_api_payload(frozen))
-                    job["remoteTaskId"] = task_id
-
-                    def progress(state: dict[str, Any]) -> None:
-                        job["stage"] = str(state["stage"])
-                        job["progress"] = float(state["progress"])
-                        batch["stage"] = f"seed {seed}: {job['stage']}"
-                        batch["progress"] = (index + job["progress"]) / len(seed_list)
-                        store.save(project)
-
-                    result = client.wait(
-                        task_id,
-                        poll_seconds=poll_seconds,
-                        timeout_seconds=timeout_seconds,
-                        on_progress=progress,
-                    )
-                    file_path = str(result.get("file") or "")
-                    if not file_path:
-                        raise RuntimeError("ACE task succeeded without an audio file")
-                    destination = (
-                        store.root
-                        / "artifacts"
-                        / "candidates"
-                        / f"{job['jobId']}-seed-{seed}.wav"
-                    )
-                    client.download(file_path, destination)
-                    candidate = _record_generated_candidate(
-                        store,
-                        project,
-                        request=request,
-                        job=job,
-                        destination=destination,
-                        parent_candidate_id=None,
-                        edit_range=None,
-                        context_range=None,
-                    )
-                    job["remoteResult"] = {
-                        key: result.get(key)
-                        for key in (
-                            "generation_info",
-                            "seed_value",
-                            "lm_model",
-                            "dit_model",
-                            "metas",
-                        )
-                    }
-                    store.transition_job(job, "succeeded", stage="verified", progress=1.0)
-                    completed.append(candidate["candidateId"])
-                except Exception as error:
-                    store.transition_job(
-                        job, "failed", stage="failed", error=f"{type(error).__name__}: {error}"
-                    )
-                    failures.append({"seed": str(seed), "error": job["error"]})
-                batch["progress"] = (index + 1) / len(seed_list)
-                store.save(project)
-        except KeyboardInterrupt:
-            batch["cancelRequested"] = True
-            store.transition_job(batch, "cancelled", stage="cancelled", error="KeyboardInterrupt")
-            store.save(project)
-            raise
-
-        if failures and completed:
-            store.transition_job(batch, "partial", stage="partial", progress=1.0)
-        elif failures:
-            store.transition_job(batch, "failed", stage="failed", progress=1.0)
-        else:
-            store.transition_job(batch, "succeeded", stage="verified", progress=1.0)
-        batch["resultRefs"] = completed
-        batch["failures"] = failures
-        batch["reusedCandidateIds"] = reused
-        store.save(project)
-        return {
-            "batchJobId": batch["jobId"],
-            "status": batch["status"],
-            "candidateIds": completed,
-            "reusedCandidateIds": reused,
-            "failures": failures,
-        }
+    if len(set(seed_list)) != len(seed_list):
+        raise ValueError("seeds must be unique within a batch")
+    client = client_factory(base_url)
+    with store.generation_lock():
+        with store.transaction() as project:
+            recover_jobs(store, project)
+            changes: dict[str, Any] = {}
+            if source_candidate_id:
+                source = store.find_by_id(project, "candidates", "candidateId", source_candidate_id)
+                original = store.find_by_id(project, "requests", "requestId", source["requestId"])["parameters"]
+                changes.update(style_prompt=original["prompt"], lyrics=original["lyrics"],
+                               duration_seconds=original["audio_duration"], bpm=original.get("bpm") or 0,
+                               key_scale=original.get("key_scale") or "", time_signature=original.get("time_signature") or "")
+            for field, value in (("style_prompt", style_prompt), ("lyrics", lyrics), ("bpm", bpm)):
+                if value is not None:
+                    changes[field] = value
+            _revise_inputs(project, **changes, reason="feedback" if feedback else "new-batch")
+            payloads = [_frozen_generation_payload(project, seed=seed, model=model, lm_model=lm_model) for seed in seed_list]
+            batch = _new_batch(store, project, {
+                "seeds": seed_list, "model": model, "lmModel": lm_model,
+                "baseUrl": base_url, "explicitResume": False, "frozenPayloads": payloads,
+                "sourceCandidateId": source_candidate_id,
+            })
+            if feedback:
+                record = _append_feedback(project, feedback, job_id=batch["jobId"])
+                batch["parameters"]["feedbackId"] = record["feedbackId"]
+        return _run_batch(store, batch_id=batch["jobId"], payloads=payloads, reusable={},
+                          client=client, poll_seconds=poll_seconds, timeout_seconds=timeout_seconds)
 
 
 def resume_latest_batch(
     project_root: Path | str,
     *,
+    job_id: str | None = None,
     base_url: str | None = None,
     poll_seconds: float = 1.0,
     timeout_seconds: float = 1800.0,
     client_factory: Callable[..., AceStepClient] = AceStepClient,
 ) -> dict[str, Any]:
     store = ProjectStore(project_root)
-    project = store.load()
-    previous = next(
-        (job for job in reversed(project["jobs"]) if job["kind"] == "candidate-batch"),
-        None,
-    )
-    if previous is None:
-        raise ValueError("no candidate batch exists to resume")
-    parameters = previous["parameters"]
-    return generate_candidates(
-        project_root,
-        seeds=parameters["seeds"],
-        base_url=base_url or parameters["baseUrl"],
-        model=parameters["model"],
-        lm_model=parameters["lmModel"],
-        poll_seconds=poll_seconds,
-        timeout_seconds=timeout_seconds,
-        explicit_resume=True,
-        client_factory=client_factory,
-    )
+    with store.generation_lock():
+        project = store.load()
+        previous = resume_source(project, job_id)
+        payloads = frozen_batch_payloads(project, previous)
+        reusable = reusable_candidates(store, project, previous, payloads)
+        parameters = deepcopy(previous["parameters"])
+        parameters.update(explicitResume=True, resumeOfJobId=previous["jobId"], frozenPayloads=payloads)
+        if base_url is not None:
+            parameters["baseUrl"] = base_url
+        client = client_factory(parameters["baseUrl"])
+        with store.transaction() as project:
+            recover_jobs(store, project)
+            batch = _new_batch(store, project, parameters)
+        return _run_batch(store, batch_id=batch["jobId"], payloads=payloads, reusable=reusable,
+                          client=client, poll_seconds=poll_seconds, timeout_seconds=timeout_seconds)
 
 
 def repaint_candidate(
@@ -367,28 +398,37 @@ def repaint_candidate(
     *,
     start_seconds: float,
     end_seconds: float,
-    instruction: str,
     seed: int,
+    instruction: str | None = None,
+    style_prompt: str | None = None,
+    lyrics: str | None = None,
+    strength: str | None = None,
+    feedback: dict[str, Any] | None = None,
     candidate_id: str | None = None,
     base_url: str = DEFAULT_BASE_URL,
-    model: str = DEFAULT_DIT_MODEL,
-    lm_model: str = DEFAULT_LM_MODEL,
+    model: str | None = None,
+    lm_model: str | None = None,
     poll_seconds: float = 1.0,
     timeout_seconds: float = 1800.0,
     client_factory: Callable[..., AceStepClient] = AceStepClient,
 ) -> dict[str, Any]:
-    if start_seconds < 0 or end_seconds <= start_seconds:
-        raise ValueError("repaint range must satisfy 0 <= start < end")
+    if not math.isfinite(start_seconds) or not math.isfinite(end_seconds) or start_seconds < 0 or end_seconds <= start_seconds:
+        raise ValueError("repaint range must satisfy finite 0 <= start < end")
+    if strength is not None and strength not in REPAINT_STRENGTHS:
+        raise ValueError(f"strength must be one of: {', '.join(REPAINT_STRENGTHS)}")
+    if style_prompt is not None and not style_prompt.strip():
+        raise ValueError("style prompt must not be empty")
+    if lyrics is not None and not lyrics.strip():
+        raise ValueError("lyrics must not be empty; use [Instrumental] for no vocals")
     store = ProjectStore(project_root)
-    with store.locked():
+    client = client_factory(base_url)
+    with store.generation_lock():
         project = store.load()
         parent_id = candidate_id or project.get("selectedCandidateId")
         if not parent_id:
             raise ValueError("select a candidate or pass --candidate-id")
         parent = store.find_by_id(project, "candidates", "candidateId", parent_id)
-        parent_artifact = store.find_by_id(
-            project, "artifacts", "artifactId", parent["artifactId"]
-        )
+        parent_artifact = store.find_by_id(project, "artifacts", "artifactId", parent["artifactId"])
         valid, reason = store.verify_artifact(parent_artifact)
         if not valid:
             raise ValueError(reason)
@@ -396,78 +436,57 @@ def repaint_candidate(
         duration = inspect_wav(source)["durationSeconds"]
         if end_seconds > duration:
             raise ValueError(f"repaint end exceeds audio duration {duration:.3f}s")
-        client = client_factory(base_url)
-        adapter_info = client.health()
-        edit_range = {
-            "startSeconds": float(start_seconds),
-            "endSeconds": float(end_seconds),
+        # Editing an old version follows that version's lyrics/style/metas. Project
+        # defaults may have changed since then and must not leak into this revision.
+        original = store.find_by_id(project, "requests", "requestId", parent["requestId"])["parameters"]
+        source_inputs = {
+            "stylePrompt": original["prompt"], "lyricsNormalized": original["lyrics"],
+            "targetDurationSeconds": duration, "structure": original.get("project_structure"),
         }
+        for field, api_field in _META_FIELDS:
+            source_inputs[field] = original.get(api_field)
+        if lyrics is not None:
+            source_inputs["lyricsNormalized"] = lyrics.replace("\r\n", "\n").replace("\r", "\n")
+        edit_range = {"startSeconds": float(start_seconds), "endSeconds": float(end_seconds)}
         frozen = _frozen_generation_payload(
-            project,
-            seed=seed,
-            model=model,
-            lm_model=lm_model,
-            task_type="repaint",
-            parent_artifact_sha256=parent_artifact["sha256"],
-            edit_range=edit_range,
-            instruction=instruction,
+            {"inputs": source_inputs}, seed=seed,
+            model=model or original.get("model", DEFAULT_DIT_MODEL),
+            lm_model=lm_model or original.get("lm_model_path", DEFAULT_LM_MODEL),
+            task_type="repaint", parent_artifact_sha256=parent_artifact["sha256"],
+            edit_range=edit_range, instruction=instruction,
+            style_prompt=style_prompt.strip() if style_prompt is not None else None,
+            repaint_strength=REPAINT_STRENGTHS[strength] if strength else None,
         )
-        request = _append_request(project, frozen, adapter_info=adapter_info)
-        job = store.append_job(
-            project,
-            kind="repaint-candidate",
-            parameters={"requestId": request["requestId"], "parentCandidateId": parent_id},
+        adapter_info = client.health()
+        with store.transaction() as project:
+            recover_jobs(store, project)
+            request = _append_request(project, frozen, adapter_info=adapter_info)
+            job = store.append_job(project, kind="repaint-candidate", parameters={
+                "requestId": request["requestId"], "parentCandidateId": parent_id, "strength": strength,
+            })
+            if feedback:
+                record = _append_feedback(project, feedback, job_id=job["jobId"])
+                job["parameters"]["feedbackId"] = record["feedbackId"]
+            store.transition_job(job, "running", stage="submitting")
+        candidate_id = execute_candidate(
+            store, client, request=request, job_id=job["jobId"], api_payload=_api_payload(frozen),
+            poll_seconds=poll_seconds, timeout_seconds=timeout_seconds, source=source,
+            parent_candidate_id=parent_id, edit_range=edit_range,
+            context_range={"startSeconds": 0.0, "endSeconds": duration},
         )
-        store.transition_job(job, "running", stage="submitting", progress=0.0)
-        store.save(project)
-        try:
-            task_id = client.submit(_api_payload(frozen), source_audio=source)
-            job["remoteTaskId"] = task_id
+        return {"jobId": job["jobId"], "candidateId": candidate_id}
 
-            def progress(state: dict[str, Any]) -> None:
-                job["stage"] = str(state["stage"])
-                job["progress"] = float(state["progress"])
-                store.save(project)
 
-            result = client.wait(
-                task_id,
-                poll_seconds=poll_seconds,
-                timeout_seconds=timeout_seconds,
-                on_progress=progress,
-            )
-            file_path = str(result.get("file") or "")
-            if not file_path:
-                raise RuntimeError("ACE repaint succeeded without an audio file")
-            destination = (
-                store.root
-                / "artifacts"
-                / "repaints"
-                / f"{job['jobId']}-seed-{seed}.wav"
-            )
-            client.download(file_path, destination)
-            candidate = _record_generated_candidate(
-                store,
-                project,
-                request=request,
-                job=job,
-                destination=destination,
-                parent_candidate_id=parent_id,
-                edit_range=edit_range,
-                context_range={"startSeconds": 0.0, "endSeconds": duration},
-            )
-            store.transition_job(job, "succeeded", stage="verified", progress=1.0)
-            job["remoteResult"] = {
-                key: result.get(key)
-                for key in ("generation_info", "seed_value", "lm_model", "dit_model", "metas")
-            }
+def revise_inputs(project_root: Path | str, **changes: Any) -> dict[str, Any] | None:
+    """Edit title/style/lyrics/duration/metas for future requests; history is kept."""
+
+    store = ProjectStore(project_root)
+    with store.locked():
+        project = store.load()
+        revision = _revise_inputs(project, **changes)
+        if revision is not None:
             store.save(project)
-            return {"jobId": job["jobId"], "candidateId": candidate["candidateId"]}
-        except Exception as error:
-            store.transition_job(
-                job, "failed", stage="failed", error=f"{type(error).__name__}: {error}"
-            )
-            store.save(project)
-            raise
+        return revision
 
 
 def select_candidate(project_root: Path | str, candidate_id: str) -> dict[str, Any]:
@@ -513,6 +532,12 @@ def undo_selection(project_root: Path | str) -> dict[str, Any]:
             raise ValueError("no candidate selection can be undone")
         current = project.get("selectedCandidateId")
         restored = selection["before"]["selectedCandidateId"]
+        if restored is not None:
+            candidate = store.find_by_id(project, "candidates", "candidateId", restored)
+            artifact = store.find_by_id(project, "artifacts", "artifactId", candidate["artifactId"])
+            valid, reason = store.verify_artifact(artifact)
+            if not valid:
+                raise ValueError(reason)
         project["selectedCandidateId"] = restored
         revision = {
             "revisionId": new_id("revision"),
@@ -572,7 +597,14 @@ def _copy_atomic(source: Path, destination: Path) -> None:
         shutil.copyfile(source, temporary)
         with temporary.open("rb") as handle:
             os.fsync(handle.fileno())
-        os.replace(temporary, destination)
+        # Atomic publish without replacing an existing artifact, even if another
+        # exporter won the filename between validation and this copy.
+        os.link(temporary, destination)
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -594,6 +626,14 @@ def export_selected(
         if not valid:
             raise ValueError(reason)
         source = store.resolve_artifact(source_artifact)
+        external = None
+        if output is not None:
+            requested = Path(output).expanduser().absolute()
+            external = requested.resolve()
+            if external.is_relative_to(store.root):
+                raise ValueError("export output must be outside the project; omit --output for an internal export")
+            if requested.exists() or requested.is_symlink():
+                raise FileExistsError("export output already exists; choose a new filename")
         job = store.append_job(
             project,
             kind="export",
@@ -603,6 +643,7 @@ def export_selected(
         store.save(project)
         internal = store.root / "exports" / f"{job['jobId']}-{selected_id}.wav"
         try:
+            store.relative_path(internal)
             _copy_atomic(source, internal)
             if sha256_file(internal) != source_artifact["sha256"]:
                 raise RuntimeError("export hash differs from the selected candidate")
@@ -613,8 +654,7 @@ def export_selected(
                 created_by_job_id=job["jobId"],
                 requested_duration_seconds=source_artifact["audio"]["durationSeconds"],
             )
-            if output is not None:
-                external = Path(output).expanduser().resolve()
+            if external is not None:
                 _copy_atomic(internal, external)
                 if sha256_file(external) != artifact["sha256"]:
                     raise RuntimeError("external export hash verification failed")

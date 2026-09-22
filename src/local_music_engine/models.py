@@ -14,6 +14,7 @@ class JobStatus(StrEnum):
     FAILED = "failed"
     CANCELLING = "cancelling"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
 
 
 TERMINAL_JOB_STATUSES = {
@@ -21,22 +22,25 @@ TERMINAL_JOB_STATUSES = {
     JobStatus.PARTIAL,
     JobStatus.FAILED,
     JobStatus.CANCELLED,
+    JobStatus.INTERRUPTED,
 }
 
 ALLOWED_JOB_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
-    JobStatus.QUEUED: {JobStatus.RUNNING, JobStatus.CANCELLED, JobStatus.FAILED},
+    JobStatus.QUEUED: {JobStatus.RUNNING, JobStatus.CANCELLED, JobStatus.FAILED, JobStatus.INTERRUPTED},
     JobStatus.RUNNING: {
         JobStatus.SUCCEEDED,
         JobStatus.PARTIAL,
         JobStatus.FAILED,
         JobStatus.CANCELLING,
         JobStatus.CANCELLED,
+        JobStatus.INTERRUPTED,
     },
-    JobStatus.CANCELLING: {JobStatus.CANCELLED, JobStatus.FAILED},
+    JobStatus.CANCELLING: {JobStatus.CANCELLED, JobStatus.FAILED, JobStatus.INTERRUPTED},
     JobStatus.SUCCEEDED: set(),
     JobStatus.PARTIAL: set(),
     JobStatus.FAILED: set(),
     JobStatus.CANCELLED: set(),
+    JobStatus.INTERRUPTED: set(),
 }
 
 
@@ -49,6 +53,9 @@ class AudioMetadata(TypedDict):
     peak: float
     rms: float
     silentFraction: float
+    analysisWindowSeconds: NotRequired[float]
+    regions: NotRequired[dict[str, list[dict[str, float]]]]
+    regionCounts: NotRequired[dict[str, int]]
 
 
 class ArtifactRecord(TypedDict):

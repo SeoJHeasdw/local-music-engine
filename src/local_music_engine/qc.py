@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import sys
+from array import array
 import warnings
 import wave
 from pathlib import Path
@@ -37,30 +39,58 @@ def inspect_wav(path: Path | str) -> dict[str, Any]:
             if sample_width not in {1, 2, 3, 4}:
                 raise AudioIntegrityError(f"unsupported PCM sample width: {sample_width}")
 
-            maximum = float((1 << (sample_width * 8 - 1)) - 1)
+            maximum = float(1 << (sample_width * 8 - 1))
             peak_integer = 0
             square_sum = 0.0
             sample_count = 0
             silent_samples = 0
-            silent_integer_threshold = max(1, int(maximum * 0.0001))
+            silent_integer_threshold = int(maximum * 0.0001)
+            # Fifty-millisecond windows locate observations for listening without
+            # guessing words, beats, or whether an intentional rest is a defect.
+            window_frames = max(1, round(sample_rate * 0.05))
+            decoded_frames = 0
+            spans: dict[str, list[dict[str, float]]] = {"silence": [], "peak": []}
+            starts: dict[str, int | None] = {"silence": None, "peak": None}
+
+            def close_span(kind: str, end_frame: int) -> None:
+                start = starts[kind]
+                if start is not None:
+                    if kind != "silence" or end_frame - start >= sample_rate * 0.5:
+                        spans[kind].append({"startSeconds": start / sample_rate, "endSeconds": end_frame / sample_rate})
+                    starts[kind] = None
+
             while True:
-                chunk = audio.readframes(65_536)
+                chunk = audio.readframes(window_frames)
                 if not chunk:
                     break
-                peak_integer = max(peak_integer, audioop.max(chunk, sample_width))
+                if len(chunk) % (sample_width * channels):
+                    raise AudioIntegrityError("WAV PCM ends in an incomplete frame")
+                # WAV stores 8-bit samples unsigned; audioop operates on signed PCM.
+                if sample_width == 1:
+                    chunk = audioop.bias(chunk, 1, -128)
+                chunk_peak = audioop.max(chunk, sample_width)
+                peak_integer = max(peak_integer, chunk_peak)
                 chunk_rms = audioop.rms(chunk, sample_width)
                 chunk_samples = len(chunk) // sample_width
                 square_sum += float(chunk_rms * chunk_rms) * chunk_samples
                 sample_count += chunk_samples
-                # audioop.findmax cannot count silence. Iterate decoded integers only for QC.
-                for offset in range(0, len(chunk), sample_width):
-                    raw = chunk[offset : offset + sample_width]
-                    if sample_width == 1:
-                        value = raw[0] - 128
+                integers = array({1: "b", 2: "h", 3: "i", 4: "i"}[sample_width])
+                integers.frombytes(audioop.lin2lin(chunk, 3, 4) if sample_width == 3 else chunk)
+                if sys.byteorder != "little" and integers.itemsize > 1:
+                    integers.byteswap()
+                threshold = silent_integer_threshold * (256 if sample_width == 3 else 1)
+                silent_samples += sum(abs(value) <= threshold for value in integers)
+                for kind, active in (("silence", chunk_peak <= silent_integer_threshold), ("peak", chunk_peak / maximum >= 0.999)):
+                    if active:
+                        if starts[kind] is None:
+                            starts[kind] = decoded_frames
                     else:
-                        value = int.from_bytes(raw, "little", signed=True)
-                    if abs(value) <= silent_integer_threshold:
-                        silent_samples += 1
+                        close_span(kind, decoded_frames)
+                decoded_frames += chunk_samples // channels
+            for kind in starts:
+                close_span(kind, decoded_frames)
+            if decoded_frames != frames:
+                raise AudioIntegrityError(f"WAV PCM is truncated: expected {frames} frames, decoded {decoded_frames}")
     except (wave.Error, EOFError) as error:
         raise AudioIntegrityError(f"WAV decode failed: {error}") from error
 
@@ -75,6 +105,11 @@ def inspect_wav(path: Path | str) -> dict[str, Any]:
         "peak": min(1.0, peak_integer / maximum),
         "rms": math.sqrt(square_sum / sample_count) / maximum,
         "silentFraction": silent_samples / sample_count,
+        "analysisWindowSeconds": window_frames / sample_rate,
+        # Bound manifest size for pathological audio. Keep the longest observations
+        # and record the full count so omitted regions are never presented as absent.
+        "regions": {kind: sorted(sorted(ranges, key=lambda r: r["endSeconds"] - r["startSeconds"], reverse=True)[:32], key=lambda r: r["startSeconds"]) for kind, ranges in spans.items()},
+        "regionCounts": {kind: len(ranges) for kind, ranges in spans.items()},
     }
 
 
@@ -106,6 +141,7 @@ def artifact_and_findings(
         message: str,
         observed: dict[str, Any],
         threshold: dict[str, Any],
+        region: dict[str, float] | None = None,
     ) -> None:
         findings.append(
             {
@@ -117,8 +153,8 @@ def artifact_and_findings(
                 "observed": observed,
                 "threshold": threshold,
                 "confidence": 1.0,
-                "startSeconds": None,
-                "endSeconds": None,
+                "startSeconds": region["startSeconds"] if region else None,
+                "endSeconds": region["endSeconds"] if region else None,
                 "createdAt": utc_now(),
             }
         )
@@ -183,4 +219,14 @@ def artifact_and_findings(
             },
             {"warningDifferenceAboveSeconds": 0.5},
         )
+    for kind, regions in audio["regions"].items():
+        for region in regions:
+            add(
+                f"{kind}_region", "warning",
+                "Near-digital silence; listen to decide if this rest is intentional." if kind == "silence"
+                else "Near-full-scale peak in this window; listen for distortion.",
+                {"durationSeconds": region["endSeconds"] - region["startSeconds"], "totalRegions": audio["regionCounts"][kind], "shownRegions": len(regions)},
+                {"windowSeconds": audio["analysisWindowSeconds"], **({"minimumSeconds": 0.5, "absoluteAmplitudeAtOrBelow": 0.0001} if kind == "silence" else {"peakAtOrAbove": 0.999})},
+                region,
+            )
     return artifact, findings

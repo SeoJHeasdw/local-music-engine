@@ -18,6 +18,8 @@
 uv sync --python 3.12.12 --group dev
 uv run python -m compileall -q src tests
 uv run pytest
+npm run check:app
+npm run test:app
 ```
 
 실제 추론 검사는 별도로 ACE 서버를 띄운 뒤 수행한다. 실제 추론을 mock 검사로 대체했다고

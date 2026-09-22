@@ -13,6 +13,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from .local_http import open_local
+
 
 class AceApiError(RuntimeError):
     pass
@@ -59,7 +61,7 @@ class AceStepClient:
             f"{self.base_url}{path}", data=body, method=method, headers=headers
         )
         try:
-            with urllib.request.urlopen(
+            with open_local(
                 request, timeout=timeout or self.request_timeout_seconds
             ) as response:
                 return response.read()
@@ -69,13 +71,21 @@ class AceStepClient:
         except urllib.error.URLError as error:
             raise AceApiError(f"ACE API unavailable: {error.reason}") from error
 
-    def _json(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _json(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
         raw = self._request(
             method,
             path,
             body=body,
             content_type="application/json" if body is not None else None,
+            timeout=timeout,
         )
         decoded = json.loads(raw)
         if isinstance(decoded, dict) and decoded.get("error"):
@@ -87,6 +97,36 @@ class AceStepClient:
         data = response.get("data")
         if not isinstance(data, dict) or data.get("status") != "ok":
             raise AceApiError(f"unhealthy ACE API response: {response!r}")
+        return data
+
+    def create_sample(
+        self,
+        query: str,
+        *,
+        vocal_language: str = "ko",
+        instrumental: bool = False,
+        timeout_seconds: float = 300.0,
+    ) -> dict[str, Any]:
+        """Ask ACE's own 5Hz LM to turn a plain description into caption, lyrics and metas.
+
+        The first call may load the LM, so the timeout is much longer than a status call.
+        """
+
+        if not query.strip():
+            raise ValueError("describe the song before asking for a draft")
+        response = self._json(
+            "POST",
+            "/v1/create_sample",
+            {
+                "query": query.strip(),
+                "vocal_language": vocal_language,
+                "instrumental": instrumental,
+            },
+            timeout=timeout_seconds,
+        )
+        data = response.get("data")
+        if not isinstance(data, dict) or not str(data.get("caption") or "").strip():
+            raise AceApiError(f"ACE API returned no draft: {response!r}")
         return data
 
     def submit(self, request: dict[str, Any], source_audio: Path | None = None) -> str:
@@ -164,7 +204,7 @@ class AceStepClient:
                 os.fsync(handle.fileno())
             if temporary.stat().st_size == 0:
                 raise AceApiError("ACE API returned an empty audio file")
-            os.replace(temporary, destination)
+            os.link(temporary, destination)
         finally:
             temporary.unlink(missing_ok=True)
 
