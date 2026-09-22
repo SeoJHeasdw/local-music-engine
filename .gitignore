@@ -18,6 +18,7 @@ build/
 .venv/
 venv/
 env/
+.runtime/
 .Python
 pip-log.txt
 .pytest_cache/
@@ -43,6 +44,8 @@ yarn-error.log*
 # Generated audio / model artifacts
 artifacts/
 outputs/
+projects/
+exports/
 cache/
 *.wav
 *.mp3

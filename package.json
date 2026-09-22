@@ -1,0 +1,17 @@
+{
+  "name": "local-music-engine-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "electron-app/dist/main.mjs",
+  "scripts": {
+    "build:app": "node electron-app/build.mjs",
+    "check:app": "tsc --noEmit -p electron-app/tsconfig.json",
+    "start:app": "npm run build:app && electron ."
+  },
+  "devDependencies": {
+    "electron": "44.4.3",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

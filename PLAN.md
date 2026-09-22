@@ -1,8 +1,8 @@
 # Local Music Engine 구현 계획
 
-작성일: 2026-09-22  
-상태: 계획만 작성. 구현·설치·모델 다운로드·음악 생성·Git 초기화는 하지 않았다.  
-구현 담당: 사용자가 별도로 작업을 맡길 GPT-Sol
+작성일: 2026-09-22
+상태: P0, P1과 P2 후보 비교 UI, P3 CLI repaint 기반을 구현했다. 상세는 `docs/HANDOFF.md` 참조.
+구현 시작: 2026-09-22
 
 목표 위치는 `/Users/jaehoseo/Desktop/vswrk/javis/local-music-engine`이다.
 현재 작업에서는 해당 경로 생성과 프로젝트 외부 파일 쓰기가 차단되어,

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "local-music-engine"
+version = "0.1.0"
+description = "Local, provenance-first Korean music generation workflow"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "local-music-engine contributors" }]
+dependencies = []
+
+[project.scripts]
+music-engine = "local_music_engine.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/local_music_engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[dependency-groups]
+dev = ["pytest>=8.3,<9"]
