@@ -1,0 +1,73 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.Python
+pip-log.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Node / Electron
+node_modules/
+out/
+.cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# SQLite
+*.sqlite
+*.sqlite3
+*.db
+
+# Generated audio / model artifacts
+artifacts/
+outputs/
+cache/
+*.wav
+*.mp3
+*.flac
+*.ogg
+models/
+weights/
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+*.bin
+
+# Logs
+logs/
+*.log
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
