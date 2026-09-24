@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shutil
 import tempfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .ace_adapter import AceStepClient
+from .ace_adapter import AceApiError, AceStepClient
 from .execution import execute_candidate
 from .jobs import (ACTIVE_STATUSES, frozen_batch_payloads, recover_jobs, reusable_candidates, resume_source)
 from .qc import artifact_and_findings, inspect_wav
@@ -18,13 +19,63 @@ from .storage import ProjectStore, fingerprint, new_id, sha256_file, utc_now
 
 DEFAULT_BASE_URL = "http://127.0.0.1:18001"
 DEFAULT_DIT_MODEL = "acestep-v15-turbo"
-DEFAULT_LM_MODEL = "acestep-5Hz-lm-0.6B"
+DEFAULT_LM_MODEL = "acestep-5Hz-lm-4B"
+# ACE's server default is 0.85. On the same six seeds of a Korean/English song
+# (turbo + 4B LM, 2026-09-24), 0.6 lowered the ASR-measured Korean CER from 0.35 to
+# 0.19 and English WER from 0.45 to 0.32. ASR is a proxy, not a listening verdict.
+DEFAULT_LM_TEMPERATURE = 0.6
 
 # ACE's balanced repaint mode takes 0 (keep the source) to 1 (pure diffusion).
 REPAINT_STRENGTHS = {"light": 0.25, "medium": 0.5, "strong": 0.8}
 INSTRUMENTAL_LYRICS = "[Instrumental]"
 # ACE reads these optional musical metas; the project stores them under its own names.
 _META_FIELDS = (("bpm", "bpm"), ("keyScale", "key_scale"), ("timeSignature", "time_signature"))
+_HANGUL = re.compile(r"[가-힣]")
+_LATIN = re.compile(r"[A-Za-z]")
+_SECTION_TAG = re.compile(r"\s*\[[^\]]*\]\s*")
+
+
+def _dit_sampling(model: str) -> dict[str, Any]:
+    """Step count and guidance that fit the DiT checkpoint.
+
+    Turbo checkpoints are distilled for 8 steps and ignore CFG. SFT/base checkpoints
+    are trained for the full schedule with classifier-free guidance (ACE Tutorial:
+    50 steps, CFG around 7); run at 8 steps they are simply under-denoised.
+    """
+
+    if "turbo" in model:
+        return {"inference_steps": 8}
+    return {"inference_steps": 50, "guidance_scale": 7.0}
+
+
+def _vocal_language(lyrics: str) -> str:
+    """ACE's lyric header takes one language. Korean leads whenever Hangul is sung,
+    including bilingual lyrics; English-only lyrics are not labelled Korean."""
+
+    sung = "\n".join(line for line in lyrics.splitlines() if not _SECTION_TAG.fullmatch(line))
+    if _HANGUL.search(sung):
+        return "ko"
+    if _LATIN.search(sung):
+        return "en"
+    return "ko"
+
+
+def _require_loaded_models(adapter_info: dict[str, Any], frozen: dict[str, Any]) -> None:
+    """ACE loads one DiT and one LM at start and silently serves any other requested
+    name with them. Refuse, so project.json never records a model that did not run."""
+
+    loaded = adapter_info.get("loaded_model")
+    if loaded and loaded != frozen["model"]:
+        raise AceApiError(
+            f"ACE server has DiT {loaded} loaded, not the requested {frozen['model']}; "
+            "restart the engine with that model (MUSIC_ENGINE_ACE_DIT_MODEL) or request the loaded one"
+        )
+    loaded_lm = adapter_info.get("loaded_lm_model")
+    if frozen.get("thinking") and loaded_lm and loaded_lm != frozen["lm_model_path"]:
+        raise AceApiError(
+            f"ACE server has LM {loaded_lm} loaded, not the requested {frozen['lm_model_path']}; "
+            "restart the engine with that model (MUSIC_ENGINE_ACE_LM_MODEL) or request the loaded one"
+        )
 
 
 def _frozen_generation_payload(
@@ -39,16 +90,17 @@ def _frozen_generation_payload(
     instruction: str | None = None,
     style_prompt: str | None = None,
     repaint_strength: float | None = None,
+    lm_temperature: float = DEFAULT_LM_TEMPERATURE,
 ) -> dict[str, Any]:
     inputs = project["inputs"]
     payload: dict[str, Any] = {
         "prompt": style_prompt if style_prompt is not None else inputs["stylePrompt"],
         "lyrics": inputs["lyricsNormalized"],
         "thinking": task_type == "text2music",
-        "vocal_language": "ko",
+        "vocal_language": _vocal_language(inputs["lyricsNormalized"]),
         "audio_format": "wav",
         "audio_duration": float(inputs["targetDurationSeconds"]),
-        "inference_steps": 8,
+        **_dit_sampling(model),
         "use_random_seed": False,
         "seed": int(seed),
         "batch_size": 1,
@@ -69,6 +121,8 @@ def _frozen_generation_payload(
                 "use_cot_caption": False,
                 "use_cot_language": False,
                 "constrained_decoding": True,
+                # The LM plans melody and phrasing only for text2music; repaint skips it.
+                "lm_temperature": float(lm_temperature),
             }
         )
     if edit_range is not None:
@@ -96,6 +150,7 @@ def _api_payload(frozen: dict[str, Any]) -> dict[str, Any]:
         "audio_format",
         "audio_duration",
         "inference_steps",
+        "guidance_scale",
         "use_random_seed",
         "seed",
         "batch_size",
@@ -106,6 +161,7 @@ def _api_payload(frozen: dict[str, Any]) -> dict[str, Any]:
         "use_cot_caption",
         "use_cot_language",
         "constrained_decoding",
+        "lm_temperature",
         "repainting_start",
         "repainting_end",
         "repaint_mode",
@@ -266,6 +322,7 @@ def _run_batch(
                 continue
             if adapter_info is None:
                 adapter_info = client.health()
+            _require_loaded_models(adapter_info, frozen)
             with store.transaction() as project:
                 request = _append_request(project, frozen, adapter_info=adapter_info)
                 job = store.append_job(
@@ -323,6 +380,7 @@ def generate_candidates(
     base_url: str = DEFAULT_BASE_URL,
     model: str = DEFAULT_DIT_MODEL,
     lm_model: str = DEFAULT_LM_MODEL,
+    lm_temperature: float = DEFAULT_LM_TEMPERATURE,
     poll_seconds: float = 1.0,
     timeout_seconds: float = 1800.0,
     style_prompt: str | None = None,
@@ -334,6 +392,8 @@ def generate_candidates(
 ) -> dict[str, Any]:
     store = ProjectStore(project_root)
     seed_list = [int(seed) for seed in seeds]
+    if not math.isfinite(lm_temperature) or not 0.0 < lm_temperature <= 2.0:
+        raise ValueError("lm temperature must be in (0, 2]")
     if not seed_list:
         raise ValueError("at least one seed is required")
     if len(set(seed_list)) != len(seed_list):
@@ -353,7 +413,10 @@ def generate_candidates(
                 if value is not None:
                     changes[field] = value
             _revise_inputs(project, **changes, reason="feedback" if feedback else "new-batch")
-            payloads = [_frozen_generation_payload(project, seed=seed, model=model, lm_model=lm_model) for seed in seed_list]
+            payloads = [
+                _frozen_generation_payload(project, seed=seed, model=model, lm_model=lm_model, lm_temperature=lm_temperature)
+                for seed in seed_list
+            ]
             batch = _new_batch(store, project, {
                 "seeds": seed_list, "model": model, "lmModel": lm_model,
                 "baseUrl": base_url, "explicitResume": False, "frozenPayloads": payloads,
@@ -458,6 +521,7 @@ def repaint_candidate(
             repaint_strength=REPAINT_STRENGTHS[strength] if strength else None,
         )
         adapter_info = client.health()
+        _require_loaded_models(adapter_info, frozen)
         with store.transaction() as project:
             recover_jobs(store, project)
             request = _append_request(project, frozen, adapter_info=adapter_info)

@@ -22,6 +22,7 @@ from .workflow import (
     DEFAULT_BASE_URL,
     DEFAULT_DIT_MODEL,
     DEFAULT_LM_MODEL,
+    DEFAULT_LM_TEMPERATURE,
     REPAINT_STRENGTHS,
     export_selected,
     generate_candidates,
@@ -103,6 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--base-url", default=DEFAULT_BASE_URL)
     generate.add_argument("--model", default=DEFAULT_DIT_MODEL)
     generate.add_argument("--lm-model", default=DEFAULT_LM_MODEL)
+    generate.add_argument("--lm-temperature", type=float, default=DEFAULT_LM_TEMPERATURE,
+                          help="sampling temperature of the LM that plans melody and phrasing")
     generate.add_argument("--style", help="revise the project style prompt first")
     generate.add_argument("--lyrics", help="revise the project lyrics first")
     generate.add_argument("--bpm", type=int, help="revise bpm first; 0 clears it")
@@ -174,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     repaint.add_argument("--feedback-json", type=_parse_feedback)
     repaint.add_argument("--candidate-id")
+    repaint.add_argument("--model", help="DiT for this repaint; defaults to the parent version's model")
     repaint.add_argument("--base-url", default=DEFAULT_BASE_URL)
     repaint.add_argument("--poll-seconds", type=float, default=1.0)
     repaint.add_argument("--timeout-seconds", type=float, default=1800.0)
@@ -268,6 +272,7 @@ def run(args: argparse.Namespace) -> Any:
             base_url=args.base_url,
             model=args.model,
             lm_model=args.lm_model,
+            lm_temperature=args.lm_temperature,
             style_prompt=args.style,
             lyrics=args.lyrics,
             bpm=args.bpm,
@@ -338,6 +343,7 @@ def run(args: argparse.Namespace) -> Any:
             feedback=args.feedback_json,
             candidate_id=args.candidate_id,
             base_url=args.base_url,
+            model=args.model,
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
         )

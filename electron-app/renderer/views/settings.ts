@@ -202,7 +202,7 @@ export function renderSettings(): void {
       ),
       section(
         "고급",
-        "모델 이름을 바꾸기 전에 엔진에 해당 모델이 받아져 있어야 해요.",
+        "바꾼 모델은 엔진을 껐다 켜야 적용돼요. 처음 쓰는 모델은 켤 때 내려받아요.",
         row("곡 생성 모델", null, h("input", { class: "input mono-input", value: settings.ditModel, onChange: (event: Event) => void save({ ditModel: (event.target as HTMLInputElement).value }) })),
         row("작사·구조 모델", null, h("input", { class: "input mono-input", value: settings.lmModel, onChange: (event: Event) => void save({ lmModel: (event.target as HTMLInputElement).value }) })),
       ),

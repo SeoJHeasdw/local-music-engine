@@ -17,7 +17,7 @@ function defaults(): Settings {
     aceBaseUrl: "http://127.0.0.1:18001",
     aceAutoStart: true,
     ditModel: "acestep-v15-turbo",
-    lmModel: "acestep-5Hz-lm-0.6B",
+    lmModel: "acestep-5Hz-lm-4B",
     defaultVersions: 2,
     defaultDurationSeconds: 120,
     repaintStrength: "medium",

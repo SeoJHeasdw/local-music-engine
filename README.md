@@ -25,11 +25,20 @@ Apple Silicon Mac에서 한국어 곡을 만들고, 들어 보고, 말로 고치
 
 ```bash
 chmod +x scripts/*.sh app.sh
-./scripts/bootstrap_ace.sh   # ACE 런타임을 .runtime/에 설치. 첫 서버 시작 때 모델 약 11GB를 받는다
+./scripts/bootstrap_ace.sh   # ACE 런타임을 .runtime/에 설치. 첫 서버 시작 때 모델 약 17GB를 받는다
 ./app.sh                     # 엔진 Python·Electron 환경을 준비하고 앱을 연다
 ```
 
 앱이 ACE 서버를 직접 켜고(`127.0.0.1:18001`에만 바인딩), 앱을 닫으면 앱이 켠 서버만 끈다.
+서버는 켤 때 DiT·LM 하나씩만 올린다. 앱은 설정의 모델로 켜고, 터미널에서는
+`MUSIC_ENGINE_ACE_DIT_MODEL`·`MUSIC_ENGINE_ACE_LM_MODEL`로 고른다. 켜진 모델과 요청 모델이 다르면
+엔진이 생성을 거부한다. 기본값은 `acestep-v15-turbo` + `acestep-5Hz-lm-4B`(약 22GB)다.
+
+음악 엔진과 로컬 AI 도우미(예: Ollama `qwen3.6:27b`, 약 17GB)는 36GB Mac에 함께 올라가지 않는다.
+앱은 도우미를 부를 때 자기가 켠 엔진을 잠시 끄고, 답을 받으면 다시 켠다(약 40초). 엔진을 켜기
+전에는 메모리에 남은 도우미 모델을 내린다. 곡을 만드는 중에는 도우미를 부르지 않으며, 앱 밖에서
+켠 엔진이 떠 있으면 도우미 대신 그 엔진을 끄라고 안내한다. CLI로 `draft`·`plan --assistant ollama`를
+쓸 때는 직접 엔진을 끈 뒤 부른다.
 이미 터미널에서 켠 서버가 있으면 그대로 쓴다.
 
 ## 앱

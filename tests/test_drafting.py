@@ -77,3 +77,33 @@ def test_llm_draft_unescapes_literal_newlines() -> None:
     answer = {"title": "밤", "caption": "Korean ballad", "lyrics": "[Verse]\\n빗소리\\n[Chorus]\\n괜찮아"}
     result = draft_from_llm_answer(json.dumps(answer, ensure_ascii=False), instrumental=False, model="qwen")
     assert result["lyrics"] == "[Verse]\n빗소리\n[Chorus]\n괜찮아"
+
+
+def test_bilingual_llm_draft_keeps_english_hook() -> None:
+    # qwen3.6:27b's answer to "한국어랑 영어가 섞인 밝은 케이팝 ... 후렴은 영어 훅" (2026-09-24).
+    lyrics = (
+        "[Verse]\n따뜻한 바람이 불어와\n마음까지 가볍게 해줘\n\n[Pre-Chorus]\nStep by step, we go\n"
+        "Let the sunshine flow\n\n[Chorus]\nShining bright like summer days\nFeel the heat in every way"
+    )
+    answer = {"title": "여름 햇살", "caption": "K-pop, bright, female vocal", "lyrics": lyrics}
+    result = draft_from_llm_answer(json.dumps(answer, ensure_ascii=False), instrumental=False, model="qwen")
+    assert result["lyrics"] == lyrics
+
+
+def test_line_marked_korean_must_be_hangul() -> None:
+    assert usable_korean_lyrics("[Verse]\n[ko] 새벽빛이 내려와\n[ko] maeum-eul kkaeune") is None
+    assert usable_korean_lyrics("[Chorus]\nShine on me, 내 곁에\nForever in your glow") == "[Chorus]\nShine on me, 내 곁에\nForever in your glow"
+
+
+def test_failed_fallback_keeps_the_llm_reason() -> None:
+    class OfflineEngine(FakeSampleClient):
+        def create_sample(self, query: str, **kwargs: Any) -> dict[str, Any]:
+            raise ConnectionRefusedError("engine is off")
+
+    config = LlmConfig(base_url="http://127.0.0.1:9", model="none", timeout_seconds=1)
+    try:
+        draft_song("잔잔한 발라드", instrumental=False, duration_seconds=60, base_url="http://127.0.0.1:1", llm=config, client_factory=OfflineEngine)
+    except Exception as error:
+        assert "LLM draft failed" in str(error) and "engine is off" in str(error)
+    else:
+        raise AssertionError("both drafts failed; the error must say so")

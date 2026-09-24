@@ -2,6 +2,42 @@
 
 업데이트: 2026-09-22
 
+## 2026-09-24 한·영 30초 곡 제작과 엔진 진단
+
+실제 ACE(M4 Max 36GB)로 한·영 혼용 30초 곡 `projects/shine-on-me`를 만들며 찾은 문제와 수정이다.
+가사 정확도는 Demucs 보컬 분리 + Whisper large-v3-turbo·Qwen3-ASR 받아쓰기(한국어 CER, 영어 WER)로
+쟀다. ASR은 청취 판정이 아니며 모든 후보는 `unreviewed`다.
+
+- **LM seed 무시 (ACE 버그)**: 곡 하나 요청(`batch_size=1`)의 MLX LM 경로가 seed를 쓰지 않아 같은
+  seed가 매번 다른 곡이 됐다. `scripts/ace_api_server.py`가 요청 seed로 LM 샘플러를 고정한다.
+  수정 후 서버를 다시 켜도 같은 seed의 WAV가 비트 단위로 같다.
+- **DiT 가중치 이중 적재**: MPS에 float32 PyTorch DiT와 MLX 사본이 함께 남아 turbo+4B LM이 27GB,
+  XL은 47GB였고 macOS가 서버를 종료했다. 같은 런처가 MLX 초기화 뒤 PyTorch 디코더를 내려
+  turbo+4B LM이 22GB가 됐다(출력은 수정 전과 비트 단위로 같음). XL은 적재 중 최고치 때문에
+  이 Mac에서 여전히 켜지지 않는다.
+- **모델 설정 무시**: 시작 스크립트가 turbo+0.6B를 고정했고 ACE는 요청한 다른 모델 이름을 조용히
+  무시했다. `MUSIC_ENGINE_ACE_DIT_MODEL`·`MUSIC_ENGINE_ACE_LM_MODEL`로 시작하고, 앱이 설정값을
+  넘기며, 엔진은 켜진 모델과 요청이 다르면 생성·repaint를 거부한다.
+- **SFT 계열 무보컬**: `acestep-v15-sft`, `acestep-v15-xl-sft`는 CFG·LM 유무와 관계없이 보컬이
+  없는 곡을 냈다(보컬/반주 −18~−53dB). 이 런타임에서는 turbo만 쓴다. SFT를 고르면 50 step·CFG 7로
+  요청한다.
+- **LM 온도**: 같은 6 seed 비교에서 0.85→0.6이 한국어 CER 0.35→0.19, 영어 WER 0.45→0.32.
+  기본값을 0.6으로 하고 `generate --lm-temperature`로 바꾼다. 1.7B LM(0.34/0.50)은 4B보다 나빴다.
+- **한·영 초안 거부**: 한글 줄 60% 규칙이 영어 훅이 있는 LLM 가사를 버렸고, 대체 경로 실패가 원래
+  이유를 가렸다. 이제 로마자 한국어만 거부하고 두 실패 이유를 함께 보인다. 영어만 있는 가사는
+  `vocal_language=en`으로 보낸다.
+- **repaint 한계**: 잘린 끝(22.5/23–30초)을 repaint한 9개 모두 끝은 자연스러워졌지만 마지막 두
+  줄을 부르지 않았다(구간 가사만 넘겨도 같음). 끝이 잘린 버전은 고치기보다 다른 seed를 고른다.
+
+최종 선택: seed 7112 (turbo + 4B LM, LM 온도 0.6), 한국어 CER 0.14, 영어 WER 0.07, 끝 −31.5dB.
+사람 청취 전이다.
+
+후속 설정: 기본 LM을 `acestep-5Hz-lm-4B`로 바꿨다(CLI·시작 스크립트·앱). 엔진과 로컬 도우미
+LLM이 동시에 메모리에 있지 않도록 앱이 도우미 호출 동안 자기가 켠 엔진을 끄고 되살린다
+(`electron-app/main/handoff.ts`). 엔진 시작 전에는 Ollama의 도우미 모델을 `keep_alive: 0`으로
+내린다(`/api/ps` 확인 후, 실제 Ollama에서 동작 확인). 이 Mac에서 쓰지 못하는 XL·SFT 가중치
+(약 42GB)는 지웠다. 다시 받으려면 설정에서 모델 이름을 바꾸고 엔진을 켜면 된다.
+
 ## Astra 추가 개선
 
 생성 중 즉시 평가 저장, 최초 입력 고정, 특정 작업 재개, SIGKILL 복구, 부모 버전 기반 수정,

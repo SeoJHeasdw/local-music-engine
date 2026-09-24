@@ -33,7 +33,7 @@ class FakeAceClient:
             "status": "ok",
             "version": "test",
             "loaded_model": "acestep-v15-turbo",
-            "loaded_lm_model": "acestep-5Hz-lm-0.6B",
+            "loaded_lm_model": "acestep-5Hz-lm-4B",
         }
 
     def submit(self, request: dict[str, Any], source_audio: Path | None = None) -> str:
@@ -231,3 +231,56 @@ def test_library_summarizes_without_hashing(tmp_path: Path) -> None:
     titles = sorted(row["title"] for row in rows)
     assert titles == ["broken", "곡"]
     assert next(row for row in rows if row["title"] == "broken")["error"]
+
+
+class RecordingAceClient(FakeAceClient):
+    payloads: list[dict[str, Any]] = []
+    loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
+
+    def health(self) -> dict[str, Any]:
+        return dict(super().health(), loaded_model=self.loaded[0], loaded_lm_model=self.loaded[1])
+
+    def submit(self, request: dict[str, Any], source_audio: Path | None = None) -> str:
+        self.payloads.append(request)
+        return super().submit(request, source_audio)
+
+
+def test_generation_refuses_a_model_the_server_did_not_load(tmp_path: Path) -> None:
+    make_project(tmp_path)
+    RecordingAceClient.payloads = []
+    RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-0.6B")
+    with pytest.raises(Exception, match="acestep-5Hz-lm-4B"):
+        generate_candidates(tmp_path, seeds=[1], lm_model="acestep-5Hz-lm-4B", client_factory=RecordingAceClient)
+    project = ProjectStore(tmp_path).load()
+    assert RecordingAceClient.payloads == [] and project["candidates"] == [] and project["requests"] == []
+    assert project["jobs"][0]["status"] == "failed"
+
+
+def test_sampling_follows_the_dit_and_language_follows_the_lyrics(tmp_path: Path) -> None:
+    make_project(tmp_path)
+    RecordingAceClient.payloads = []
+    RecordingAceClient.loaded = ("acestep-v15-sft", "acestep-5Hz-lm-4B")
+    generate_candidates(tmp_path, seeds=[1], model="acestep-v15-sft", client_factory=RecordingAceClient)
+    RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
+    generate_candidates(tmp_path, seeds=[2], lyrics="[Verse]\nShine on me\n[Chorus]\nForever in your glow",
+                        client_factory=RecordingAceClient)
+    generate_candidates(tmp_path, seeds=[3], lyrics="[Verse]\n창밖에 번진 햇살\n[Chorus]\nShine on me, 내 곁에",
+                        client_factory=RecordingAceClient)
+    sft, english, bilingual = RecordingAceClient.payloads
+    assert (sft["inference_steps"], sft["guidance_scale"]) == (50, 7.0)
+    assert english["inference_steps"] == 8 and "guidance_scale" not in english
+    assert (english["vocal_language"], bilingual["vocal_language"]) == ("en", "ko")
+
+
+def test_lm_temperature_is_frozen_for_text2music_only(tmp_path: Path) -> None:
+    make_project(tmp_path)
+    RecordingAceClient.payloads = []
+    RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
+    result = generate_candidates(tmp_path, seeds=[1], lm_temperature=0.5, client_factory=RecordingAceClient)
+    repaint_candidate(tmp_path, start_seconds=1, end_seconds=2, seed=5,
+                      candidate_id=result["candidateIds"][0], client_factory=RecordingAceClient)
+    generated, repainted = RecordingAceClient.payloads
+    assert generated["lm_temperature"] == 0.5
+    assert "lm_temperature" not in repainted and repainted["thinking"] is False
+    with pytest.raises(ValueError):
+        generate_candidates(tmp_path, seeds=[2], lm_temperature=0, client_factory=RecordingAceClient)

@@ -4,6 +4,7 @@ import { createWriteStream, type WriteStream } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { EngineStatus } from "../shared.ts";
+import { MemoryHandoff, type Ownership } from "./handoff.ts";
 import { aceApiBinary, aceStartScript, engineRoot } from "./paths.ts";
 
 type Health = {
@@ -24,10 +25,25 @@ export class EngineManager {
   private status: EngineStatus;
   private failures = 0;
   private lastHealthyAt = 0;
+  private startInFlight: Promise<EngineStatus> | null = null;
+  // Assistant LLM calls run with this engine stopped; see handoff.ts.
+  readonly handoff = new MemoryHandoff({
+    ownership: () => this.ownership(),
+    stop: async () => {
+      await this.stop();
+      await this.check();
+    },
+    start: () => this.start(),
+  });
 
   constructor(
     private baseUrl: () => string,
     private emit: (status: EngineStatus) => void,
+    // ACE loads one DiT and one LM at start; a request naming another model is refused
+    // by the engine CLI, so the chosen models must reach the server at launch.
+    private models: () => { dit: string; lm: string },
+    // Frees memory held by the assistant LLM before the engine loads its models.
+    private beforeStart: () => Promise<void> = async () => undefined,
   ) {
     this.status = this.make("checking", "엔진 상태를 확인하는 중", false);
   }
@@ -102,10 +118,13 @@ export class EngineManager {
       if (!health.models_initialized) {
         this.set(this.make("starting", "모델을 메모리에 올리는 중", owned, health));
       } else {
-        this.set(this.make(owned ? "ready" : "external", owned ? "앱이 켠 엔진" : "이미 켜져 있던 엔진", owned, health));
+        const detail = this.modelMismatch(health) ?? (owned ? "앱이 켠 엔진" : "이미 켜져 있던 엔진");
+        this.set(this.make(owned ? "ready" : "external", detail, owned, health));
       }
     } else if (this.child && !this.stopping) {
       this.set(this.make("starting", this.lastLogLine() || "엔진을 켜는 중", true));
+    } else if (this.handoff.active() && !this.child) {
+      this.set(this.make("offline", "AI 도우미가 답하는 동안 메모리를 비워 두려고 엔진을 잠시 껐어요. 끝나면 다시 켜요.", false));
     } else if (this.status.state !== "failed" && this.status.state !== "missing") {
       // A busy server can miss one poll; do not flap the whole UI on a single timeout.
       this.failures += 1;
@@ -119,6 +138,14 @@ export class EngineManager {
   startMonitoring(): void {
     if (this.monitor) return;
     this.monitor = setInterval(() => void this.check(), 8000);
+  }
+
+  private modelMismatch(health: Health): string | null {
+    const wanted = this.models();
+    const loaded = [health.loaded_model, health.loaded_lm_model];
+    if ((!loaded[0] || loaded[0] === wanted.dit) && (!loaded[1] || loaded[1] === wanted.lm)) return null;
+    const restart = this.child ? "엔진을 껐다 켜면 설정한 모델로 바뀌어요." : "앱 밖에서 켠 엔진이라 그 엔진을 설정한 모델로 다시 켜야 해요.";
+    return `설정과 다른 모델이 켜져 있어요 (${loaded.filter(Boolean).join(" · ")}). ${restart}`;
   }
 
   private lastLogLine(): string {
@@ -137,7 +164,20 @@ export class EngineManager {
     if (this.log.length > 400) this.log.splice(0, this.log.length - 400);
   }
 
-  async start(): Promise<EngineStatus> {
+  private async ownership(): Promise<Ownership> {
+    if (this.child) return "owned";
+    return (await this.health()) ? "external" : "off";
+  }
+
+  start(): Promise<EngineStatus> {
+    this.startInFlight ??= this.startOnce().finally(() => {
+      this.startInFlight = null;
+    });
+    return this.startInFlight;
+  }
+
+  private async startOnce(): Promise<EngineStatus> {
+    await this.handoff.settled();
     const existing = await this.health();
     if (existing) return this.check();
     if (this.child) return this.snapshot();
@@ -147,14 +187,22 @@ export class EngineManager {
       this.set(this.make("missing", "ACE 런타임이 설치되지 않았어요. 터미널에서 ./scripts/bootstrap_ace.sh를 먼저 실행하세요.", false));
       return this.snapshot();
     }
+    await this.beforeStart().catch(() => undefined);
     const port = new URL(this.baseUrl()).port || "18001";
     await mkdir(path.dirname(this.logFile()), { recursive: true });
     this.logStream = createWriteStream(this.logFile(), { flags: "a" });
-    this.appendLog(`\n--- ${new Date().toISOString()} 앱에서 엔진 시작 (port ${port}) ---\n`);
+    const models = this.models();
+    this.appendLog(`\n--- ${new Date().toISOString()} 앱에서 엔진 시작 (port ${port}, ${models.dit} · ${models.lm}) ---\n`);
     this.stopping = false;
     const child = spawn("/bin/bash", [aceStartScript], {
       cwd: engineRoot,
-      env: { ...process.env, MUSIC_ENGINE_ACE_PORT: port, PYTHONUNBUFFERED: "1" },
+      env: {
+        ...process.env,
+        MUSIC_ENGINE_ACE_PORT: port,
+        MUSIC_ENGINE_ACE_DIT_MODEL: models.dit,
+        MUSIC_ENGINE_ACE_LM_MODEL: models.lm,
+        PYTHONUNBUFFERED: "1",
+      },
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });

@@ -50,6 +50,8 @@ export class Controller {
     this.engine = new EngineManager(
       () => currentSettings().aceBaseUrl,
       (engine) => this.send({ type: "engine", engine }),
+      () => ({ dit: currentSettings().ditModel, lm: currentSettings().lmModel }),
+      () => unloadAssistantModel(),
     );
     this.tasks = new TaskRunner({
       emit: (task) => this.send({ type: "task", task }),
@@ -109,11 +111,21 @@ export class Controller {
   }
 
   private async requireEngine(): Promise<void> {
+    if (this.engine.handoff.active()) throw new Error("AI 도우미가 답하는 중이라 음악 엔진을 잠시 꺼 뒀어요. 끝나면 다시 켜져요.");
     if (this.engine.isReady() || this.engine.recentlyHealthy()) return;
     const status = await this.engine.check();
     if (status.state === "ready" || status.state === "external" || this.engine.recentlyHealthy()) return;
     if (status.state === "starting") throw new Error("음악 엔진을 켜는 중이에요. 준비되면 다시 시도하세요.");
     throw new Error("음악 엔진이 꺼져 있어요. 왼쪽 아래에서 엔진을 켜세요.");
+  }
+
+  // A local assistant LLM never shares memory with the music engine (see handoff.ts).
+  private async withAssistant<T>(call: () => Promise<T>): Promise<T> {
+    if (currentSettings().assistant.kind === "rules") return call();
+    if (this.tasks.busyFolder()) {
+      throw new Error("곡을 만드는 동안에는 AI 도우미를 쓸 수 없어요. 음악 엔진과 도우미 모델을 함께 올리면 메모리가 부족해요. 끝난 뒤 다시 시도하세요.");
+    }
+    return this.engine.handoff.withEngineStopped(call);
   }
 
   private assistantArgs(): string[] {
@@ -333,7 +345,7 @@ export class Controller {
       const seconds = Math.min(600, Math.max(10, Math.round(Number(duration) || settings.defaultDurationSeconds)));
       const args = ["draft", "--query", text, "--duration", String(seconds), "--base-url", settings.aceBaseUrl, ...this.assistantArgs()];
       if (instrumental === true) args.push("--instrumental");
-      return runCli<DraftResult>(args);
+      return this.withAssistant(() => runCli<DraftResult>(args));
     });
     handle("plan", async (input: PlanInput): Promise<Plan> => {
       const folder = this.requireFolder();
@@ -350,7 +362,7 @@ export class Controller {
         args.push("--start", startSeconds.toFixed(2), "--end", endSeconds.toFixed(2));
       }
       args.push(...this.assistantArgs());
-      return runCli<Plan>(args);
+      return this.withAssistant(() => runCli<Plan>(args));
     });
     handle("apply-plan", async (plan: Plan, feedbackText: unknown) => {
       const folder = this.requireFolder();
@@ -462,7 +474,9 @@ export class Controller {
         if (partial && key in partial) (allowed as Record<string, unknown>)[key] = partial[key];
       }
       const next = await saveSettings(allowed);
-      if (next.aceBaseUrl !== before.aceBaseUrl) void this.engine.check();
+      if (next.aceBaseUrl !== before.aceBaseUrl || next.ditModel !== before.ditModel || next.lmModel !== before.lmModel) {
+        void this.engine.check();
+      }
       return next;
     });
     handle("pick-projects-dir", async () => {
@@ -498,4 +512,22 @@ function requireVersionId(value: unknown): string {
 function clock(seconds: number): string {
   const whole = Math.max(0, Math.round(seconds));
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+// Ollama keeps a model resident for minutes after its last answer (the engine's own
+// calls pass keep_alive 0). Unload the assistant model before the engine loads its own.
+async function unloadAssistantModel(): Promise<void> {
+  const assistant = currentSettings().assistant;
+  if (assistant.kind !== "ollama" || !assistant.model) return;
+  const base = requireLoopbackUrl(assistant.baseUrl, "AI 도우미").replace(/\/$/, "");
+  const loaded = await fetch(`${base}/api/ps`, { signal: AbortSignal.timeout(3000), redirect: "error" });
+  const body = (await loaded.json()) as { models?: { name?: string; model?: string }[] };
+  if (!body.models?.some((item) => item.name === assistant.model || item.model === assistant.model)) return;
+  await fetch(`${base}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: assistant.model, keep_alive: 0 }),
+    signal: AbortSignal.timeout(15000),
+    redirect: "error",
+  });
 }

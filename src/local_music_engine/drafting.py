@@ -78,6 +78,8 @@ KEYWORDS: tuple[tuple[str, str], ...] = (
 
 HANGUL = re.compile(r"[가-힣]")
 LANGUAGE_MARKER = re.compile(r"\[(ko|en|ja|zh)\]\s*", re.IGNORECASE)
+KOREAN_MARKER = re.compile(r"^\s*\[ko\]", re.IGNORECASE)
+SECTION_TAG = re.compile(r"\s*\[[^\]]*\]\s*")
 
 
 def keyword_tags(description: str) -> list[str]:
@@ -90,14 +92,22 @@ def keyword_tags(description: str) -> list[str]:
 
 
 def usable_korean_lyrics(lyrics: str) -> str | None:
-    """Keep engine lyrics only when they are actually written in Hangul."""
+    """Keep lyrics whose Korean is written in Hangul; English lines may sit beside it.
 
-    cleaned = LANGUAGE_MARKER.sub("", lyrics or "").strip()
-    sung = [line for line in cleaned.splitlines() if line.strip() and not re.fullmatch(r"\s*\[[^\]]*\]\s*", line)]
-    if not sung:
+    A bilingual song (Korean verse, English hook) is a normal request, so English
+    lines are not counted against the draft. Romanized Korean is what must not reach
+    the engine: a line ACE itself marks ``[ko]`` has to contain Hangul, and lyrics
+    without any Hangul line are rejected.
+    """
+
+    lines = [line for line in (lyrics or "").splitlines() if line.strip() and not SECTION_TAG.fullmatch(line)]
+    if not lines:
         return None
-    hangul_lines = sum(1 for line in sung if HANGUL.search(line))
-    return cleaned if hangul_lines / len(sung) >= 0.6 else None
+    if any(KOREAN_MARKER.match(line) and not HANGUL.search(line) for line in lines):
+        return None
+    if not any(HANGUL.search(line) for line in lines):
+        return None
+    return LANGUAGE_MARKER.sub("", lyrics).strip()
 
 
 def _result(**values: Any) -> dict[str, Any]:
@@ -167,10 +177,11 @@ Return JSON with:
 - "caption": English, comma-separated style tags ACE-Step understands: genre, mood, vocal type,
   main instruments, tempo feel, production. 8 to 16 tags. Only what the description asks for or
   clearly implies; do not add unrelated genres.
-- "lyrics": singable Korean lyrics in Hangul (never romanized) with section tags on their own lines:
-  [Verse], [Pre-Chorus], [Chorus], [Bridge], [Outro]. Short lines (about 6-12 syllables). Repeat
-  the chorus. Roughly one line per 4 seconds of the requested length. If instrumental, exactly
-  "[Instrumental]".
+- "lyrics": singable lyrics with section tags on their own lines: [Verse], [Pre-Chorus], [Chorus],
+  [Bridge], [Outro]. Korean is the main language and is always written in Hangul, never
+  romanized. If the description asks for English (for example an English hook or chorus), write
+  those lines in natural English. Short lines (about 6-12 syllables). Repeat the chorus. Roughly
+  one line per 4 seconds of the requested length. If instrumental, exactly "[Instrumental]".
 - "durationSeconds": the length you would suggest, between 30 and 240.
 Return JSON only."""
 
@@ -207,7 +218,7 @@ def draft_from_llm_answer(raw: str, *, instrumental: bool, model: str) -> dict[s
     else:
         usable = usable_korean_lyrics(lyrics)
         if usable is None or len(usable) > 4096:
-            raise AssistantError("LLM lyrics are not Hangul or are too long")
+            raise AssistantError("LLM lyrics have no Korean in Hangul (romanized?) or are too long")
         lyrics = usable
     title = " ".join(str(answer.get("title") or "").split())[:40] or None
     duration = answer.get("durationSeconds")
@@ -255,7 +266,14 @@ def draft_song(
         try:
             return llm_draft(description, instrumental=instrumental, duration_seconds=duration_seconds, config=llm)
         except (AssistantError, ValueError) as error:
-            result = engine_draft(description, instrumental=instrumental, base_url=base_url, client_factory=client_factory)
+            try:
+                result = engine_draft(description, instrumental=instrumental, base_url=base_url, client_factory=client_factory)
+            except Exception as engine_error:
+                # The fallback's own failure (often "engine is off") must not hide why
+                # the LLM draft was refused in the first place.
+                raise AssistantError(
+                    f"LLM draft failed ({error}); engine draft also failed ({type(engine_error).__name__}: {engine_error})"
+                ) from engine_error
             result["notes"].insert(0, f"LLM 도우미를 쓰지 못해 음악 엔진으로 초안을 만들었어요 ({error}).")
             return result
     return engine_draft(description, instrumental=instrumental, base_url=base_url, client_factory=client_factory)
