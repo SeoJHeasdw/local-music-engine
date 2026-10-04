@@ -6,6 +6,71 @@ export type ReviewStatus = "unreviewed" | "listened" | "approved" | "rejected";
 export type Strength = "light" | "medium" | "strong";
 export type TimeRange = { startSeconds: number; endSeconds: number };
 
+export type ProductionRuleSelection = { version: 1; presetId: string | null; ruleIds: string[] };
+export type ProductionRule = {
+  id: string;
+  label: string;
+  description: string;
+  caption: string;
+  instrumentalCaption?: string | null;
+  shortCaption?: string | null;
+  shortInstrumentalCaption?: string | null;
+};
+export type ProductionPreset = {
+  id: string;
+  label: string;
+  description: string;
+  caption: string;
+  bpm: number | null;
+  keyScale: string | null;
+  timeSignature: string | null;
+  ruleIds: string[];
+};
+export type ProductionCatalog = { version: 1; presets: ProductionPreset[]; rules: ProductionRule[]; captionBudgetCharacters?: number; captionBudgetScope?: "api_prompt_character_limit" | "guidance_advisory"; captionTokenBudgetMeasured?: boolean };
+export type ProductionSnapshot = {
+  version: 1;
+  selection: ProductionRuleSelection;
+  baseStylePrompt: string;
+  preset: ProductionPreset | null;
+  rules: ProductionRule[];
+  appliedCaptions: string[];
+  appliedRuleIds: string[];
+  skippedRuleIds: string[];
+  inputMetas: Record<string, unknown>;
+  songPlan?: SongPlanResult;
+};
+
+export type SongPlanInput = {
+  lyrics: string;
+  durationSeconds: number;
+  bpm: number | null;
+  timeSignature: string | null;
+  presetId: string | null;
+  development: boolean;
+  breathing: boolean;
+  instrumental: boolean;
+};
+export type SongPlanResult = {
+  version: 1;
+  lyricsOriginal: string;
+  lyricsPrepared: string;
+  changes: Array<{ kind: "line-break" | "section-guidance"; lineIndex: number; before: string; after: string }>;
+  arrangement: Array<{ label: string; bars: number; startSeconds: number; endSeconds: number; energy: number; instruments: string[]; guidance: string }>;
+  phrases: Array<{ section: string | null; lineIndex: number; phraseIndex: number; text: string; syllables: number; syllableMethod: "hangul-exact+english-heuristic"; estimatedBars: number; breathAfterBeats: number; targetSyllables: number }>;
+  warnings: string[];
+  timing: { bpm: number; timeSignature: string; quarterBeatsPerBar: number; secondsPerBar: number; estimatedTotalBars: number; bpmBeatUnit: "quarter-note" };
+  options: { presetId: string | null; instrumental: boolean; development: boolean; breathing: boolean };
+  guidance: string[];
+};
+
+export type RegenerateSongInput = {
+  songId: string;
+  versionId: string;
+  stylePrompt?: string;
+  lyrics?: string;
+  versions: number;
+};
+
 export type Finding = {
   findingId: string;
   check: string;
@@ -50,7 +115,7 @@ export type AutomaticQuality = {
 
 export type Version = {
   id: string;
-  kind: "full" | "edit";
+  kind: "full" | "edit" | "cover";
   parentId: string | null;
   editRange: TimeRange | null;
   seed: number | null;
@@ -73,6 +138,12 @@ export type Version = {
   waveform: number[];
   quality?: AutomaticQuality | null;
   recommended?: boolean;
+  baseStylePrompt?: string;
+  productionRules?: ProductionSnapshot | null;
+  coverStrength?: number | null;
+  songPlan?: SongPlanResult | null;
+  coverSource?: { candidateId: string; artifactId: string; sha256: string; bytes: number; durationSeconds: number } | null;
+  lyricsOriginal?: string;
 };
 
 export type TagChange = { op: "add" | "remove"; term: string; label?: string };
@@ -107,7 +178,7 @@ export type FeedbackRecord = {
 
 export type JobView = {
   jobId: string;
-  kind: "candidate-batch" | "repaint-candidate" | "export";
+  kind: "candidate-batch" | "cover-batch" | "repaint-candidate" | "export";
   status: "queued" | "running" | "succeeded" | "partial" | "failed" | "cancelling" | "cancelled" | "interrupted";
   stage: string | null;
   progress: number;
@@ -148,6 +219,7 @@ export type SongInputs = {
   bpm: number | null;
   keyScale: string | null;
   timeSignature: string | null;
+  productionRules?: ProductionRuleSelection | null;
 };
 
 export type Song = {
@@ -194,7 +266,7 @@ export type SongSummary = {
   error: string | null;
 };
 
-export type TaskKind = "generate" | "repaint" | "resume";
+export type TaskKind = "generate" | "repaint" | "resume" | "cover";
 
 export type ActiveTask = {
   kind: TaskKind;
@@ -236,23 +308,28 @@ export type EngineStatus = {
   detail: string;
   baseUrl: string;
   owned: boolean;
-  lmReady: boolean;
-  models: { dit: string | null; lm: string | null };
+  engine: "minimax-music3";
+  models: { music: string | null };
+  capabilities: EngineCapabilities;
+  maxDurationSeconds: number;
   log: string[];
   since: number;
 };
 
 export type AssistantKind = "rules" | "ollama" | "openai";
 
+export type EngineCapabilities = { text2music: boolean; cover: boolean; repaint: boolean; referenceAudio: boolean };
+
 export type Settings = {
+  schemaVersion: 2;
+  engine: "minimax-music3";
   projectsDir: string;
-  aceBaseUrl: string;
-  aceAutoStart: boolean;
-  ditModel: string;
-  lmModel: string;
+  engineBaseUrl: string;
+  engineAutoStart: boolean;
+  musicModel: string;
   defaultVersions: number;
   defaultDurationSeconds: number;
-  repaintStrength: Strength;
+  feedbackStrength: Strength;
   assistant: { kind: AssistantKind; baseUrl: string; model: string };
   lastExportDir: string | null;
 };
@@ -272,6 +349,7 @@ export type Bootstrap = {
   song: SongState;
   task: ActiveTask | null;
   rules: RuleHint[];
+  productionCatalog?: ProductionCatalog;
   info: AppInfo;
 };
 
@@ -284,6 +362,7 @@ export type CreateSongInput = {
   bpm: number | null;
   keyScale: string | null;
   timeSignature: string | null;
+  productionRules?: ProductionRuleSelection;
 };
 
 export type DraftResult = {
@@ -294,7 +373,7 @@ export type DraftResult = {
   bpm: number | null;
   keyScale: string | null;
   timeSignature: string | null;
-  source: "llm" | "engine";
+  source: "llm" | "engine" | "rules";
   sourceModel: string | null;
   notes: string[];
 };
@@ -354,7 +433,9 @@ export type MusicAppApi = {
   undoFinal(songId: string): Promise<SongState>;
   exportFinal(songId: string): Promise<ExportResult | null>;
   revise(input: ReviseInput): Promise<SongState>;
-  draft(query: string, instrumental: boolean, durationSeconds: number): Promise<DraftResult>;
+  draft(query: string, instrumental: boolean, durationSeconds: number, productionRules?: ProductionRuleSelection, vocalLanguage?: "ko" | "en"): Promise<DraftResult>;
+  songPlan(input: SongPlanInput): Promise<SongPlanResult>;
+  regenerateSong(input: RegenerateSongInput): Promise<SongState>;
   plan(input: PlanInput): Promise<Plan>;
   applyPlan(songId: string, plan: Plan, feedbackText: string): Promise<SongState>;
   generateMore(songId: string, count: number): Promise<SongState>;

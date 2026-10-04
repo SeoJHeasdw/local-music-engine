@@ -1,30 +1,17 @@
 import { app } from "electron";
 import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import type { AssistantKind, Settings, Strength } from "../shared.ts";
-import { requireLoopbackUrl, writeJsonAtomic } from "./files.ts";
+import type { Settings } from "../shared.ts";
+import { writeJsonAtomic } from "./files.ts";
 import { defaultProjectsDir } from "./paths.ts";
+import { defaultSettings, normalizeSettings } from "./settings-schema.ts";
+import { loadAndMigrateSettings } from "./settings-storage.ts";
 
 export type AppState = {
   lastSongPath: string | null;
   // Songs opened from outside the projects folder stay in the library list.
   extraSongPaths: string[];
 };
-
-function defaults(): Settings {
-  return {
-    projectsDir: defaultProjectsDir,
-    aceBaseUrl: "http://127.0.0.1:18001",
-    aceAutoStart: true,
-    ditModel: "acestep-v15-turbo",
-    lmModel: "acestep-5Hz-lm-4B",
-    defaultVersions: 2,
-    defaultDurationSeconds: 120,
-    repaintStrength: "medium",
-    assistant: { kind: "rules", baseUrl: "http://127.0.0.1:11434", model: "" },
-    lastExportDir: null,
-  };
-}
 
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
 const stateFile = () => path.join(app.getPath("userData"), "state.json");
@@ -43,60 +30,9 @@ async function readJson(file: string): Promise<Record<string, unknown> | null> {
   }
 }
 
-const clamp = (value: unknown, min: number, max: number, fallback: number) => {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.min(max, Math.max(min, Math.round(number))) : fallback;
-};
-
-function normalize(raw: Record<string, unknown>, base: Settings): Settings {
-  const assistantRaw = (raw.assistant ?? {}) as Record<string, unknown>;
-  const kind = (["rules", "ollama", "openai"] as const).includes(assistantRaw.kind as AssistantKind)
-    ? (assistantRaw.kind as AssistantKind)
-    : base.assistant.kind;
-  const strength = (["light", "medium", "strong"] as const).includes(raw.repaintStrength as Strength)
-    ? (raw.repaintStrength as Strength)
-    : base.repaintStrength;
-  const projectsDir =
-    typeof raw.projectsDir === "string" && path.isAbsolute(raw.projectsDir)
-      ? path.normalize(raw.projectsDir)
-      : base.projectsDir;
-  const text = (value: unknown, fallback: string) =>
-    typeof value === "string" && value.trim() ? value.trim().slice(0, 200) : fallback;
-  return {
-    projectsDir,
-    aceBaseUrl:
-      raw.aceBaseUrl === undefined ? base.aceBaseUrl : requireLoopbackUrl(raw.aceBaseUrl, "음악 엔진"),
-    aceAutoStart: typeof raw.aceAutoStart === "boolean" ? raw.aceAutoStart : base.aceAutoStart,
-    ditModel: text(raw.ditModel, base.ditModel),
-    lmModel: text(raw.lmModel, base.lmModel),
-    defaultVersions: clamp(raw.defaultVersions, 1, 4, base.defaultVersions),
-    defaultDurationSeconds: clamp(raw.defaultDurationSeconds, 10, 600, base.defaultDurationSeconds),
-    repaintStrength: strength,
-    assistant: {
-      kind,
-      baseUrl:
-        assistantRaw.baseUrl === undefined
-          ? base.assistant.baseUrl
-          : requireLoopbackUrl(assistantRaw.baseUrl, "도우미 LLM"),
-      model: typeof assistantRaw.model === "string" ? assistantRaw.model.trim().slice(0, 200) : base.assistant.model,
-    },
-    lastExportDir:
-      typeof raw.lastExportDir === "string" && path.isAbsolute(raw.lastExportDir)
-        ? raw.lastExportDir
-        : raw.lastExportDir === null
-          ? null
-          : base.lastExportDir,
-  };
-}
-
 export async function loadSettings(): Promise<Settings> {
   if (settings) return settings;
-  const raw = (await readJson(settingsFile())) ?? {};
-  try {
-    settings = normalize(raw, defaults());
-  } catch {
-    settings = defaults();
-  }
+  settings = await loadAndMigrateSettings(settingsFile(), defaultSettings(defaultProjectsDir));
   return settings;
 }
 
@@ -118,7 +54,7 @@ async function writeSettings(partial: Partial<Settings>): Promise<Settings> {
     ...partial,
     assistant: { ...current.assistant, ...(partial.assistant ?? {}) },
   } as unknown as Record<string, unknown>;
-  const next = normalize(merged, current);
+  const next = normalizeSettings(merged, current);
   await mkdir(path.dirname(settingsFile()), { recursive: true });
   await writeJsonAtomic(settingsFile(), next);
   settings = next;

@@ -6,7 +6,7 @@ import { mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { TaskOutcome } from "../shared.ts";
-import { completedVersions, stageForJob, stageText, TaskRunner, type TaskSpec } from "../main/tasks.ts";
+import { completedVersions, stageDetail, stageForJob, stageText, TaskRunner, type TaskSpec } from "../main/tasks.ts";
 
 const spec: TaskSpec = {
   kind: "resume", songId: "test", folder: "/unused-fixture", songTitle: "테스트", label: "이어 만들기",
@@ -67,14 +67,24 @@ test("quality progress counts finished requested slots rather than every success
   assert.match(stageForJob({ ...job, stage: "quality_retry" }, { jobId: "child", kind: "generate-candidate", status: "running", stage: "submitting" }), /다시 만드는/);
 });
 
-test("a newly preferred winner refreshes the song even when raw candidate count does not change", async () => {
+test("Music 3 generation phases are understandable without frame or chunk internals", () => {
+  assert.equal(stageText("planning song and vocals (180/450 frames)"), "선율과 노래 흐름을 만드는 중");
+  assert.equal(stageText("seed 71: rendering audio (2/4 chunks)"), "목소리와 반주를 만드는 중");
+  assert.equal(stageText("saving audio"), "음원을 저장하는 중");
+  assert.equal(stageDetail("planning song and vocals (180/450 frames)"), "");
+  assert.equal(stageDetail("rendering audio (2/4 chunks)"), "");
+  assert.equal(stageDetail("quality_lyrics: 확인 중"), "");
+  assert.equal(stageDetail("seed 71: 마지막 버전 저장 중"), "마지막 버전 저장 중");
+});
+
+for (const jobKind of ["candidate-batch", "cover-batch"] as const) test(`${jobKind} refreshes a newly preferred winner even when raw candidate count does not change`, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "music-quality-task-"));
   let resolveZero!: () => void;
   let resolveOne!: () => void;
   const zero = new Promise<void>((resolve) => { resolveZero = resolve; });
   const one = new Promise<void>((resolve) => { resolveOne = resolve; });
   let changes = 0;
-  const job = { jobId: "batch", kind: "candidate-batch", status: "running", stage: "quality_lyrics", createdAt: new Date().toISOString(),
+  const job = { jobId: "batch", kind: jobKind, status: "running", stage: "quality_lyrics", createdAt: new Date().toISOString(),
     progress: 0.5, resultRefs: [] as string[], parameters: { qualityPolicy: { enabled: true }, qualityPlan: [{ originalSeed: 12 }] } };
   const manifest = { jobs: [job, { ...job, jobId: "child", kind: "generate-candidate", parentJobId: "batch", stage: "submitting" }], candidates: [{ candidateId: "rawA" }, { candidateId: "retryA" }] };
   await writeFile(path.join(directory, "project.json"), JSON.stringify(manifest));
@@ -87,7 +97,7 @@ test("a newly preferred winner refreshes the song even when raw candidate count 
   }, () => child, 10);
   const deadline = setTimeout(() => { resolveZero(); resolveOne(); }, 2000);
   try {
-    runner.start({ ...spec, folder: directory });
+    runner.start({ ...spec, kind: jobKind === "cover-batch" ? "cover" : "resume", jobKind, folder: directory });
     await zero;
     assert.equal(runner.snapshot()?.done, 0);
     job.resultRefs.push("bestA");

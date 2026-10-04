@@ -22,6 +22,8 @@ import { Player } from "../player.ts";
 import { get, isPlanTicket, isSongTicket, planTicket, set, songTicket, type InspectorTab, type State } from "../store.ts";
 import { confirmDialog, errorText, toast, withBusy } from "../ui.ts";
 import { audioQualityText, isAutomaticAttempt, lyricQualityText, processingText, qualityLabel, qualityRetryReason } from "../quality.ts";
+import { songPlanView } from "../song-plan-view.ts";
+import { comparisonChoices, comparisonVersion } from "../comparison.ts";
 
 type Els = {
   head: HTMLElement;
@@ -95,7 +97,9 @@ export function stepVersion(direction: 1 | -1): void {
 
 export function toggleCompare(): void {
   const version = activeVersion();
-  if (version?.parentId) set({ listenToParent: !get().listenToParent });
+  const state = get();
+  const song = state.song.song;
+  if (song && version && comparisonVersion(song, version, state.comparisonVersionId)) set({ listenToParent: !state.listenToParent });
 }
 
 export function toggleLoop(): void {
@@ -290,6 +294,7 @@ function renderHead(song: Song): void {
   const recommended = node(song.recommendedVersionId);
   const exporting = final ?? recommended;
   const edits = song.versions.filter((item) => !isAutomaticAttempt(item) && item.kind === "edit").length;
+  const covers = song.versions.filter((item) => !isAutomaticAttempt(item) && item.kind === "cover").length;
   const busy = songBusy();
   const exportButton = h(
     "button",
@@ -315,6 +320,7 @@ function renderHead(song: Song): void {
         [
           `버전 ${t?.roots.filter((item) => !isAutomaticAttempt(item.version)).length ?? 0}개`,
           edits ? `수정 ${edits}개` : null,
+          covers ? `커버 ${covers}개` : null,
           final ? `최종본 ${final.name}` : recommended ? `자동 추천 ${recommended.name}` : "자동 검사 후 추천본을 골라요",
           `목표 ${lengthLabel(song.inputs.durationSeconds)}`,
         ]
@@ -385,7 +391,7 @@ function renderBanner(state: State, song: Song): void {
     ));
     return;
   }
-  const resumable = [...song.jobs].reverse().filter((job) => job.canResume);
+  const resumable = [...song.jobs].reverse().filter((job) => job.canResume && job.kind === "candidate-batch");
   if (resumable.length) {
     mount(els.banner, ...resumable.map((job) => {
       const done = (job.succeeded ?? 0) + (job.reused ?? 0);
@@ -413,7 +419,7 @@ function renderBanner(state: State, song: Song): void {
   const interrupted = song.jobs.some((job) => job.status === "interrupted" && !job.resumedByJobId);
   if (interrupted) {
     mount(els.banner, h("div", { class: "notice tone-warn row" },
-      h("p", null, "끝나지 않은 작업이 있어요. 원본과 완료한 버전은 남아 있어요. 구간 수정은 원본을 골라 다시 요청할 수 있어요."),
+      h("p", null, "끝나지 않은 작업이 있어요. 원본과 완료한 버전은 남아 있어요. 가사와 편곡으로 새 전체 버전을 만들 수 있어요."),
     ));
     return;
   }
@@ -423,7 +429,7 @@ function renderBanner(state: State, song: Song): void {
 function reviewMark(status: ReviewStatus): Child {
   if (status === "approved") return h("span", { class: "review-mark tone-ok", "data-tip": "좋아요" }, icon("thumbUp", 14));
   if (status === "rejected") return h("span", { class: "review-mark tone-danger", "data-tip": "별로예요" }, icon("thumbDown", 14));
-  if (status === "listened") return h("span", { class: "review-mark", "data-tip": "애매해요" }, icon("meh", 14));
+  if (status === "listened") return h("span", { class: "review-mark", "data-tip": "들어 봤어요" }, icon("check", 14));
   return h("span", { class: "review-mark is-new", "data-tip": "아직 안 들음" });
 }
 
@@ -537,7 +543,9 @@ function renderPlayer(state: State, song: Song): void {
   }
   const version = current.version;
   const parent = node(versionSourceParent(song, version)?.id);
-  const listeningParent = state.listenToParent && parent;
+  const choices = comparisonChoices(song, version);
+  const compare = node(comparisonVersion(song, version, state.comparisonVersionId)?.id);
+  const listeningComparison = Boolean(state.listenToParent && compare);
   const strength = strengthFromValue(version.repaintStrength);
   mount(
     els.playerHead,
@@ -552,20 +560,32 @@ function renderPlayer(state: State, song: Song): void {
         version.recommended && h("span", { class: "pill tone-accent" }, "자동 추천"),
         qualityLabel(version.quality) && h("span", { class: `pill tone-${qualityLabel(version.quality)!.tone}` }, qualityLabel(version.quality)!.label),
         version.editRange && parent && h("span", { class: "pill tone-edit" }, `${parent.short}의 ${rangeLabel(version.editRange)} 수정${strength ? ` · 변화 ${strengthCopy[strength].label}` : ""}`),
+        version.kind === "cover" && parent && h("span", { class: "pill tone-edit" }, `${parent.short} 바탕 · 원본 따르기 ${Math.round((version.coverStrength ?? 0.7) * 100)}%`),
         h("span", { class: `pill tone-${version.review.status}` }, reviewCopy[version.review.status].label),
       ),
     ),
-    parent &&
+    choices.length ? h("div", { class: "comparison-controls" },
+      h("label", { class: "comparison-picker" }, h("span", { class: "label" }, "비교할 버전"),
+        h("select", { class: "input", "aria-label": "비교할 버전", onChange: (event: Event) => set({
+          comparisonVersionId: (event.target as HTMLSelectElement).value || null, listenToParent: false,
+        }) },
+        h("option", { value: "", selected: !state.comparisonVersionId || !compare }, parent ? `생성 원본 · ${parent.short}` : "버전을 골라 주세요"),
+        choices.map((item) => h("option", { value: item.id, selected: state.comparisonVersionId === item.id },
+          `${node(item.id)?.name ?? "버전"}${item.review.status === "approved" ? " · 좋아요" : ""}`)),
+        )),
+      compare &&
       h(
         "div",
-        { class: "segmented small compare", role: "group", "aria-label": "원본과 비교", "data-tip": "같은 위치에서 바꿔 들어요 (C)" },
-        h("button", { type: "button", class: listeningParent ? "is-active" : "", "aria-pressed": listeningParent ? "true" : "false", onClick: () => set({ listenToParent: true }) }, version.quality?.processing && !version.editRange ? "생성 원본" : `원본 · ${parent.short}`),
-        h("button", { type: "button", class: listeningParent ? "" : "is-active", "aria-pressed": listeningParent ? "false" : "true", onClick: () => set({ listenToParent: false }) }, version.quality?.processing && !version.editRange ? "정리본" : "수정본"),
+        { class: "segmented small compare", role: "group", "aria-label": "두 버전 번갈아 듣기", "data-tip": "같은 재생 위치에서 바꿔 들어요 (C). 두 곡의 전개 위치는 다를 수 있어요." },
+        h("button", { type: "button", class: listeningComparison ? "is-active" : "", "aria-pressed": listeningComparison ? "true" : "false", onClick: () => set({ listenToParent: true }) }, `비교 · ${compare.short}`),
+        h("button", { type: "button", class: listeningComparison ? "" : "is-active", "aria-pressed": listeningComparison ? "false" : "true", onClick: () => set({ listenToParent: false }) }, `현재 · ${current.short}`),
       ),
+      h("p", { class: "hint" }, "번갈아 들으며 선율·감정·곡의 흐름을 비교해 보세요. 비교 버전은 재생에만 사용해요."),
+    ) : null,
   );
-  const source = listeningParent ? parent.version : version;
+  const source = listeningComparison ? compare!.version : version;
   player.editRange = version.editRange;
-  player.overlay = listeningParent ? `지금: 원본 (${parent.short})` : null;
+  player.overlay = listeningComparison ? `지금 듣는 버전: ${compare!.name}` : null;
   player.unavailable = source.fileOk ? null : "이 버전의 음원 파일을 쓸 수 없어요";
   player.selection = state.selection;
   player.loop = state.loop;
@@ -616,6 +636,7 @@ function renderPlayer(state: State, song: Song): void {
           ),
           h("span", { class: "hint" }, !song.finalVersionId && song.recommendedVersionId ? "추천본은 바로 WAV로 저장할 수 있어요. 직접 최종본을 지정하면 그 버전이 우선해요." : "최종본은 WAV로 내보낼 버전이에요. 언제든 다른 버전으로 바꿀 수 있어요."),
         ],
+    h("button", { type: "button", class: "button secondary", disabled: busy || !version.fileOk, onClick: () => openRegenerateSong(song, version, current.name) }, icon("wand", 16), "가사·편곡으로 새로 만들기"),
   );
 }
 
@@ -626,7 +647,7 @@ function renderSelectionBar(state: State): void {
   els.loop.disabled = !range;
   els.loop.setAttribute("aria-pressed", state.loop && range ? "true" : "false");
   if (!range) {
-    mount(els.selectionBar, h("p", { class: "hint" }, "파형을 끌어서 고칠 구간을 고르세요. 클릭하면 그 위치로 옮겨 가요."));
+    mount(els.selectionBar, h("p", { class: "hint" }, "파형을 끌어서 반복해 들을 구간을 고르세요. 클릭하면 그 위치로 옮겨 가요."));
     return;
   }
   mount(
@@ -635,7 +656,6 @@ function renderSelectionBar(state: State): void {
     h("div", { class: "selection-actions" },
       els.loop,
       h("button", { type: "button", class: "button ghost small", onClick: () => clearSelection() }, icon("close", 14), "선택 해제"),
-      h("button", { type: "button", class: "button primary small", onClick: () => { set({ scope: "range" }); focusFeedback(); } }, icon("wand", 14), "이 구간 고치기"),
     ),
   );
 }
@@ -661,6 +681,7 @@ function renderInputs(state: State, song: Song): void {
   const diff = baselineVersion ? tagDiff(baselineVersion.stylePrompt, version.stylePrompt) : [];
   const feedback = song.feedback.find((item) => item.feedbackId === version.feedbackId);
   const strength = strengthFromValue(version.repaintStrength);
+  const production = version.productionRules;
   mount(
     els.inputs,
     h(
@@ -699,6 +720,14 @@ function renderInputs(state: State, song: Song): void {
           )
         : h("p", { class: "hint" }, version.editRange ? `${baselineName}과 같은 스타일로 구간만 다시 만들었어요.` : version.quality?.processing ? "처음 생성한 음원을 보존하고 별도 재생본을 정리했어요." : `${baselineName}과 스타일이 같아요.`)),
     h("p", { class: "caption-text mono" }, version.stylePrompt),
+    production && (production.preset || production.rules.length > 0) && h("details", { class: "disclosure" },
+      h("summary", null, "이 버전에 보낸 제작 규칙"),
+      production.preset && h("p", { class: "hint" }, production.preset.label),
+      h("ul", { class: "production-selected" }, production.rules.filter((rule) => production.appliedRuleIds.includes(rule.id)).map((rule) => h("li", null, rule.label))),
+      production.skippedRuleIds.includes("clear-vocal") && h("p", { class: "hint" }, "연주곡이라 보컬 규칙은 보내지 않았어요."),
+      production.skippedRuleIds.includes("phrase-breathing") && h("p", { class: "hint" }, "연주곡이라 가사 호흡 규칙은 보내지 않았어요."),
+      h("p", { class: "hint" }, "만들 당시 선택과 문장을 저장한 기록이에요."),
+    ),
     h(
       "dl",
       { class: "facts inline" },
@@ -717,6 +746,9 @@ function renderInputs(state: State, song: Song): void {
         h("p", { class: "mono legacy-instruction" }, version.instruction),
       ),
     h("details", { class: "disclosure" }, h("summary", null, "가사 보기"), h("pre", { class: "lyrics-view" }, version.lyrics)),
+    version.lyricsOriginal !== undefined && version.lyricsOriginal !== version.lyrics && h("details", { class: "disclosure" }, h("summary", null, "제작 안내를 넣기 전 가사 원문"), h("pre", { class: "lyrics-view" }, version.lyricsOriginal)),
+    version.coverSource && h("p", { class: "hint" }, `이 버전은 원본 음원을 참조해 만든 커버예요. 원본 따르기 ${Math.round((version.coverStrength ?? 0.7) * 100)}% · 원본 파일 크기와 SHA-256을 확인한 기록이 있어요.`),
+    version.songPlan && h("details", { class: "disclosure" }, h("summary", null, "만들 때 보낸 전개·호흡 안내"), songPlanView(version.songPlan)),
   );
 }
 
@@ -745,35 +777,7 @@ function renderTabs(state: State): void {
 function renderFix(state: State, song: Song): void {
   if (!els) return;
   const version = activeVersion();
-  const range = state.selection;
-  const scope = range ? state.scope : "song";
-  mount(
-    els.fixScope,
-    h(
-      "div",
-      { class: "segmented block" },
-      h("button", { type: "button", class: scope === "song" ? "is-active" : "", "aria-pressed": scope === "song" ? "true" : "false", onClick: () => set({ scope: "song", plan: null }) }, "곡 전체"),
-      h(
-        "button",
-        {
-          type: "button",
-          class: scope === "range" ? "is-active" : "",
-          disabled: !range,
-          "aria-pressed": scope === "range" ? "true" : "false",
-          "data-tip": range ? "" : "파형을 끌어서 구간을 먼저 고르세요",
-          onClick: () => set({ scope: "range", plan: null }),
-        },
-        range ? `구간 ${rangeLabel(range)}` : "구간 (선택 없음)",
-      ),
-    ),
-    h(
-      "p",
-      { class: "hint" },
-      scope === "range"
-        ? "그 구간만 다시 만들고 나머지는 최대한 그대로 둬요. 경계가 어색하면 구간을 조금 넓혀 보세요."
-        : "고친 스타일로 새 버전을 만들어요. 지금 버전은 그대로 남아요.",
-    ),
-  );
+  mount(els.fixScope, h("p", { class: "hint" }, "요청에 맞춰 곡 전체를 새로 만들어요. 가사와 편곡을 이어 받으며, 원본 음원과 같은 선율을 유지하는 방식은 아니에요. 지금 버전은 그대로 남아요."));
 
   const rules = state.rules.filter((rule) => QUICK_RULES.includes(rule.key)).sort((a, b) => QUICK_RULES.indexOf(a.key) - QUICK_RULES.indexOf(b.key));
   const visible = showAllChips ? rules : rules.slice(0, 7);
@@ -818,34 +822,12 @@ function renderFix(state: State, song: Song): void {
   );
   if (els.fixArea.value !== state.feedback) els.fixArea.value = state.feedback;
 
-  mount(
-    els.fixOptions,
-    scope === "range"
-      ? h(
-          "div",
-          { class: "field" },
-          h("span", { class: "label" }, "얼마나 바꿀까요?"),
-          h(
-            "div",
-            { class: "segmented block" },
-            (["light", "medium", "strong"] as Strength[]).map((key) =>
-              h("button", { type: "button", class: state.strength === key ? "is-active" : "", "aria-pressed": state.strength === key ? "true" : "false", "data-tip": strengthCopy[key].hint, onClick: () => set({ strength: key, plan: null }) }, strengthCopy[key].label),
-            ),
-          ),
-        )
-      : h(
-          "div",
-          { class: "field" },
-          h("span", { class: "label" }, "새로 만들 버전"),
-          h(
-            "div",
-            { class: "segmented block" },
-            [1, 2, 3, 4].map((count) =>
-              h("button", { type: "button", class: state.planVersions === count ? "is-active" : "", "aria-pressed": state.planVersions === count ? "true" : "false", onClick: () => set({ planVersions: count, plan: null }) }, `${count}개`),
-            ),
-          ),
-        ),
-  );
+  mount(els.fixOptions,
+    h("div", { class: "field" }, h("span", { class: "label" }, "새로 만들 버전"),
+      h("div", { class: "segmented block" }, [1, 2, 3, 4].map((count) =>
+        h("button", { type: "button", class: state.planVersions === count ? "is-active" : "", "aria-pressed": state.planVersions === count ? "true" : "false", onClick: () => set({ planVersions: count, plan: null }) }, `${count}개`))),
+    ));
+
 
   const assistant = state.settings.assistant;
   els.assistantLabel.textContent =
@@ -870,7 +852,7 @@ async function requestPlan(): Promise<void> {
   }
   const ticket = planTicket();
   if (!ticket) return;
-  const range = state.scope === "range" && state.selection ? { ...state.selection } : null;
+  const range = null;
   set({ planning: true, plan: null });
   const label = state.settings.assistant.kind === "rules" ? "해석하는 중" : "LLM이 해석하는 중";
   const plan = await withBusy(els.planButton, label, () =>
@@ -882,9 +864,6 @@ async function requestPlan(): Promise<void> {
 }
 
 function planActionText(plan: Plan): string {
-  if (plan.action === "repaint" && plan.range) {
-    return `구간 다시 만들기 · ${rangeLabel(plan.range)} · 변화 ${strengthCopy[plan.strength].label}`;
-  }
   return `곡 전체 새로 만들기 · 버전 ${plan.versions}개`;
 }
 
@@ -896,7 +875,7 @@ function renderPlan(state: State, song: Song): void {
     return;
   }
   const context = planTicket();
-  if (plan.candidateId !== state.activeVersionId || !context) {
+  if (plan.candidateId !== state.activeVersionId || !context || plan.action !== "regenerate" || plan.range) {
     els.planBox.replaceChildren();
     return;
   }
@@ -918,7 +897,7 @@ function renderPlan(state: State, song: Song): void {
       { class: "plan-card" },
       h("div", { class: "plan-head" }, h("span", { class: "plan-eyebrow" }, "수정안"), h("span", { class: "pill" }, plan.assistant === "llm" ? `LLM · ${plan.assistantModel}` : "기본 규칙")),
       h("p", { class: "plan-summary" }, plan.summary),
-      h("div", { class: "plan-action" }, icon(plan.action === "repaint" ? "branch" : "refresh", 16), h("span", null, planActionText(plan))),
+      h("div", { class: "plan-action" }, icon("refresh", 16), h("span", null, planActionText(plan))),
       plan.changes.length
         ? h(
             "div",
@@ -950,9 +929,7 @@ function renderPlan(state: State, song: Song): void {
       plan.bpm ? h("p", { class: "plan-note" }, icon("info", 14), `빠르기도 ${plan.bpm} BPM으로 바꿔요.`) : null,
       plan.lyrics && h("details", { class: "disclosure" }, h("summary", null, "바뀐 가사 보기"), h("pre", { class: "lyrics-view" }, plan.lyrics)),
       h("details", { class: "disclosure" }, h("summary", null, "엔진에 보낼 스타일 직접 고치기"), caption),
-      plan.action === "repaint"
-        ? h("p", { class: "hint" }, "구간 밖도 조금 달라질 수 있어요. 만든 뒤 ‘원본 ↔ 수정본’으로 같은 위치를 번갈아 들어 보세요.")
-        : h("p", { class: "hint" }, "이 스타일이 앞으로 만드는 버전의 기본값이 돼요. 지금까지 만든 버전은 그대로 남아요."),
+      h("p", { class: "hint" }, "가사와 편곡으로 새 전체 곡을 만들어요. 선율과 목소리는 달라질 수 있으며, 지금까지 만든 버전은 그대로 남아요."),
       h(
         "div",
         { class: "plan-buttons" },
@@ -973,7 +950,7 @@ function renderPlan(state: State, song: Song): void {
                   if (els) els.fixArea.value = "";
                   set({ plan: null, feedback: "" });
                 }
-                toast(plan.action === "repaint" ? "구간을 다시 만들기 시작했어요. 끝나면 새 수정본이 열려요." : `새 버전 ${plan.versions}개를 만들기 시작했어요.`, { tone: "ok" });
+                toast(`새 전체 버전 ${plan.versions}개를 만들기 시작했어요.`, { tone: "ok" });
               }),
           },
           "이대로 만들기",
@@ -1053,12 +1030,13 @@ function renderReview(state: State): void {
   };
   const verdicts: Array<[ReviewStatus, string, string]> = [
     ["approved", "좋아요", "thumbUp"],
-    ["listened", "애매해요", "meh"],
+    ["listened", "들어 봤어요", "check"],
     ["rejected", "별로예요", "thumbDown"],
   ];
   mount(
     els.review,
-    h("h2", { class: "panel-title" }, "직접 들어 본 판단"),
+    h("h2", { class: "panel-title" }, `${node(version.id)?.short ?? "이 버전"} · 직접 들어 본 판단`),
+    h("p", { class: "hint" }, "‘들어 봤어요’는 청취 기록이에요. 마음에 드는 정도는 좋아요·별로예요와 별점으로 남겨요."),
     h(
       "div",
       { class: "verdicts" },
@@ -1146,7 +1124,7 @@ function qualityReport(version: Version): Child {
       knownLyrics && typeof coverage === "number" && Number.isFinite(coverage) && h("p", { class: "footnote" }, `작성한 순서대로 인식된 가사 ${(Math.max(0, Math.min(1, coverage)) * 100).toFixed(0)}%`)),
     processing && h("div", { class: "quality-check" }, h("h3", { class: "panel-subtitle" }, "재생본 정리"), h("p", null, processing)),
     retries.length ? h("details", { class: "disclosure" }, h("summary", null, "자동 재시도 이유"), h("ul", { class: "quality-reasons" }, retries.map((reason) => h("li", null, reason)))) : null,
-    h("p", { class: "footnote" }, "자동 추천과 직접 들은 평가는 따로 남아요."));
+    h("p", { class: "footnote" }, "자동 추천은 소리·가사 검사 결과로 골라요. 선율과 감정의 매력은 직접 비교해 평가해 주세요."));
 }
 
 function renderDetails(song: Song): void {
@@ -1216,6 +1194,40 @@ function renderDetails(song: Song): void {
 // Dialogs and exports
 // ---------------------------------------------------------------------------
 
+function openRegenerateSong(song: Song, version: Version, sourceName: string): void {
+  const ticket = songTicket(song.songId);
+  if (!ticket || !version.fileOk || songBusy()) return;
+  const initialStyle = version.baseStylePrompt ?? version.stylePrompt;
+  const initialLyrics = version.lyricsOriginal ?? version.lyrics;
+  const style = h("textarea", { class: "input mono-input", rows: 3, maxlength: 1500, value: initialStyle, placeholder: "비워 두면 이 버전의 제작 규칙을 사용해요" });
+  const lyrics = h("textarea", { class: "input lyrics-input", rows: 8, maxlength: 4096, value: initialLyrics });
+  const versions = h("select", { class: "input", "aria-label": "새 버전 수" }, [1, 2, 3, 4].map((count) => h("option", { value: String(count), selected: count === 1 }, `${count}개`)));
+  const rules = version.productionRules;
+  const button = h("button", { type: "button", class: "button primary", disabled: !engineReady(), onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "새 버전을 준비하는 중", async () => {
+    if (!isSongTicket(ticket)) throw new Error("열린 곡이 바뀌었어요. 현재 곡에서 다시 시도하세요.");
+    const changedLyrics = lyrics.value.trim();
+    if (!changedLyrics) { lyrics.focus(); throw new Error("가사를 적거나 [Instrumental]을 써 주세요."); }
+    const result = await api.regenerateSong({ songId: song.songId, versionId: version.id, versions: Number(versions.value),
+      ...(style.value === initialStyle ? {} : { stylePrompt: style.value.trim() }),
+      ...(lyrics.value === initialLyrics ? {} : { lyrics: changedLyrics }) });
+    if (!applySongForContext(result, ticket)) return;
+    dialog.close();
+    toast(`「${sourceName}」의 가사·편곡으로 새 전체 버전을 만들기 시작했어요.`, { tone: "ok" });
+  }) }, "새 전체 버전 만들기");
+  const dialog = h("dialog", { class: "dialog wide" }, h("form", { method: "dialog", class: "dialog-body" },
+    h("h2", { class: "dialog-title" }, "가사·편곡으로 새로 만들기"),
+    h("p", { class: "dialog-text" }, `「${sourceName}」의 가사와 편곡으로 새 전체 곡을 만들어요. 원본 음원을 참조하지 않아 선율과 목소리는 달라질 수 있어요. 원본은 그대로 남아요.`),
+    h("p", { class: "hint" }, rules?.preset ? `${rules.preset.label} · 만들 당시 제작 규칙을 이어 받아요.` : "만들 당시 스타일과 제작 규칙을 이어 받아요."),
+    h("label", { class: "field" }, h("span", { class: "label" }, "새 스타일"), style),
+    h("label", { class: "field" }, h("span", { class: "label" }, "가사"), lyrics),
+    h("label", { class: "field" }, h("span", { class: "label" }, "만들 버전"), versions),
+    h("div", { class: "dialog-actions cover-actions" }, h("button", { type: "submit", value: "cancel", class: "button ghost" }, "취소"), button),
+  ));
+  document.body.append(dialog);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  dialog.showModal();
+}
+
 async function exportFinal(button: HTMLButtonElement, songId: string): Promise<void> {
   const ticket = songTicket(songId);
   if (!ticket) return;
@@ -1235,7 +1247,7 @@ function openSongSettings(song: Song): void {
   const title = h("input", { class: "input", value: song.title, maxlength: 100 });
   const style = h("textarea", { class: "input mono-input", rows: 3, value: song.inputs.stylePrompt, maxlength: 1500 });
   const lyrics = h("textarea", { class: "input lyrics-input", rows: 10, value: song.inputs.lyrics, maxlength: 4096 });
-  const duration = h("input", { class: "input", type: "number", min: "10", max: "600", step: "5", value: String(Math.round(song.inputs.durationSeconds)) });
+  const duration = h("input", { class: "input", type: "number", min: "10", max: "300", step: "5", value: String(Math.round(song.inputs.durationSeconds)) });
   const bpm = h("input", { class: "input", type: "number", min: "30", max: "300", placeholder: "엔진에 맡기기", value: song.inputs.bpm ? String(song.inputs.bpm) : "" });
   const dialog = h(
     "dialog",
@@ -1318,7 +1330,7 @@ export function renderStudio(changed: Set<keyof State>): void {
   const taskMoved = changed.has("task") && shape !== lastTaskShape;
   lastTaskShape = shape;
   const all = changed.has("song") || changed.has("view");
-  const versionChanged = all || changed.has("activeVersionId") || changed.has("listenToParent");
+  const versionChanged = all || changed.has("activeVersionId") || changed.has("listenToParent") || changed.has("comparisonVersionId");
   if (all || changed.has("engine") || taskMoved) {
     renderHead(song);
     renderRail(state, song);

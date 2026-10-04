@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { get, initStore, isPlanTicket, planTicket, set, songTicket, type State } from "../renderer/store.ts";
+import { get, initStore, isPlanTicket, listeningRevision, planTicket, set, songTicket, type State } from "../renderer/store.ts";
 import type { MusicAppApi, SongState } from "../shared.ts";
 
 function deferred<T>() {
@@ -17,7 +17,7 @@ function initial(): State {
   return {
     view: "library", song: song("previous"), activeVersionId: "candidate_A", plan: null, planning: false,
     settings: { assistant: { kind: "rules" } }, feedback: "발음 수정", scope: "song", strength: "medium", planVersions: 2,
-    selection: null, listenToParent: false,
+    selection: null, listenToParent: false, comparisonVersionId: null,
   } as State;
 }
 
@@ -80,4 +80,16 @@ test("pending plans are invalidated by version and input changes even when value
   const rangeRequest = planTicket();
   set({ selection: { startSeconds: 5, endSeconds: 10 } });
   assert.equal(isPlanTicket(rangeRequest), false);
+});
+
+test("comparison changes count as manual listening and are reset when another song opens", () => {
+  initStore({ ...initial(), song: song("A") });
+  const revision = listeningRevision();
+  set({ comparisonVersionId: "baseline" });
+  assert.ok(listeningRevision() > revision);
+  actions.applySong(song("A"));
+  assert.equal(get().comparisonVersionId, "baseline");
+  actions.applySong(song("B"));
+  assert.equal(get().comparisonVersionId, null);
+  assert.equal(get().listenToParent, false);
 });

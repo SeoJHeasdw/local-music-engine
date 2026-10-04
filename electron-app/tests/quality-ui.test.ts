@@ -48,6 +48,17 @@ test("a finished repaint follows its musical source rather than adding a raw-att
   assert.equal(versionSourceParent(song, finished)?.id, "original");
 });
 
+test("a cover and its cleaned result keep the trusted source as their comparison parent", () => {
+  const original = version("original", { quality: null });
+  const raw = version("raw-cover", { kind: "cover", parentId: "original", coverStrength: 0.7 });
+  const finished = version("finished-cover", { kind: "cover", parentId: "raw-cover", coverStrength: 0.7,
+    quality: quality({ preferred: true, processing: { sourceCandidateId: "raw-cover" } }) });
+  const song = { versions: [original, raw, finished] } as Song;
+  assert.equal(versionTree(song).byId.get("finished-cover")!.name, "버전 1 › 커버 1");
+  assert.equal(versionSourceParent(song, finished)?.id, "original");
+  assert.equal(original.review.status, "unreviewed");
+});
+
 test("unknown analysis is visibly unknown and conservative processing never claims repaired clipping", () => {
   const unknown = quality({ status: "unknown", audio: {}, lyrics: { status: "unknown", orderedCoverage: 1 } });
   assert.match(qualityLabel(unknown)!.label, /어려움/);

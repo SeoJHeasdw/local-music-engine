@@ -57,3 +57,20 @@ test("input changes and a newer request discard late drafts even if the values a
   edits.reset();
   assert.equal(edits.merge(newer, initial, result, "새 곡"), null);
 });
+
+test("changing a production checkbox discards a late draft even after restoring the old rules", () => {
+  const edits = new DraftEdits();
+  const initial = { ...draft(), productionRules: { version: 1 as const, presetId: null, ruleIds: [] } };
+  const ticket = edits.begin(initial);
+  edits.edited({ productionRules: { version: 1, presetId: null, ruleIds: ["steady-groove"] } });
+  edits.edited({ productionRules: initial.productionRules });
+  assert.equal(edits.merge(ticket, initial, result, "새 곡"), null);
+});
+
+test("language belongs to the draft request and a language change discards its late response", () => {
+  const edits = new DraftEdits();
+  const initial = { ...draft(), vocalLanguage: "ko" as const };
+  const ticket = edits.begin(initial);
+  edits.edited({ vocalLanguage: "en" });
+  assert.equal(edits.merge(ticket, { ...initial, vocalLanguage: "en" }, result, "새 곡"), null);
+});

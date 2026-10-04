@@ -3,6 +3,8 @@ import type {
   AppInfo,
   EngineStatus,
   Plan,
+  ProductionCatalog,
+  ProductionRuleSelection,
   RuleHint,
   Settings,
   SongState,
@@ -26,6 +28,8 @@ export type CreateDraft = {
   keyScale: string;
   timeSignature: string;
   drafted: boolean;
+  productionRules?: ProductionRuleSelection;
+  vocalLanguage?: "ko" | "en";
 };
 
 export type State = {
@@ -36,10 +40,12 @@ export type State = {
   song: SongState;
   task: ActiveTask | null;
   rules: RuleHint[];
+  productionCatalog?: ProductionCatalog;
   info: AppInfo;
   activeVersionId: string | null;
   selection: TimeRange | null;
   listenToParent: boolean;
+  comparisonVersionId: string | null;
   loop: boolean;
   tab: InspectorTab;
   feedback: string;
@@ -115,7 +121,8 @@ export function get(): State {
 // Shallow merge + notify with the set of changed keys so views re-render only what moved.
 export function set(patch: Partial<State>, passive = false): void {
   if (!passive && (("activeVersionId" in patch && patch.activeVersionId !== state.activeVersionId)
-    || ("listenToParent" in patch && patch.listenToParent !== state.listenToParent))) ++listeningVersionRevision;
+    || ("listenToParent" in patch && patch.listenToParent !== state.listenToParent)
+    || ("comparisonVersionId" in patch && patch.comparisonVersionId !== state.comparisonVersionId))) ++listeningVersionRevision;
   const songChanged = patch.song !== undefined && patch.song.song?.songId !== state.song.song?.songId;
   if (songChanged) ++songRevision;
   const planKeys: Array<keyof State> = ["activeVersionId", "selection", "scope", "strength", "planVersions", "feedback"];

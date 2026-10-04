@@ -32,7 +32,7 @@ export class DraftEdits {
 
   merge(ticket: Ticket, current: CreateDraft, result: DraftResult, fallbackTitle: string): Partial<CreateDraft> | null {
     const unchanged = (key: DraftKey) => (this.edits.get(key) ?? 0) === (ticket.edits.get(key) ?? 0);
-    if (ticket.sequence !== this.sequence || !["description", "instrumental", "durationSeconds"].every((key) => unchanged(key as DraftKey))) return null;
+    if (ticket.sequence !== this.sequence || !["description", "instrumental", "durationSeconds", "productionRules", "vocalLanguage"].every((key) => unchanged(key as DraftKey))) return null;
     const values: Partial<CreateDraft> = {
       title: result.title || fallbackTitle,
       stylePrompt: result.stylePrompt,

@@ -12,7 +12,7 @@ export type TaskSpec = {
   label: string;
   args: string[];
   total: number;
-  jobKind: "candidate-batch" | "repaint-candidate";
+  jobKind: "candidate-batch" | "cover-batch" | "repaint-candidate";
 };
 
 type RunningTask = {
@@ -60,9 +60,19 @@ export function stageText(raw: string | undefined): string {
   if (stage.includes("submitting")) return "엔진에 요청하는 중";
   if (stage.includes("reused")) return "끝난 버전을 확인하는 중";
   if (stage.includes("downloading")) return "음원을 저장하는 중";
+  if (stage.includes("planning song and vocals")) return "선율과 노래 흐름을 만드는 중";
+  if (stage.includes("rendering audio")) return "목소리와 반주를 만드는 중";
+  if (stage.includes("saving audio")) return "음원을 저장하는 중";
   if (stage.includes("verified") || stage.includes("checking audio")) return "파일을 확인하는 중";
   if (stage.includes("cancel")) return "취소하는 중";
   return "곡을 만드는 중";
+}
+
+// Model frame/chunk counters describe calculation, not elapsed musical time.
+// Keep them in the engine log and show only stages that a listener can act on.
+export function stageDetail(raw: string | undefined): string {
+  if (!raw || !/[가-힣]/.test(raw) || /quality_|finalizing/i.test(raw)) return "";
+  return raw.replace(/^seed -?\d+:\s*/i, "").slice(0, 160);
 }
 
 export function isQualityBatch(job: ManifestJob): boolean {
@@ -184,15 +194,15 @@ export class TaskRunner {
       .find((item) => !item.parentJobId && item.kind === task.spec.jobKind && (item.createdAt ?? "") >= task.spawnedIso);
     if (job) {
       task.progress = Math.max(0, Math.min(1, Number(job.progress ?? 0)));
-      if (task.spec.jobKind === "candidate-batch") {
+      if (["candidate-batch", "cover-batch"].includes(task.spec.jobKind)) {
         const children = manifest.jobs.filter((item) => item.parentJobId === job.jobId);
         task.done = completedVersions(job, children, task.spec.total);
         const current = [...children].reverse().find((item) => item.status === "running");
         task.stage = stageForJob(job, current);
-        task.detail = !isQualityBatch(job) && current?.stage && !/^(submitting|running|queued)$/i.test(current.stage) && !/quality_|finalizing/i.test(current.stage) ? current.stage : "";
+        task.detail = stageDetail(current?.stage ?? job.stage);
       } else {
         task.stage = stageText(job.stage);
-        task.detail = job.stage && !/^(submitting|running|queued)$/i.test(job.stage) && !/quality_|finalizing/i.test(job.stage) ? job.stage : "";
+        task.detail = stageDetail(job.stage);
       }
     }
     const count = manifest.candidates.length;
@@ -233,6 +243,7 @@ export class TaskRunner {
     if (cancelled) message = "작업을 취소했어요. 이미 끝난 버전은 남아 있어요.";
     else if (code !== 0) message = humanizeError(stderr.trim() || "작업이 실패했어요.");
     else if (task.spec.kind === "repaint") message = "고친 버전이 도착했어요. 원본과 비교해 들어 보세요.";
+    else if (task.spec.kind === "cover" && !failures) message = `원본을 바탕으로 버전 ${newVersionIds.length}개를 만들었어요. 원본과 비교해 들어 보세요.`;
     else if (failures && newVersionIds.length) message = `버전 ${newVersionIds.length}개를 만들었고 ${failures}개는 실패했어요.`;
     else if (failures) message = "버전을 만들지 못했어요. 엔진 기록을 확인하세요.";
     else message = reused

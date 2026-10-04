@@ -65,7 +65,7 @@ export async function handleArtifactRequest(request: Request): Promise<Response>
   });
 }
 
-// Peak envelope for drawing. Supports the PCM widths ACE and exports produce.
+// Peak envelope for drawing. Supports the PCM widths music generation and exports produce.
 export async function wavPeaks(filePath: string, targetBins = 1600): Promise<number[]> {
   let fileStat;
   try {

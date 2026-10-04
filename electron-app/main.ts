@@ -101,7 +101,7 @@ app.whenReady().then(async () => {
   controller.register();
   createWindow();
   void controller.engine.check().then((status) => {
-    if (!screenshotPath && settings.aceAutoStart && status.state === "offline") void controller.engine.start();
+    if (!screenshotPath && settings.engineAutoStart && status.state === "offline") void controller.engine.start();
   });
   controller.engine.startMonitoring();
   app.on("activate", () => {

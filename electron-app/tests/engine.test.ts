@@ -3,7 +3,7 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { aceLaunchAddress, EngineManager, type EngineDependencies } from "../main/engine.ts";
+import { music3LaunchAddress, EngineManager, type EngineDependencies } from "../main/engine.ts";
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -19,7 +19,7 @@ async function drainUntil(check: () => boolean): Promise<void> {
 }
 
 function fixture(
-  baseUrl = "http://127.0.0.1:18001",
+  baseUrl = "http://127.0.0.1:18002",
   beforeStart: () => Promise<void> = async () => {},
   overrides: Partial<EngineDependencies> = {},
 ) {
@@ -32,11 +32,11 @@ function fixture(
     fetch: async (input, options) => {
       requests.push({ url: String(input), options });
       return external || live
-        ? new Response(JSON.stringify({ data: { status: "ok", models_initialized: true, llm_initialized: true } }))
+        ? new Response(JSON.stringify({ data: { status: "ok", engine: "minimax-music3", loaded_model: "mlx-community/MiniMax-Music3-mxfp8", loaded_lm_model: null, capabilities: { text2music: true }, maxDurationSeconds: 300, models_initialized: true, llm_initialized: true } }))
         : new Response("", { status: 503 });
     },
     installed: async () => {},
-    logFile: () => "/unused/ace-server.log",
+    logFile: () => "/unused/music3-server.log",
     openLog: async () => ({ write: () => {}, end: () => {} }),
     spawn: (_command, _args, options) => {
       events.push("spawn");
@@ -61,20 +61,21 @@ function fixture(
     authHeaders: async () => ({ Authorization: "Bearer test-only-key" }),
   };
   Object.assign(dependencies, overrides);
-  const engine = new EngineManager(() => baseUrl, () => {}, () => ({ dit: "dit", lm: "lm" }), beforeStart, dependencies);
+  const engine = new EngineManager(() => baseUrl, () => {}, () => "mlx-community/MiniMax-Music3-mxfp8", beforeStart, dependencies);
   return {
     engine, events, requests, launches, dependencies,
     live: () => Boolean(live),
     external: () => { external = true; },
+    setUrl: (url: string) => { baseUrl = url; },
     close: async () => { if (live) await engine.stop(); },
   };
 }
 
-test("startup holds memory while preparing and an arriving assistant stops ACE before use", async () => {
+test("startup holds memory while preparing and an arriving assistant stops Music3 before use", async () => {
   const preparing = deferred();
   const releasePreparation = deferred();
   let preparationCalls = 0;
-  const value = fixture("http://127.0.0.1:18001", async () => {
+  const value = fixture("http://127.0.0.1:18002", async () => {
     if (++preparationCalls === 1) {
       preparing.resolve();
       await releasePreparation.promise;
@@ -85,7 +86,7 @@ test("startup holds memory while preparing and an arriving assistant stops ACE b
   await preparing.promise;
   let assistantRan = false;
   const answer = value.engine.handoff.withEngineStopped(async () => {
-    assert.equal(value.live(), false, "the assistant must never share memory with ACE");
+    assert.equal(value.live(), false, "the assistant must never share memory with Music3");
     assistantRan = true;
     value.events.push("assistant");
     return "draft";
@@ -124,8 +125,8 @@ test("a user start waits for an assistant and its automatic restart without dead
   await value.close();
 });
 
-test("failing preparation releases memory for the assistant and does not spawn ACE", async () => {
-  const value = fixture("http://127.0.0.1:18001", async () => { throw new Error("assistant unload failed"); });
+test("failing preparation releases memory for the assistant and does not spawn Music3", async () => {
+  const value = fixture("http://127.0.0.1:18002", async () => { throw new Error("assistant unload failed"); });
   assert.equal((await value.engine.start()).state, "failed");
   const result = await value.engine.handoff.withEngineStopped(async () => {
     assert.equal(value.live(), false);
@@ -141,7 +142,7 @@ test("stop cancels pending preparation and its completion cannot clear a newer s
   const secondEntered = deferred();
   const finishSecond = deferred();
   let preparations = 0;
-  const value = fixture("http://127.0.0.1:18001", async () => {
+  const value = fixture("http://127.0.0.1:18002", async () => {
     if (++preparations === 1) {
       firstEntered.resolve();
       await finishFirst.promise;
@@ -168,7 +169,7 @@ test("stop cancels pending preparation and its completion cannot clear a newer s
 
 test("an explicit restart waits for the old process to exit before starting another", async () => {
   const exit = deferred();
-  const value = fixture("http://127.0.0.1:18001", async () => {}, {
+  const value = fixture("http://127.0.0.1:18002", async () => {}, {
     kill: (child) => { void exit.promise.then(() => child.emit("exit", 0, "SIGTERM")); },
   });
   await value.engine.start();
@@ -190,7 +191,7 @@ test("an explicit restart waits for the old process to exit before starting anot
 test("quitting during startup preparation prevents any later spawn", async () => {
   const entered = deferred();
   const finish = deferred();
-  const value = fixture("http://127.0.0.1:18001", async () => {
+  const value = fixture("http://127.0.0.1:18002", async () => {
     entered.resolve();
     await finish.promise;
   });
@@ -207,7 +208,7 @@ test("quitting during log preparation closes the unused stream and does not spaw
   const entered = deferred();
   const finish = deferred();
   let closed = false;
-  const value = fixture("http://127.0.0.1:18001", async () => {}, {
+  const value = fixture("http://127.0.0.1:18002", async () => {}, {
     openLog: async () => {
       entered.resolve();
       await finish.promise;
@@ -280,22 +281,22 @@ test("a normalized explicit HTTP port 80 launches and polls that same port", asy
   assert.equal(baseUrl, "http://127.0.0.1");
   const value = fixture(baseUrl);
   await value.engine.start();
-  assert.equal(value.launches[0].env?.MUSIC_ENGINE_ACE_PORT, "80");
-  assert.equal(value.launches[0].env?.MUSIC_ENGINE_ACE_HOST, "127.0.0.1");
+  assert.equal(value.launches[0].env?.MUSIC_ENGINE_MUSIC3_PORT, "80");
+  assert.equal(value.launches[0].env?.MUSIC_ENGINE_MUSIC3_HOST, "127.0.0.1");
   assert.equal(value.requests[0].url, "http://127.0.0.1/health");
   await value.close();
 });
 
 test("launch bindings follow validated loopback hosts and ports", () => {
-  assert.deepEqual(aceLaunchAddress("http://localhost:18002"), { host: "localhost", port: "18002" });
-  assert.deepEqual(aceLaunchAddress("http://[::1]:18003/"), { host: "::1", port: "18003" });
-  assert.throws(() => aceLaunchAddress("http://127.0.0.1:18001/prefix"), /경로/);
-  assert.throws(() => aceLaunchAddress("https://127.0.0.1:18001"), /이 Mac/);
-  assert.throws(() => aceLaunchAddress("http://example.com:18001"), /이 Mac/);
+  assert.deepEqual(music3LaunchAddress("http://localhost:18002"), { host: "localhost", port: "18002" });
+  assert.deepEqual(music3LaunchAddress("http://[::1]:18003/"), { host: "::1", port: "18003" });
+  assert.throws(() => music3LaunchAddress("http://127.0.0.1:18002/prefix"), /경로/);
+  assert.throws(() => music3LaunchAddress("https://127.0.0.1:18002"), /이 Mac/);
+  assert.throws(() => music3LaunchAddress("http://example.com:18002"), /이 Mac/);
 });
 
 test("an unavailable prefixed URL fails instead of spawning an unreachable server", async () => {
-  const value = fixture("http://127.0.0.1:18001/prefix");
+  const value = fixture("http://127.0.0.1:18002/prefix");
   const result = await value.engine.start();
   assert.equal(result.state, "failed");
   assert.match(result.detail, /경로/);
@@ -312,4 +313,187 @@ test("an external engine is used as configured and is never stopped for the assi
   }), /앱 밖에서 켠 음악 엔진/);
   await value.engine.stop();
   assert.deepEqual(value.events, []);
+});
+
+test("Music3 launch selects the installed runtime and does not pass ACE model options", async () => {
+  const value = fixture();
+  await value.engine.start();
+  const env = value.launches[0].env!;
+  assert.equal(env.MUSIC_ENGINE_MUSIC3_PORT, "18002");
+  assert.equal(env.MUSIC_ENGINE_MUSIC3_MODEL, "mlx-community/MiniMax-Music3-mxfp8");
+  assert.equal(env.MUSIC_ENGINE_ACE_DIT_MODEL, process.env.MUSIC_ENGINE_ACE_DIT_MODEL);
+  assert.equal(env.MUSIC_ENGINE_ACE_LM_MODEL, process.env.MUSIC_ENGINE_ACE_LM_MODEL);
+  await value.close();
+});
+
+test("loading Music3 becomes ready only after model initialization", async () => {
+  let loaded = false;
+  const value = fixture("http://127.0.0.1:18002", async () => {}, {
+    fetch: async () => new Response(JSON.stringify({ data: { status: "ok", engine: "minimax-music3", loaded_model: "mlx-community/MiniMax-Music3-mxfp8", models_initialized: loaded, loaded_lm_model: null, capabilities: { text2music: true }, maxDurationSeconds: 300 } })),
+  });
+  assert.equal((await value.engine.check()).state, "starting");
+  assert.equal(value.engine.isReady(), false);
+  assert.equal(value.engine.recentlyHealthy(), false);
+  loaded = true;
+  assert.equal((await value.engine.check()).state, "external");
+  assert.equal(value.engine.isReady(), true);
+  assert.equal(value.engine.snapshot().maxDurationSeconds, 300);
+});
+
+test("an owned model-loading failure is reported safely and can restart its failed HTTP process", async () => {
+  const failedData = { status: "error", stage: "failed", engine: "minimax-music3",
+    loaded_model: "mlx-community/MiniMax-Music3-mxfp8", loaded_lm_model: null,
+    models_initialized: false, capabilities: { text2music: true }, error: "Bearer secret-key in an internal exception" };
+  const value = fixture("http://127.0.0.1:18002", async () => {}, {
+    fetch: async () => value.live()
+      ? new Response(JSON.stringify({ data: value.launches.length === 1 ? failedData
+        : { ...failedData, status: "ok", stage: "ready", models_initialized: true, error: null } }))
+      : new Response("", { status: 503 }),
+  });
+  try {
+    await value.engine.start();
+    await drainUntil(() => value.engine.snapshot().state === "failed");
+    const failed = value.engine.snapshot();
+    assert.equal(failed.owned, true);
+    assert.match(failed.detail, /모델을 불러오지 못했어요/);
+    assert.doesNotMatch(JSON.stringify(failed), /secret-key|internal exception|Bearer/);
+    assert.equal(value.engine.isReady(), false);
+    assert.equal(value.engine.recentlyHealthy(), false);
+    await value.engine.start();
+    await drainUntil(() => value.engine.snapshot().state === "ready");
+    assert.deepEqual(value.events, ["key", "spawn", "stop", "key", "spawn"]);
+    assert.equal(value.launches.length, 2);
+    assert.equal(value.engine.snapshot().owned, true);
+  } finally { await value.close(); }
+});
+
+test("an external loading failure remains external and is never stopped, replaced, or shared with an assistant", async () => {
+  const value = fixture("http://127.0.0.1:18002", async () => {}, {
+    fetch: async () => new Response(JSON.stringify({ data: { status: "error", stage: "failed", engine: "minimax-music3",
+      loaded_model: "mlx-community/MiniMax-Music3-mxfp8", models_initialized: false, loaded_lm_model: null,
+      capabilities: { text2music: true }, error: "private failed-response-body" } })),
+  });
+  const failed = await value.engine.start();
+  assert.equal(failed.state, "failed");
+  assert.equal(failed.owned, false);
+  assert.match(failed.detail, /앱 밖에서 켠 엔진/);
+  assert.doesNotMatch(JSON.stringify(failed), /private failed-response-body/);
+  await assert.rejects(value.engine.handoff.withEngineStopped(async () => assert.fail("an external failed server can still hold model memory")), /앱 밖에서 켠 음악 엔진/);
+  await value.engine.stop();
+  assert.deepEqual(value.events, []);
+  assert.equal(value.engine.isReady(), false);
+});
+
+test("wrong engine, wrong Music3 model, or missing generation capability never becomes ready", async () => {
+  for (const data of [
+    { engine: "ace-step", loaded_model: "acestep-v15-turbo", capabilities: { text2music: true } },
+    { engine: "minimax-music3", loaded_model: "unrelated/model", capabilities: { text2music: true } },
+    { engine: "minimax-music3", loaded_model: "mlx-community/MiniMax-Music3-mxfp8", capabilities: { text2music: false } },
+  ]) {
+    const value = fixture("http://127.0.0.1:18002", async () => {}, {
+      fetch: async () => new Response(JSON.stringify({ data: { status: "ok", models_initialized: true, ...data } })),
+    });
+    const status = await value.engine.start();
+    assert.equal(status.state, "failed");
+    assert.equal(status.owned, false);
+    assert.equal(value.engine.isReady(), false);
+    assert.equal(value.engine.recentlyHealthy(), false);
+    await value.engine.stop();
+    assert.deepEqual(value.events, [], "an external incompatible engine must never be killed or replaced");
+  }
+});
+
+test("address changes are refused while an owned engine, an external engine, or startup uses memory", async () => {
+  const addressA = "http://127.0.0.1:18002";
+  const addressB = "http://127.0.0.1:18009";
+  const value = fixture(addressA);
+  await value.engine.start();
+  let saved = false;
+  await assert.rejects(value.engine.withConnectionChange(addressB, async () => {
+    saved = true;
+    value.setUrl(addressB);
+  }), /꺼진 뒤 주소/);
+  assert.equal(saved, false);
+  assert.equal(value.engine.snapshot().baseUrl, addressA);
+  assert.equal(value.live(), true);
+  await value.close();
+
+  const outside = fixture(addressA);
+  outside.external();
+  await assert.rejects(outside.engine.withConnectionChange(addressB, async () => { saved = true; }), /앱 밖에서 켠 엔진/);
+  assert.deepEqual(outside.events, []);
+
+  const preparing = deferred();
+  const finish = deferred();
+  const starting = fixture(addressA, async () => { preparing.resolve(); await finish.promise; });
+  const pending = starting.engine.start();
+  await preparing.promise;
+  await assert.rejects(starting.engine.withConnectionChange(addressB, async () => { saved = true; }), /꺼진 뒤 주소/);
+  finish.resolve();
+  await pending;
+  assert.equal(saved, false);
+  await starting.close();
+});
+
+test("connection changes are allowed with both engines off, while unchanged-address preference writes remain usable", async () => {
+  const value = fixture();
+  const next = "http://127.0.0.1:18009";
+  const result = await value.engine.withConnectionChange(next, async () => { value.setUrl(next); return "saved"; });
+  assert.equal(result, "saved");
+  await value.engine.check();
+  assert.equal(value.engine.snapshot().baseUrl, next);
+  assert.equal(value.engine.snapshot().state, "offline");
+  await value.engine.start();
+  assert.equal(await value.engine.withConnectionChange(next, async () => "same address saved"), "same address saved");
+  await value.close();
+});
+
+test("an out-of-band A-to-B address change never claims an external B as app-owned or runs an assistant beside it", async () => {
+  const addressA = "http://127.0.0.1:18002";
+  const addressB = "http://127.0.0.1:18009";
+  const value = fixture(addressA);
+  await value.engine.start();
+  value.external();
+  value.setUrl(addressB); // Simulate preferences changed outside the guarded current IPC.
+  const status = await value.engine.check();
+  assert.equal(status.state, "external");
+  assert.equal(status.owned, false);
+  let assistantRan = false;
+  await assert.rejects(value.engine.handoff.withEngineStopped(async () => { assistantRan = true; }), /앱 밖에서 켠 음악 엔진/);
+  assert.equal(assistantRan, false);
+  assert.equal(value.live(), true, "owned A and external B are untouched by a refused handoff");
+  assert.deepEqual(value.events, ["key", "spawn"]);
+  await value.close();
+});
+
+test("an external server appearing while the owned child stops prevents the assistant call", async () => {
+  const value = fixture("http://127.0.0.1:18002", async () => {}, {
+    kill: (child) => {
+      value.external();
+      value.events.push("stop");
+      queueMicrotask(() => child.emit("exit", 0, "SIGTERM"));
+    },
+  });
+  await value.engine.start();
+  let assistantRan = false;
+  await assert.rejects(value.engine.handoff.withEngineStopped(async () => { assistantRan = true; }), /아직 메모리를/);
+  assert.equal(assistantRan, false);
+  await drainUntil(() => value.engine.snapshot().state === "external");
+  assert.equal(value.engine.snapshot().owned, false);
+  assert.equal(value.launches.length, 1, "no external process is stopped or replaced");
+});
+
+test("a delayed poll for an old address cannot report the new address as ready", async () => {
+  const pending = deferred<Response>();
+  const value = fixture("http://127.0.0.1:18002", async () => {}, {
+    fetch: async (input) => String(input).includes(":18002/") ? pending.promise : new Response("", { status: 503 }),
+  });
+  const oldPoll = value.engine.check();
+  value.setUrl("http://127.0.0.1:18009");
+  await value.engine.check();
+  pending.resolve(new Response(JSON.stringify({ data: { status: "ok", engine: "minimax-music3", models_initialized: true, loaded_model: "mlx-community/MiniMax-Music3-mxfp8", capabilities: { text2music: true } } })));
+  await oldPoll;
+  assert.equal(value.engine.snapshot().state, "offline");
+  assert.equal(value.engine.snapshot().baseUrl, "http://127.0.0.1:18009");
+  assert.equal(value.engine.recentlyHealthy(), false);
 });

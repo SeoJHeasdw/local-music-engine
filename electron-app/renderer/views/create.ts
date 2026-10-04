@@ -3,10 +3,13 @@ import { byId, h, icon, mount } from "../dom.ts";
 import { clock, hasTag, lengthLabel, splitTags, toggleTag } from "../format.ts";
 import { beginSongOpen, finishSongOpen, get, set, type CreateDraft } from "../store.ts";
 import { DraftEdits } from "../draft-edits.ts";
-import type { DraftResult } from "../../shared.ts";
+import type { DraftResult, SongPlanInput, SongPlanResult } from "../../shared.ts";
 import { toast, withBusy } from "../ui.ts";
+import { emptyProductionRules, parseProductionBpm, productionPreview, selectProductionPreset, toggleProductionRule } from "../../production-rules.ts";
+import { SongPlanPreview } from "../song-plan-preview.ts";
+import { songPlanView } from "../song-plan-view.ts";
 
-// Plain-Korean labels for the English tags ACE-Step was trained on. The chip shows the
+// Plain-Korean labels for the English tags the music model understands. The chip shows the
 // word a non-musician would use; the tooltip shows the exact tag that is sent.
 const STYLE_GROUPS: Array<{ name: string; tags: Array<[string, string]> }> = [
   {
@@ -28,7 +31,7 @@ const STYLE_GROUPS: Array<{ name: string; tags: Array<[string, string]> }> = [
     name: "목소리",
     tags: [
       ["여성 보컬", "female vocal"], ["남성 보컬", "male vocal"], ["속삭이듯", "breathy vocal"], ["힘 있게", "powerful vocal"],
-      ["또렷한 발음", "clear Korean diction"], ["화음 코러스", "vocal harmonies"],
+      ["또렷한 발음", "clear diction"], ["화음 코러스", "vocal harmonies"],
     ],
   },
   {
@@ -63,7 +66,7 @@ const SECTIONS: Array<[string, string]> = [
   ["[Outro]", "아웃트로 — 곡을 마무리하는 부분"],
 ];
 
-const DURATIONS = [30, 60, 120, 180, 240];
+const DURATIONS = [30, 60, 120, 180, 240, 300];
 const INSTRUMENTAL = "[Instrumental]";
 
 type Refs = {
@@ -83,11 +86,20 @@ type Refs = {
   meter: HTMLSelectElement;
   meta: HTMLDetailsElement;
   lyricsHint: HTMLElement;
+  preset: HTMLSelectElement;
+  presetHint: HTMLElement;
+  productionCheckboxes: Map<string, HTMLInputElement>;
+  vocalLanguage: HTMLSelectElement;
+  songPlanButton: HTMLButtonElement;
+  songPlanStatus: HTMLElement;
 };
 
 let refs: Refs | null = null;
 const draftEdits = new DraftEdits();
 let drafting = false;
+let planningSong = false;
+let creating = false;
+const songPlanPreview = new SongPlanPreview();
 
 export function blankDraft(): CreateDraft {
   const settings = get()?.settings;
@@ -97,17 +109,20 @@ export function blankDraft(): CreateDraft {
     title: "",
     stylePrompt: "",
     lyrics: "",
-    durationSeconds: settings?.defaultDurationSeconds ?? 120,
-    versions: settings?.defaultVersions ?? 2,
+    durationSeconds: settings?.defaultDurationSeconds ?? 60,
+    versions: settings?.defaultVersions ?? 1,
     bpm: "",
     keyScale: "",
     timeSignature: "",
     drafted: false,
+    productionRules: emptyProductionRules(),
+    vocalLanguage: "ko",
   };
 }
 
 function patch(change: Partial<CreateDraft>): void {
   draftEdits.edited(change);
+  songPlanPreview.edited();
   set({ create: { ...get().create, ...change } });
 }
 
@@ -148,12 +163,13 @@ async function requestDraft(): Promise<void> {
   const llm = get().settings.assistant.kind !== "rules";
   drafting = true;
   const ticket = draftEdits.begin(draft);
+  delete refs.draftStatus.dataset.defaultHint;
   refs.draftStatus.textContent = llm
     ? "로컬 LLM이 제목·스타일·가사를 쓰고 있어요. 모델을 불러오느라 30초쯤 걸릴 수 있어요."
-    : "음악 엔진이 스타일을 쓰고 있어요.";
+    : "제작 규칙에 맞춰 가사와 스타일을 채우고 있어요.";
   let result: DraftResult | undefined;
   try {
-    result = await withBusy(refs.draftButton, "초안을 쓰는 중", () => api.draft(draft.description, draft.instrumental, draft.durationSeconds));
+    result = await withBusy(refs.draftButton, "초안을 쓰는 중", () => api.draft(draft.description, draft.instrumental, draft.durationSeconds, draft.productionRules, draft.vocalLanguage ?? "ko"));
   } finally {
     drafting = false;
     syncCreate();
@@ -163,6 +179,7 @@ async function requestDraft(): Promise<void> {
   if (!result) return;
   const change = draftEdits.merge(ticket, get().create, result, fallbackTitle(draft.description));
   if (!change) return;
+  songPlanPreview.edited();
   set({ create: { ...get().create, ...change } });
   const latest = get().create;
   refs.style.value = latest.stylePrompt;
@@ -171,7 +188,7 @@ async function requestDraft(): Promise<void> {
   if (change.stylePrompt !== undefined) flash(refs.style);
   if (change.lyrics !== undefined) flash(refs.lyrics);
   syncCreate();
-  const source = result.source === "llm" ? `로컬 LLM(${result.sourceModel})이 쓴 초안이에요.` : "음악 엔진이 쓴 초안이에요.";
+  const source = result.source === "llm" ? `로컬 LLM(${result.sourceModel})이 쓴 초안이에요.` : "제작 규칙으로 채운 초안이에요.";
   mount(
     refs.draftStatus,
     h("span", { class: "draft-source" }, icon("sparkle", 14), source, " 마음에 들지 않는 부분은 바로 고치세요."),
@@ -180,12 +197,45 @@ async function requestDraft(): Promise<void> {
   toast("초안을 채웠어요.", { tone: "ok" });
 }
 
+function songPlanInput(draft: CreateDraft): SongPlanInput {
+  const preview = productionPreview(draft, get().productionCatalog);
+  const rules = draft.productionRules ?? emptyProductionRules();
+  return { lyrics: draft.instrumental ? INSTRUMENTAL : draft.lyrics, durationSeconds: draft.durationSeconds,
+    bpm: parseProductionBpm(preview.bpm), timeSignature: preview.timeSignature || null, presetId: rules.presetId,
+    development: rules.ruleIds.includes("section-development"), breathing: !draft.instrumental && rules.ruleIds.includes("phrase-breathing"), instrumental: draft.instrumental };
+}
+
+async function requestSongPlan(): Promise<SongPlanResult | null> {
+  if (planningSong) return null;
+  let input: SongPlanInput;
+  try { input = songPlanInput(get().create); } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), { tone: "error" });
+    return null;
+  }
+  const cached = songPlanPreview.current(input);
+  if (cached) return cached;
+  const ticket = songPlanPreview.begin(input);
+  planningSong = true;
+  syncCreate();
+  try {
+    const plan = await api.songPlan(input);
+    if (!songPlanPreview.complete(ticket, plan)) return null;
+    return plan;
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), { tone: "error" });
+    return null;
+  } finally {
+    planningSong = false;
+    syncCreate();
+  }
+}
+
 async function submit(button: HTMLButtonElement): Promise<void> {
-  if (button.disabled) return;
+  if (button.disabled || creating || planningSong) return;
   const draft = get().create;
   const lyrics = draft.instrumental ? INSTRUMENTAL : draft.lyrics.trim();
-  if (!draft.stylePrompt.trim()) {
-    toast("스타일을 한 줄 적거나 아래 칩에서 골라 주세요.", { tone: "error" });
+  if (!productionPreview(draft, get().productionCatalog).stylePrompt) {
+    toast("스타일을 한 줄 적거나 제작 프리셋을 골라 주세요.", { tone: "error" });
     refs?.style.focus();
     return;
   }
@@ -194,7 +244,30 @@ async function submit(button: HTMLButtonElement): Promise<void> {
     refs?.lyrics.focus();
     return;
   }
-  const bpm = Number.parseInt(draft.bpm, 10);
+  let bpm: number | null;
+  try {
+    bpm = parseProductionBpm(draft.bpm);
+  } catch (error) {
+    toast(error instanceof Error ? error.message : String(error), { tone: "error" });
+    refs?.bpm.focus();
+    return;
+  }
+  creating = true;
+  syncCreate();
+  const plan = await requestSongPlan();
+  if (!plan) { creating = false; syncCreate(); return; }
+  let currentPlan = false;
+  try {
+    currentPlan = get().view === "create" && songPlanPreview.current(songPlanInput(get().create)) === plan;
+  } catch {
+    // An input can become invalid while the asynchronous preview is finishing.
+    // Treat that response as stale and always release the create button below.
+  }
+  if (!currentPlan) {
+    creating = false; syncCreate();
+    toast("가사나 제작 규칙이 바뀌었어요. 다시 확인한 뒤 만들어 주세요.", { tone: "error" });
+    return;
+  }
   const request = beginSongOpen();
   const state = await withBusy(button, "만드는 중", () =>
     api.createSong({
@@ -203,15 +276,19 @@ async function submit(button: HTMLButtonElement): Promise<void> {
       lyrics,
       durationSeconds: draft.durationSeconds,
       versions: draft.versions,
-      bpm: Number.isFinite(bpm) && bpm >= 30 && bpm <= 300 ? bpm : null,
+      bpm,
       keyScale: draft.keyScale.trim() || null,
       timeSignature: draft.timeSignature.trim() || null,
+      productionRules: draft.productionRules ?? emptyProductionRules(),
     }),
   );
+  creating = false;
+  syncCreate();
   if (!finishSongOpen(request) || !state) return;
   applySong(state);
   set({ create: blankDraft() });
   draftEdits.reset();
+  songPlanPreview.reset();
   refs = null;
   go("studio");
   toast(`버전 ${draft.versions}개를 만들고 자동으로 확인해요. 필요한 재시도까지 마치면 추천본을 골라 드려요.`, { tone: "ok" });
@@ -285,6 +362,44 @@ function build(): void {
       syncCreate();
     },
   });
+  const vocalLanguage = h(
+    "select",
+    { class: "input", "aria-label": "가사 초안 언어", onChange: (event: Event) => {
+      patch({ vocalLanguage: (event.target as HTMLSelectElement).value as "ko" | "en" });
+      syncCreate();
+    } },
+    h("option", { value: "ko", selected: (draft.vocalLanguage ?? "ko") === "ko" }, "한국어"),
+    h("option", { value: "en", selected: draft.vocalLanguage === "en" }, "영어"),
+  );
+  const catalog = get().productionCatalog;
+  const preset = h(
+    "select",
+    { class: "input", disabled: !catalog, onChange: (event: Event) => {
+      const id = (event.target as HTMLSelectElement).value || null;
+      patch({ productionRules: selectProductionPreset(id, get().productionCatalog) });
+      syncCreate();
+    } },
+    h("option", { value: "" }, "직접 설정"),
+    (catalog?.presets ?? []).map((item) => h("option", { value: item.id }, item.label)),
+  );
+  const presetHint = h("p", { class: "hint", role: "status" });
+  const productionCheckboxes = new Map<string, HTMLInputElement>();
+  const productionChoices = (catalog?.rules ?? []).map((rule) => {
+    const descriptionId = `production-rule-${rule.id}-description`;
+    const checkbox = h("input", {
+      type: "checkbox",
+      "aria-describedby": descriptionId,
+      onChange: (event: Event) => {
+        patch({ productionRules: toggleProductionRule(get().create.productionRules ?? emptyProductionRules(), rule.id, (event.target as HTMLInputElement).checked) });
+        syncCreate();
+      },
+    });
+    productionCheckboxes.set(rule.id, checkbox);
+    return h("label", { class: "production-rule" }, checkbox, h("span", null,
+      h("strong", null, rule.label),
+      h("span", { id: descriptionId, class: "production-rule-description" }, rule.description),
+    ));
+  });
   const chips: HTMLButtonElement[] = [];
   const groups = STYLE_GROUPS.map((group) =>
     h(
@@ -347,9 +462,11 @@ function build(): void {
       h("label", { class: "field" }, h("span", { class: "label" }, "조성"), key),
       h("label", { class: "field" }, h("span", { class: "label" }, "박자"), meter),
     ),
-    h("p", { class: "hint" }, "비워 두면 음악 엔진이 스타일에 맞춰 정해요. 초안을 받으면 엔진이 제안한 값이 들어가요."),
+    h("p", { class: "hint" }, "비워 두면 음악 엔진이 스타일에 맞춰 정해요. 초안을 받으면 제안한 값이 들어가요."),
   );
   const lyricsHint = h("p", { class: "hint" });
+  const songPlanButton = h("button", { type: "button", class: "button secondary", onClick: () => void requestSongPlan() }, icon("lyrics", 16), "곡 전개·가사 호흡 확인");
+  const songPlanStatus = h("div", { class: "song-plan-preview", role: "status" });
 
   mount(
     root,
@@ -393,7 +510,18 @@ function build(): void {
             h("label", { class: "switch" }, instrumental, h("span", null, "연주곡 (가사 없음)")),
             draftButton,
           ),
+          h("label", { class: "field draft-language" }, h("span", { class: "label" }, "가사 초안 언어"), vocalLanguage),
+          h("p", { class: "hint" }, "초안을 받을 때 사용할 언어예요. 직접 적은 가사는 그대로 두고, 장르와 별개로 선택해요."),
           draftStatus,
+        ),
+        h(
+          "section",
+          { class: "create-section" },
+          h("h2", { class: "section-title" }, "제작 규칙"),
+          h("label", { class: "field" }, h("span", { class: "label" }, "장르별 추천"), preset),
+          presetHint,
+          h("fieldset", { class: "production-rule-list" }, h("legend", { class: "label" }, "원하는 규칙을 골라 주세요"), productionChoices),
+          h("p", { class: "hint" }, "리듬·선율·목소리·전개를 구체적으로 지시해 곡의 방향을 잡아요. 먼저 장르별 추천을 고른 뒤 원하는 규칙을 조정해 보세요."),
         ),
         h(
           "section",
@@ -406,8 +534,8 @@ function build(): void {
               "span",
               { class: "label" },
               "스타일 ",
-              h("em", null, "음악 엔진이 읽는 영어 태그"),
-              h("span", { class: "help", "data-tip": "음악 엔진은 쉼표로 나눈 영어 태그를 읽어요. 아래 칩을 누르면 태그가 들어가고, 다시 누르면 빠져요. 직접 적어도 돼요." }, "?"),
+              h("em", null, "영어 태그 또는 구체적인 설명"),
+              h("span", { class: "help", "data-tip": "장르·악기 태그와 원하는 선율·목소리·전개를 영어로 적어요. 아래 칩을 누르면 태그가 들어가고, 다시 누르면 빠져요." }, "?"),
             ),
             style,
           ),
@@ -442,18 +570,38 @@ function build(): void {
             versions,
           ),
           meta,
+          songPlanButton,
+          songPlanStatus,
         ),
       ),
       h("aside", { class: "create-summary" }, h("h2", { class: "section-title" }, "보낼 내용"), summary),
     ),
   );
-  refs = { description, title, style, lyrics, chips, durations, versions, summary, draftButton, draftStatus, instrumental, bpm, key, meter, meta, lyricsHint };
+  refs = { description, title, style, lyrics, chips, durations, versions, summary, draftButton, draftStatus, instrumental, bpm, key, meter, meta, lyricsHint, preset, presetHint, productionCheckboxes, vocalLanguage, songPlanButton, songPlanStatus };
 }
 
 export function syncCreate(): void {
   if (!refs) return;
   const state = get();
   const draft = state.create;
+  const selection = draft.productionRules ?? emptyProductionRules();
+  const preview = productionPreview(draft, state.productionCatalog);
+  refs.songPlanButton.disabled = planningSong || creating;
+  refs.songPlanButton.textContent = planningSong ? "곡 전개와 호흡을 확인하는 중" : "곡 전개·가사 호흡 확인";
+  let songPlan: SongPlanResult | null = null;
+  try { songPlan = songPlanPreview.current(songPlanInput(draft)); } catch { /* Invalid typed metadata is reported on request. */ }
+  mount(refs.songPlanStatus, songPlan ? songPlanView(songPlan) : h("p", { class: "hint" }, planningSong ? "음악 엔진을 켜지 않고 전개와 가사 길이를 확인해요." : "현재 길이와 가사로 추천 전개, 강약, 구절별 호흡을 미리 볼 수 있어요. 규칙을 켜면 제작할 때 안내를 함께 보내요."));
+  refs.preset.value = selection.presetId ?? "";
+  refs.presetHint.textContent = !state.productionCatalog ? "제작 규칙 목록을 불러오지 못했어요." : preview.preset
+    ? `${preview.preset.description} 추천 규칙만 체크해요. 직접 쓴 스타일·가사·음악 정보는 유지해요.`
+    : "규칙을 개별로 선택할 수 있어요. 프리셋을 해제하면 추천 체크도 모두 해제돼요.";
+  for (const [id, checkbox] of refs.productionCheckboxes) {
+    checkbox.checked = selection.ruleIds.includes(id);
+  }
+  refs.vocalLanguage.value = draft.vocalLanguage ?? "ko";
+  refs.vocalLanguage.disabled = draft.instrumental;
+  refs.bpm.placeholder = preview.preset?.bpm ? `추천: ${preview.preset.bpm}` : "예: 92";
+  refs.key.placeholder = preview.preset?.keyScale ? `추천: ${preview.preset.keyScale}` : "예: C major";
   for (const chip of refs.chips) {
     const on = hasTag(draft.stylePrompt, chip.dataset.tag ?? "");
     chip.classList.toggle("is-active", on);
@@ -483,7 +631,7 @@ export function syncCreate(): void {
   const tags = splitTags(draft.stylePrompt);
   const createButton = h(
     "button",
-    { type: "button", class: "button primary block large", disabled: !ready, onClick: (event: Event) => void submit(event.currentTarget as HTMLButtonElement) },
+    { type: "button", class: "button primary block large", disabled: !ready || creating || planningSong, onClick: (event: Event) => void submit(event.currentTarget as HTMLButtonElement) },
     `곡 만들기 · 버전 ${draft.versions}개`,
   );
   mount(
@@ -495,13 +643,26 @@ export function syncCreate(): void {
       h("dt", null, "길이"), h("dd", null, lengthLabel(draft.durationSeconds)),
       h("dt", null, "버전"), h("dd", null, `${draft.versions}개`),
       h("dt", null, "가사"), h("dd", null, draft.instrumental ? "연주곡" : draft.lyrics.trim() ? `${lines}줄` : "비어 있음"),
+      h("dt", null, "빠르기"), h("dd", null, preview.bpm ? `${preview.bpm} BPM` : "엔진에 맡기기"),
+      h("dt", null, "조성"), h("dd", null, preview.keyScale || "엔진에 맡기기"),
+      h("dt", null, "박자"), h("dd", null, preview.timeSignature || "엔진에 맡기기"),
     ),
     h("div", { class: "summary-caption" }, h("span", { class: "label" }, `스타일 태그 ${tags.length}개`), h("p", { class: "mono caption-text" }, draft.stylePrompt.trim() || "아직 없음")),
+    h("div", { class: "summary-caption production-summary" },
+      h("span", { class: "label" }, "선택한 제작 규칙"),
+      h("p", null, preview.preset ? `${preview.preset.label} · ${preview.captions.length}개 적용` : `${preview.captions.length}개 적용`),
+      preview.captions.length > 0 && h("ul", { class: "production-selected" }, preview.captions.map((rule) => h("li", null, rule.label))),
+      draft.instrumental && selection.ruleIds.some((id) => ["clear-vocal", "phrase-breathing"].includes(id)) && h("p", { class: "hint" }, "보컬과 가사 호흡 규칙은 연주곡에 보내지 않아요."),
+      h("details", { class: "disclosure" }, h("summary", null, "제작 방향 미리보기"), h("p", { class: "mono caption-text" }, preview.stylePrompt || "아직 없음"), h("p", { class: "hint" }, "이 방향을 보컬·편곡·곡 전개 안내로 정리해 제작해요.")),
+      h("p", { class: "hint" }, "비워 둔 음악 정보는 장르 추천값을 사용해요. 직접 입력한 값이 우선이에요."),
+      preview.warnings.map((warning) => h("p", { class: "hint tone-warn" }, warning)),
+    ),
+    songPlan && h("details", { class: "disclosure" }, h("summary", null, "곡 전개·가사 호흡 미리보기"), songPlanView(songPlan)),
     !ready &&
       h(
         "div",
         { class: "notice tone-warn" },
-        h("p", null, state.engine.state === "starting" ? "음악 엔진을 켜는 중이에요. 준비되면 만들 수 있어요." : "음악 엔진이 꺼져 있어요. 켜야 초안과 곡을 만들 수 있어요."),
+        h("p", null, state.engine.state === "starting" ? "음악 엔진을 켜는 중이에요. 준비되면 만들 수 있어요." : "음악 엔진이 꺼져 있어요. 초안은 작성할 수 있고, 곡 만들기는 엔진을 켜야 시작해요."),
         ["offline", "failed"].includes(state.engine.state) &&
           h("button", { type: "button", class: "button small secondary", onClick: () => void startEngine() }, icon("power", 14), "엔진 켜기"),
       ),
@@ -510,18 +671,25 @@ export function syncCreate(): void {
     h("p", { class: "hint center" }, "⌘ Enter로도 시작해요. 새 곡은 ", h("span", { class: "mono" }, state.settings.projectsDir.replace(/^\/Users\/[^/]+/, "~")), "에 저장돼요."),
   );
   const llm = state.settings.assistant.kind !== "rules";
-  refs.draftButton.disabled = drafting || (!ready && !llm);
-  refs.draftButton.dataset.tip = ready || llm ? "" : "음악 엔진을 켜거나 설정에서 로컬 LLM 도우미를 켜세요";
-  if (!refs.draftStatus.childNodes.length && !llm) {
+  refs.draftButton.disabled = drafting;
+  refs.draftButton.dataset.tip = "";
+  if (llm && refs.draftStatus.dataset.defaultHint === "true") {
+    refs.draftStatus.replaceChildren();
+    delete refs.draftStatus.dataset.defaultHint;
+  }
+  if ((!refs.draftStatus.childNodes.length || refs.draftStatus.dataset.defaultHint === "true") && !llm) {
+    refs.draftStatus.dataset.defaultHint = "true";
     mount(
       refs.draftStatus,
       h(
         "span",
         { class: "draft-note" },
         icon("info", 14),
-        "지금은 음악 엔진이 스타일만 제안해요. 한글 가사까지 받으려면 ",
-        h("button", { type: "button", class: "link", onClick: () => go("settings") }, "설정에서 로컬 LLM 도우미"),
-        "를 켜세요.",
+        draft.vocalLanguage === "en"
+          ? "제작 규칙으로 영어 가사와 스타일의 초안을 채워요. 표현은 직접 고쳐도 돼요."
+          : ["제작 규칙으로 한글 가사와 스타일의 초안을 채워요. 더 자유로운 작사는 ",
+            h("button", { type: "button", class: "link", onClick: () => go("settings") }, "설정의 로컬 LLM 도우미"),
+            "를 사용할 수 있어요."],
       ),
     );
   }

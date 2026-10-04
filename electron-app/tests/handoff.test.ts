@@ -7,8 +7,8 @@ function engine(ownership: Ownership) {
   return {
     events,
     ownership: async () => ownership,
-    stop: async () => void events.push("stop"),
-    start: async () => void events.push("start"),
+    stop: async () => { events.push("stop"); ownership = "off"; },
+    start: async () => { events.push("start"); ownership = "owned"; },
   };
 }
 

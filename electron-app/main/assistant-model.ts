@@ -3,7 +3,7 @@ import { requireLoopbackUrl } from "./files.ts";
 
 type Assistant = { kind: AssistantKind; baseUrl: string; model: string };
 
-// Ollama's keep_alive=0 response must confirm completion before ACE can claim memory.
+// Ollama's keep_alive=0 response must confirm completion before Music3 can claim memory.
 export async function unloadAssistant(assistant: Assistant, request: typeof fetch = fetch): Promise<void> {
   if (assistant.kind !== "ollama" || !assistant.model) return;
   const base = requireLoopbackUrl(assistant.baseUrl, "AI 도우미").replace(/\/$/, "");

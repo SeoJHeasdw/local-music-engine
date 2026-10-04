@@ -10,6 +10,8 @@ import type {
   MusicEvent,
   Plan,
   PlanInput,
+  ProductionCatalog,
+  SongPlanResult,
   RevealTarget,
   ReviewInput,
   ReviseInput,
@@ -20,6 +22,7 @@ import type {
 } from "../shared.ts";
 import { runCli } from "./cli.ts";
 import { EngineManager } from "./engine.ts";
+import { music3GenerationArgs, music3Ready, requireFullGeneration } from "./generation-arguments.ts";
 import { requireLoopbackUrl } from "./files.ts";
 import { engineRoot } from "./paths.ts";
 import { currentSettings, loadAppState, loadSettings, saveSettings, updateAppState } from "./settings.ts";
@@ -36,6 +39,8 @@ import {
 import { TaskRunner, type TaskSpec } from "./tasks.ts";
 import { SongSession, type SongContext } from "./song-session.ts";
 import { unloadAssistant } from "./assistant-model.ts";
+import { parseProductionRules, productionPreview } from "../production-rules.ts";
+import { parseRegenerateInput, parseSongPlanInput } from "../song-plan.ts";
 
 const versionIdPattern = /^candidate_[a-f0-9]{32}$/;
 const artifactIdPattern = /^artifact_[a-f0-9]{32}$/;
@@ -46,13 +51,14 @@ export class Controller {
   tasks: TaskRunner;
   private session = new SongSession(songIdFor);
   private rules: RuleHint[] | null = null;
+  private productionCatalog: Promise<ProductionCatalog> | null = null;
   private startingGeneration = false;
 
   constructor(private window: () => BrowserWindow | null) {
     this.engine = new EngineManager(
-      () => currentSettings().aceBaseUrl,
+      () => currentSettings().engineBaseUrl,
       (engine) => this.send({ type: "engine", engine }),
-      () => ({ dit: currentSettings().ditModel, lm: currentSettings().lmModel }),
+      () => currentSettings().musicModel,
       () => unloadAssistantModel(),
     );
     this.tasks = new TaskRunner({
@@ -106,11 +112,15 @@ export class Controller {
     if (this.tasks.isBusy(folder)) throw new Error("이 곡을 만드는 중이에요. 작업이 끝난 뒤 다시 시도하세요.");
   }
 
+  private generationBusy(): boolean {
+    return this.startingGeneration || this.tasks.busyFolder() !== null;
+  }
+
   private async requireEngine(): Promise<void> {
     if (this.engine.handoff.active()) throw new Error("AI 도우미가 답하는 중이라 음악 엔진을 잠시 꺼 뒀어요. 끝나면 다시 켜져요.");
-    if (this.engine.isReady() || this.engine.recentlyHealthy()) return;
+    if (music3Ready(this.engine.snapshot()) && (this.engine.isReady() || this.engine.recentlyHealthy())) return;
     const status = await this.engine.check();
-    if (status.state === "ready" || status.state === "external" || this.engine.recentlyHealthy()) return;
+    if (music3Ready(status)) return;
     if (status.state === "starting") throw new Error("음악 엔진을 켜는 중이에요. 준비되면 다시 시도하세요.");
     throw new Error("음악 엔진이 꺼져 있어요. 왼쪽 아래에서 엔진을 켜세요.");
   }
@@ -118,7 +128,7 @@ export class Controller {
   // A local assistant LLM never shares memory with the music engine (see handoff.ts).
   private async withAssistant<T>(call: () => Promise<T>): Promise<T> {
     if (currentSettings().assistant.kind === "rules") return call();
-    if (this.tasks.busyFolder()) {
+    if (this.generationBusy()) {
       throw new Error("곡을 만드는 동안에는 AI 도우미를 쓸 수 없어요. 음악 엔진과 도우미 모델을 함께 올리면 메모리가 부족해요. 끝난 뒤 다시 시도하세요.");
     }
     return this.engine.handoff.withEngineStopped(call);
@@ -137,19 +147,7 @@ export class Controller {
   }
 
   private generationArgs(folder: string, count: number): string[] {
-    const settings = currentSettings();
-    return [
-      "generate",
-      folder,
-      "--seeds",
-      this.seeds(count),
-      "--base-url",
-      settings.aceBaseUrl,
-      "--model",
-      settings.ditModel,
-      "--lm-model",
-      settings.lmModel,
-    ];
+    return music3GenerationArgs(folder, this.seeds(count), currentSettings());
   }
 
   private async startTask(spec: Omit<TaskSpec, "songId" | "songTitle">, context?: SongContext): Promise<SongState> {
@@ -175,7 +173,7 @@ export class Controller {
         // A missing recent song leaves the library open.
       }
     }
-    const [songs, song, rules] = await Promise.all([this.songs(), this.songState(), this.ruleHints()]);
+    const [songs, song, rules, productionCatalog] = await Promise.all([this.songs(), this.songState(), this.ruleHints(), this.productionRuleCatalog()]);
     return {
       settings,
       engine: this.engine.snapshot(),
@@ -183,6 +181,7 @@ export class Controller {
       song,
       task: this.tasks.snapshot(),
       rules,
+      productionCatalog,
       info: { version: app.getVersion(), engineRoot, dataDir: app.getPath("userData") },
     };
   }
@@ -194,8 +193,16 @@ export class Controller {
     return this.rules;
   }
 
+  private productionRuleCatalog(): Promise<ProductionCatalog> {
+    this.productionCatalog ??= runCli<ProductionCatalog>(["production-rules"]).catch((error) => {
+      this.productionCatalog = null;
+      throw error;
+    });
+    return this.productionCatalog;
+  }
+
   register(): void {
-    const generationChannels = new Set(["create-song", "apply-plan", "generate-more", "resume"]);
+    const generationChannels = new Set(["create-song", "apply-plan", "generate-more", "regenerate-song", "resume"]);
     const handle = (channel: string, fn: (...args: any[]) => unknown) =>
       ipcMain.handle(`music:${channel}`, async (event, ...args) => {
         const window = this.window();
@@ -203,7 +210,7 @@ export class Controller {
           throw new Error("앱의 작업 화면에서만 요청할 수 있어요.");
         }
         if (!generationChannels.has(channel)) return fn(...args);
-        if (this.startingGeneration || this.tasks.snapshot()) throw new Error("진행 중인 만들기가 끝난 뒤 다시 시도하세요.");
+        if (this.generationBusy()) throw new Error("진행 중인 만들기가 끝난 뒤 다시 시도하세요.");
         this.startingGeneration = true;
         try {
           return await fn(...args);
@@ -244,17 +251,22 @@ export class Controller {
       const lyrics = String(input?.lyrics ?? "").trim();
       const duration = Number(input?.durationSeconds);
       const versions = Number(input?.versions);
+      const productionCatalog = await this.productionRuleCatalog();
+      const productionRules = parseProductionRules(input?.productionRules, productionCatalog);
       if (!title) throw new Error("곡 제목을 적어 주세요.");
-      if (!style || style.length > 1500) throw new Error("스타일을 1,500자 안으로 적어 주세요.");
+      const effective = productionPreview({ stylePrompt: style, instrumental: lyrics === "[Instrumental]", durationSeconds: duration, bpm: "", keyScale: "", timeSignature: "", productionRules }, productionCatalog);
+      if (!effective.stylePrompt || style.length > 1500) throw new Error("스타일을 1,500자 안으로 적거나 제작 프리셋을 골라 주세요.");
       if (!lyrics || lyrics.length > 4096) throw new Error("가사를 4,096자 안으로 적어 주세요. 가사가 없으면 연주곡을 고르세요.");
-      if (!Number.isFinite(duration) || duration < 10 || duration > 600) throw new Error("곡 길이는 10초에서 10분 사이여야 해요.");
+      if (!Number.isFinite(duration) || duration < 10 || duration > 300) throw new Error("곡 길이는 10초에서 5분 사이여야 해요.");
       if (!Number.isInteger(versions) || versions < 1 || versions > 4) throw new Error("버전은 1~4개까지 만들 수 있어요.");
+      if (input.bpm !== null && input.bpm !== undefined && (!Number.isInteger(input.bpm) || input.bpm < 30 || input.bpm > 300)) throw new Error("빠르기는 30~300 사이의 정수로 적어 주세요.");
       const opening = this.session.beginOpen();
       try {
         await this.requireEngine();
         const settings = currentSettings();
         const folder = await newSongFolder(settings.projectsDir, title);
         const args = ["init", folder, "--title", title, "--lyrics", lyrics, "--style", style, "--duration", String(Math.round(duration))];
+        args.push("--production-rules-json", JSON.stringify(productionRules));
         if (input.bpm && Number.isInteger(input.bpm)) args.push("--bpm", String(input.bpm));
         if (input.keyScale?.trim()) args.push("--key", input.keyScale.trim().slice(0, 40));
         if (input.timeSignature?.trim()) args.push("--time-signature", input.timeSignature.trim().slice(0, 10));
@@ -347,17 +359,40 @@ export class Controller {
       return this.songState(folder);
     });
 
-    handle("draft", async (query: unknown, instrumental: unknown, duration: unknown): Promise<DraftResult> => {
+    handle("draft", async (query: unknown, instrumental: unknown, duration: unknown, selection: unknown, vocalLanguage: unknown): Promise<DraftResult> => {
       const text = String(query ?? "").trim().slice(0, 1000);
       if (!text) throw new Error("어떤 곡인지 한 줄이라도 적어 주세요.");
+      const productionRules = parseProductionRules(selection, await this.productionRuleCatalog());
+      if (vocalLanguage !== undefined && vocalLanguage !== "ko" && vocalLanguage !== "en") throw new Error("가사 초안 언어가 올바르지 않아요.");
       const settings = currentSettings();
-      // The LLM writes drafts without the music engine; only the rules path needs ACE.
-      if (settings.assistant.kind === "rules") await this.requireEngine();
-      const seconds = Math.min(600, Math.max(10, Math.round(Number(duration) || settings.defaultDurationSeconds)));
-      const args = ["draft", "--query", text, "--duration", String(seconds), "--base-url", settings.aceBaseUrl, ...this.assistantArgs()];
+      // Rule drafts are local templates; neither draft path uses the music server.
+      const seconds = Math.min(300, Math.max(10, Math.round(Number(duration) || settings.defaultDurationSeconds)));
+      const args = ["draft", "--query", text, "--duration", String(seconds), ...this.assistantArgs()];
+      args.push("--production-rules-json", JSON.stringify(productionRules), "--vocal-language", vocalLanguage === "en" ? "en" : "ko");
       if (instrumental === true) args.push("--instrumental");
       return this.withAssistant(() => runCli<DraftResult>(args));
     });
+    handle("song-plan", async (input: unknown): Promise<SongPlanResult> => {
+      const validated = parseSongPlanInput(input, await this.productionRuleCatalog());
+      return runCli<SongPlanResult>(["song-plan", "--input-json", JSON.stringify(validated)]);
+    });
+    handle("regenerate-song", async (input: unknown) => {
+      const validated = parseRegenerateInput(input);
+      const context = this.session.require(validated.songId);
+      this.requireIdle(context.folder);
+      const state = await this.songState(context.folder);
+      this.session.assert(context);
+      const source = state.song?.versions.find((version) => version.id === validated.versionId);
+      if (!source) throw new Error("새 버전에 사용할 가사와 편곡을 찾지 못했어요.");
+      await this.requireEngine();
+      this.session.assert(context);
+      const args = [...this.generationArgs(context.folder, validated.versions), "--source-candidate-id", source.id];
+      if (validated.stylePrompt !== undefined) args.push("--style", validated.stylePrompt);
+      if (validated.lyrics !== undefined) args.push("--lyrics", validated.lyrics);
+      return this.startTask({ kind: "generate", folder: context.folder, label: `가사·편곡으로 새 버전 ${validated.versions}개 만들기`, args, total: validated.versions, jobKind: "candidate-batch" }, context);
+    });
+    // Older app windows cannot turn a cover request into unrelated full generation.
+    handle("cover-song", () => { throw new Error("Music 3는 원본 음원을 참조하는 커버를 지원하지 않아요. 가사·편곡으로 새 전체 버전을 만들 수 있어요."); });
     handle("plan", async (input: PlanInput): Promise<Plan> => {
       const context = this.session.require(input?.songId);
       const { folder } = context;
@@ -368,11 +403,8 @@ export class Controller {
       const versions = Math.min(4, Math.max(1, Math.round(Number(input?.versions) || 2)));
       const settings = currentSettings();
       const args = ["plan", folder, versionId, "--feedback", feedback, "--strength", strength, "--versions", String(versions)];
-      if (input.range) {
-        const { startSeconds, endSeconds } = input.range;
-        if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) throw new Error("구간이 올바르지 않아요.");
-        args.push("--start", startSeconds.toFixed(2), "--end", endSeconds.toFixed(2));
-      }
+      if (input.range) throw new Error("Music 3는 구간 수정을 지원하지 않아요. 곡 전체의 새 버전으로 요청해 주세요.");
+      args.push("--engine", "minimax-music3");
       args.push(...this.assistantArgs());
       return this.withAssistant(() => runCli<Plan>(args));
     });
@@ -381,7 +413,7 @@ export class Controller {
       const { folder } = context;
       this.requireIdle(folder);
       const versionId = requireVersionId(plan?.candidateId);
-      if (plan.action !== "repaint" && plan.action !== "regenerate") throw new Error("알 수 없는 수정 방식이에요.");
+      requireFullGeneration(plan);
       const style = String(plan.stylePrompt ?? "").trim();
       if (!style || style.length > 1500) throw new Error("스타일 문장이 비어 있거나 너무 길어요.");
       const strength = strengths.includes(plan.strength) ? plan.strength : "medium";
@@ -392,29 +424,6 @@ export class Controller {
       const feedback = JSON.stringify({ text, candidateId: versionId, range: plan.range, plan });
       if (typeof plan.lyrics === "string" && plan.lyrics.trim()) {
         if (plan.lyrics.length > 4096) throw new Error("가사가 너무 길어요.");
-      }
-      if (plan.action === "repaint") {
-        const range = plan.range;
-        if (!range || !(range.endSeconds > range.startSeconds) || range.startSeconds < 0) throw new Error("고칠 구간을 파형에서 골라 주세요.");
-        return this.startTask({
-          kind: "repaint",
-          folder,
-          label: `${clock(range.startSeconds)}–${clock(range.endSeconds)} 다시 만들기`,
-          args: [
-            "repaint", folder,
-            "--candidate-id", versionId,
-            "--start", range.startSeconds.toFixed(2),
-            "--end", range.endSeconds.toFixed(2),
-            "--seed", this.seeds(1),
-            "--style", style,
-            ...(typeof plan.lyrics === "string" && plan.lyrics.trim() ? ["--lyrics", plan.lyrics] : []),
-            "--strength", strength,
-            "--feedback-json", feedback,
-            "--base-url", settings.aceBaseUrl,
-          ],
-          total: 1,
-          jobKind: "repaint-candidate",
-        }, context);
       }
       const count = Math.min(4, Math.max(1, Math.round(Number(plan.versions) || 2)));
       const args = [...this.generationArgs(folder, count), "--source-candidate-id", versionId, "--style", style, "--feedback-json", feedback];
@@ -445,13 +454,13 @@ export class Controller {
       await this.requireEngine();
       this.session.assert(context);
       const state = await this.songState(folder);
-      const target = state.song?.jobs.find((job) => job.jobId === jobId && job.kind === "candidate-batch");
-      if (!target?.canResume) throw new Error("이어서 만들 수 있는 작업을 골라 주세요. 곡을 새로 열면 상태를 확인할 수 있어요.");
+      const target = state.song?.jobs.find((job) => job.jobId === jobId && ["candidate-batch", "cover-batch"].includes(job.kind));
+      if (!target?.canResume || target.kind !== "candidate-batch") throw new Error("이어서 만들 수 있는 작업을 골라 주세요. 곡을 새로 열면 상태를 확인할 수 있어요.");
       return this.startTask({
         kind: "resume",
         folder,
         label: "멈춘 생성 이어서 만들기",
-        args: ["resume", folder, "--job-id", target.jobId, "--base-url", currentSettings().aceBaseUrl],
+        args: ["resume", folder, "--job-id", target.jobId, "--base-url", currentSettings().engineBaseUrl],
         total: target.seeds?.length ?? 1,
         jobKind: "candidate-batch",
       }, context);
@@ -490,13 +499,19 @@ export class Controller {
       const before = currentSettings();
       const allowed: Partial<Settings> = {};
       for (const key of [
-        "aceBaseUrl", "aceAutoStart", "ditModel", "lmModel", "defaultVersions",
-        "defaultDurationSeconds", "repaintStrength", "assistant",
+        "engineBaseUrl", "engineAutoStart", "defaultVersions",
+        "defaultDurationSeconds", "feedbackStrength", "assistant",
       ] as const) {
         if (partial && key in partial) (allowed as Record<string, unknown>)[key] = partial[key];
       }
-      const next = await saveSettings(allowed);
-      if (next.aceBaseUrl !== before.aceBaseUrl || next.ditModel !== before.ditModel || next.lmModel !== before.lmModel) {
+      let next: Settings;
+      if (allowed.engineBaseUrl !== undefined && requireLoopbackUrl(allowed.engineBaseUrl, "음악 엔진") !== before.engineBaseUrl) {
+        if (this.tasks.snapshot() || this.startingGeneration) throw new Error("곡 만들기가 끝나고 음악 엔진을 끈 뒤 주소를 바꿔 주세요.");
+        next = await this.engine.withConnectionChange(allowed.engineBaseUrl, () => saveSettings(allowed));
+      } else {
+        next = await saveSettings(allowed);
+      }
+      if (next.engineBaseUrl !== before.engineBaseUrl || next.musicModel !== before.musicModel) {
         void this.engine.check();
       }
       return next;
@@ -521,7 +536,10 @@ export class Controller {
       return result.models;
     });
     handle("engine-start", () => this.engine.start());
-    handle("engine-stop", () => this.engine.stop());
+    handle("engine-stop", () => {
+      if (this.generationBusy()) throw new Error("곡을 준비하거나 만드는 중에는 엔진을 끌 수 없어요. 작업 화면의 ‘취소하기’를 먼저 눌러 주세요.");
+      return this.engine.stop();
+    });
     handle("engine-check", () => this.engine.check());
   }
 }
@@ -529,11 +547,6 @@ export class Controller {
 function requireVersionId(value: unknown): string {
   if (typeof value !== "string" || !versionIdPattern.test(value)) throw new Error("알 수 없는 버전이에요.");
   return value;
-}
-
-function clock(seconds: number): string {
-  const whole = Math.max(0, Math.round(seconds));
-  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
 
 // Ollama keeps a model resident for minutes after its last answer (the engine's own

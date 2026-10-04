@@ -1,5 +1,6 @@
 import type { TimeRange } from "../shared.ts";
 import { clock } from "./format.ts";
+import { audibleSelection } from "./comparison.ts";
 
 export type PlayerSource = {
   key: string;
@@ -20,7 +21,7 @@ function token(name: string): string {
 }
 
 // One audio element for the whole studio. Switching versions keeps the playhead where
-// it was, so two takes can be compared at the same bar.
+// it was, so two takes can be compared at the same playback time.
 export class Player {
   readonly audio = new Audio();
   private context: CanvasRenderingContext2D;
@@ -113,6 +114,8 @@ export class Player {
       this.draw();
       return;
     }
+    const previousTime = this.pendingSeek ?? this.time;
+    const wasPlaying = this.playing || this.playWhenReady;
     const serial = ++this.loadSerial;
     this.cancelLoad?.();
     this.cancelLoad = null;
@@ -130,13 +133,15 @@ export class Player {
       this.onTick();
       return;
     }
-    const previousTime = this.time;
-    const wasPlaying = this.playing;
+    this.pendingSeek = previousTime;
+    this.playWhenReady = wasPlaying;
     this.key = source.key;
     this.peaks = source.peaks;
     this.duration = source.duration ?? 0;
     this.audio.pause();
     if (!source.url) {
+      this.pendingSeek = null;
+      this.playWhenReady = false;
       this.audio.removeAttribute("src");
       this.audio.load();
       this.draw();
@@ -159,7 +164,8 @@ export class Player {
     const end = Math.max(0, this.length - 0.05);
     this.audio.currentTime = Math.min(this.pendingSeek ?? previousTime, end);
     this.pendingSeek = null;
-    if (wasPlaying || this.playWhenReady) await this.audio.play().catch(() => undefined);
+    if (this.playWhenReady) await this.audio.play().catch(() => undefined);
+    if (serial !== this.loadSerial) return;
     this.playWhenReady = false;
     this.draw();
     this.onTick();
@@ -173,8 +179,9 @@ export class Player {
     }
     if (this.playing) this.audio.pause();
     else {
-      if (this.loop && this.selection && (this.time < this.selection.startSeconds || this.time >= this.selection.endSeconds)) {
-        this.audio.currentTime = this.selection.startSeconds;
+      const range = audibleSelection(this.selection, this.length);
+      if (this.loop && range && (this.time < range.startSeconds || this.time >= range.endSeconds)) {
+        this.audio.currentTime = range.startSeconds;
       } else if (this.time >= this.length - 0.05) {
         this.audio.currentTime = 0;
       }
@@ -201,7 +208,7 @@ export class Player {
   }
 
   private enforceLoop(): void {
-    const range = this.selection;
+    const range = audibleSelection(this.selection, this.length);
     if (this.loop && range && this.playing && this.time >= range.endSeconds - 0.02) {
       this.audio.currentTime = range.startSeconds;
     }

@@ -1,7 +1,7 @@
-import type { AssistantKind, Settings, Strength } from "../../shared.ts";
+import type { AssistantKind, Settings } from "../../shared.ts";
 import { api, engineReady, refreshSongs } from "../actions.ts";
 import { byId, h, icon, mount } from "../dom.ts";
-import { elapsed, lengthLabel, strengthCopy } from "../format.ts";
+import { elapsed, lengthLabel } from "../format.ts";
 import { get, set } from "../store.ts";
 import { errorText, toast, withBusy } from "../ui.ts";
 
@@ -77,29 +77,29 @@ export function renderSettings(): void {
       { class: "engine-status-text" },
       h("b", null, engineState[engine.state] ?? engine.state),
       h("p", null, engine.state === "starting" ? `${engine.detail} · ${elapsed(engine.since)}` : engine.detail),
-      engineReady() && h("p", { class: "mono" }, [engine.models.dit, engine.models.lm].filter(Boolean).join(" · "), engine.lmReady ? "" : " · 작사 모델 대기"),
+      engineReady() && h("p", null, "MiniMax Music 3 · 최대 5분"),
     ),
     h(
       "div",
       { class: "engine-status-actions" },
       ["offline", "failed", "missing"].includes(engine.state) &&
-        h("button", { type: "button", class: "button primary small", disabled: engine.state === "missing", onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "켜는 중", async () => set({ engine: await api.startEngine() })) }, icon("power", 14), "켜기"),
+        h("button", { type: "button", class: "button primary small", disabled: engine.state === "missing", onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "켜는 중", async () => set({ engine: await api.startEngine() })) }, icon("power", 14), engine.owned && engine.state === "failed" ? "다시 켜기" : "켜기"),
       engine.owned &&
-        ["ready", "starting"].includes(engine.state) &&
+        ["ready", "starting", "failed"].includes(engine.state) &&
         h("button", { type: "button", class: "button secondary small", disabled: Boolean(state.task), "data-tip": state.task ? "만드는 중에는 끌 수 없어요" : "엔진을 끄면 메모리를 돌려받아요", onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "끄는 중", async () => set({ engine: await api.stopEngine() })) }, "끄기"),
       h("button", { type: "button", class: "button ghost small", onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "확인 중", async () => set({ engine: await api.checkEngine() })) }, icon("refresh", 14), "다시 확인"),
     ),
   );
 
-  const autoStart = h("input", { type: "checkbox", checked: settings.aceAutoStart, onChange: (event: Event) => void save({ aceAutoStart: (event.target as HTMLInputElement).checked }) });
-  const aceUrl = h("input", { class: "input mono-input", value: settings.aceBaseUrl, onChange: (event: Event) => void save({ aceBaseUrl: (event.target as HTMLInputElement).value }) });
+  const autoStart = h("input", { type: "checkbox", checked: settings.engineAutoStart, onChange: (event: Event) => void save({ engineAutoStart: (event.target as HTMLInputElement).checked }) });
+  const engineUrl = h("input", { class: "input mono-input", value: settings.engineBaseUrl, onChange: (event: Event) => void save({ engineBaseUrl: (event.target as HTMLInputElement).value }) });
   const log = engine.log.length
     ? h("details", { class: "disclosure" }, h("summary", null, "엔진 기록 최근 줄"), h("pre", { class: "log-view" }, engine.log.slice(-40).join("\n")))
     : null;
 
   // ---- assistant ----
   const kinds: Array<{ kind: AssistantKind; title: string; body: string }> = [
-    { kind: "rules", title: "기본 규칙", body: `오프라인에서 바로 답해요. 수정 요청은 정해진 표현 ${state.rules.length}가지를 알아듣고, 초안은 음악 엔진이 스타일만 써요.` },
+    { kind: "rules", title: "기본 규칙", body: `오프라인에서 바로 답해요. 수정 요청은 정해진 표현 ${state.rules.length}가지를 알아듣고, 초안은 장르 규칙에 맞춰 가사와 스타일을 채워요.` },
     { kind: "ollama", title: "로컬 LLM · Ollama", body: "자유로운 문장을 해석하고 한글 가사까지 써요. 이 Mac의 Ollama를 쓰고, 한 번에 수십 초 걸려요." },
     { kind: "openai", title: "OpenAI 호환 로컬 서버", body: "LM Studio처럼 /v1/chat/completions를 여는 로컬 서버를 써요." },
   ];
@@ -147,16 +147,16 @@ export function renderSettings(): void {
       { class: "settings" },
       section(
         "음악 엔진",
-        "ACE-Step 1.5가 이 Mac 안에서 곡을 만들어요. 모델이 메모리를 12GB쯤 써요.",
+        "MiniMax Music 3가 이 Mac 안에서 곡을 만들어요. 곡을 생성하는 동안 모델이 메모리를 사용해요.",
         engineCard,
-        row("앱을 열 때 엔진 켜기", "끄면 곡을 만들 때 직접 켜야 해요.", h("label", { class: "switch" }, autoStart, h("span", null, settings.aceAutoStart ? "켬" : "끔"))),
-        row("엔진 주소", "이 Mac 안의 주소만 쓸 수 있어요.", aceUrl),
+        row("앱을 열 때 엔진 켜기", "끄면 곡을 만들 때 직접 켜야 해요.", h("label", { class: "switch" }, autoStart, h("span", null, settings.engineAutoStart ? "켬" : "끔"))),
+        row("엔진 주소", "음악 엔진과 AI 도우미를 끈 뒤 바꿀 수 있어요. 이 Mac 안의 주소만 쓸 수 있어요.", engineUrl),
         row("엔진 기록", "엔진이 멈췄을 때 원인을 찾을 수 있어요.", h("button", { type: "button", class: "button ghost small", onClick: () => void api.reveal({ kind: "engine-log" }).catch((error) => toast(errorText(error), { tone: "error" })) }, icon("folder", 14), "Finder에서 보기")),
         log,
       ),
       section(
         "AI 도우미",
-        "새 곡의 초안(제목·스타일·가사)을 쓰고, ‘발음이 뭉개져요’ 같은 말을 엔진이 알아듣는 스타일 태그와 구간으로 바꿔요. 결과는 항상 실행 전에 보여 드려요.",
+        "새 곡의 초안(제목·스타일·가사)을 쓰고, ‘발음이 뭉개져요’ 같은 말을 엔진이 알아듣는 새 전체 버전을 위한 편곡 계획으로 바꿔요. 결과는 항상 실행 전에 보여 드려요.",
         assistantCards,
         assistant.kind !== "rules" && row("서버 주소", null, assistantUrl),
         assistant.kind !== "rules" &&
@@ -190,21 +190,14 @@ export function renderSettings(): void {
         "만들기 기본값",
         "새 곡과 ‘더 만들기’에 쓰는 값이에요. 곡마다 바꿀 수 있어요.",
         row("한 번에 만들 버전", null, segmented([1, 2, 3, 4], settings.defaultVersions, (value) => `${value}개`, (value) => void save({ defaultVersions: value }))),
-        row("기본 길이", null, segmented([30, 60, 120, 180, 240], settings.defaultDurationSeconds, (value) => lengthLabel(value), (value) => void save({ defaultDurationSeconds: value }))),
-        row(
-          "구간 수정 변화 정도",
-          "구간을 고칠 때 처음 고른 값이에요.",
-          segmented(["light", "medium", "strong"] as Strength[], settings.repaintStrength, (value) => strengthCopy[value].label, (value) => {
-            set({ strength: value });
-            void save({ repaintStrength: value });
-          }, (value) => strengthCopy[value].hint),
-        ),
+        row("기본 길이", null, segmented([30, 60, 120, 180, 240, 300], settings.defaultDurationSeconds, (value) => lengthLabel(value), (value) => void save({ defaultDurationSeconds: value }))),
+
       ),
       section(
-        "고급",
-        "바꾼 모델은 엔진을 껐다 켜야 적용돼요. 처음 쓰는 모델은 켤 때 내려받아요.",
-        row("곡 생성 모델", null, h("input", { class: "input mono-input", value: settings.ditModel, onChange: (event: Event) => void save({ ditModel: (event.target as HTMLInputElement).value }) })),
-        row("작사·구조 모델", null, h("input", { class: "input mono-input", value: settings.lmModel, onChange: (event: Event) => void save({ lmModel: (event.target as HTMLInputElement).value }) })),
+        "생성 방식",
+        "새 곡과 새 전체 버전은 Music 3로 만들어요. 기존 곡의 재생과 내보내기도 계속 사용할 수 있어요.",
+        row("음악 모델", null, h("span", null, "MiniMax Music 3 · MXFP8")),
+        row("버전 다시 만들기", null, h("span", null, "가사와 편곡을 이어 받아 새 전체 곡을 만들어요.")),
       ),
       section(
         "정보",

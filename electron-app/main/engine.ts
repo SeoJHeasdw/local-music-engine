@@ -3,13 +3,18 @@ import { createWriteStream } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
-import type { EngineStatus } from "../shared.ts";
-import { aceAuthHeaders, ensureAceApiKey } from "./ace-auth.ts";
+import type { EngineCapabilities, EngineStatus } from "../shared.ts";
+import { music3AuthHeaders, ensureMusic3ApiKey } from "./music3-auth.ts";
 import { requireLoopbackUrl } from "./files.ts";
 import { MemoryHandoff, type Ownership } from "./handoff.ts";
-import { aceApiBinary, aceStartScript, engineRoot } from "./paths.ts";
+import { music3Python, music3Server, music3StartScript, engineRoot } from "./paths.ts";
 
 type Health = {
+  status?: "ok" | "error";
+  stage?: string;
+  engine?: string;
+  capabilities?: Partial<EngineCapabilities>;
+  maxDurationSeconds?: number;
   models_initialized?: boolean;
   llm_initialized?: boolean;
   loaded_model?: string | null;
@@ -31,11 +36,11 @@ export type EngineDependencies = {
 
 const defaultDependencies: EngineDependencies = {
   fetch: (...args) => fetch(...args),
-  installed: () => access(aceApiBinary),
+  installed: async () => { await access(music3Python); await access(music3Server); },
   logFile: () => {
     // Lazy loading lets the manager run with injected OS dependencies in Node tests.
     const { app } = createRequire(import.meta.url)("electron") as typeof import("electron");
-    return path.join(app.getPath("userData"), "logs", "ace-server.log");
+    return path.join(app.getPath("userData"), "logs", "music3-server.log");
   },
   openLog: async (file) => {
     await mkdir(path.dirname(file), { recursive: true });
@@ -44,20 +49,21 @@ const defaultDependencies: EngineDependencies = {
   spawn,
   kill: killGroup,
   pause: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  ensureApiKey: ensureAceApiKey,
-  authHeaders: aceAuthHeaders,
+  ensureApiKey: ensureMusic3ApiKey,
+  authHeaders: music3AuthHeaders,
 };
 
-export function aceLaunchAddress(baseUrl: string): { host: string; port: string } {
+export function music3LaunchAddress(baseUrl: string): { host: string; port: string } {
   const url = new URL(requireLoopbackUrl(baseUrl, "음악 엔진"));
   if (url.pathname !== "/") throw new Error("앱에서 켤 음악 엔진 주소에는 경로를 넣을 수 없어요.");
   return { host: url.hostname.replace(/^\[|\]$/g, ""), port: url.port || "80" };
 }
 
-// The ACE server may already be running (started from a terminal). A responding server
+// The Music3 server may already be running (started from a terminal). A responding server
 // is used as-is and never stopped by the app; only a server this app started is owned.
 export class EngineManager {
   private child: ChildProcess | null = null;
+  private ownedLaunchUrl: string | null = null;
   private stopping = false;
   private log: string[] = [];
   private logStream: LogSink | null = null;
@@ -84,9 +90,7 @@ export class EngineManager {
   constructor(
     private baseUrl: () => string,
     private emit: (status: EngineStatus) => void,
-    // ACE loads one DiT and one LM at start; a request naming another model is refused
-    // by the engine CLI, so the chosen models must reach the server at launch.
-    private models: () => { dit: string; lm: string },
+    private model: () => string,
     // Frees memory held by the assistant LLM before the engine loads its models.
     private beforeStart: () => Promise<void> = async () => undefined,
     dependencies: Partial<EngineDependencies> = {},
@@ -110,7 +114,7 @@ export class EngineManager {
   // Healthy within the last minute: let the engine CLI do its own health check instead
   // of refusing a request because one poll was slow.
   recentlyHealthy(): boolean {
-    return Date.now() - this.lastHealthyAt < 60_000;
+    return this.isReady() && Date.now() - this.lastHealthyAt < 60_000;
   }
 
   private safeBaseUrl(): string {
@@ -121,14 +125,16 @@ export class EngineManager {
     }
   }
 
-  private make(state: EngineStatus["state"], detail: string, owned: boolean, health?: Health): EngineStatus {
+  private make(state: EngineStatus["state"], detail: string, owned: boolean, health?: Health, displayUrl = this.safeBaseUrl()): EngineStatus {
     return {
       state,
       detail,
-      baseUrl: this.safeBaseUrl(),
+      baseUrl: displayUrl,
       owned,
-      lmReady: Boolean(health?.llm_initialized),
-      models: { dit: health?.loaded_model ?? null, lm: health?.loaded_lm_model ?? null },
+      engine: "minimax-music3",
+      models: { music: health?.loaded_model ?? null },
+      capabilities: { text2music: health?.capabilities?.text2music === true, cover: false, repaint: false, referenceAudio: false },
+      maxDurationSeconds: Math.min(300, Math.max(10, Number(health?.maxDurationSeconds) || 300)),
       log: [],
       since: this.status && this.status.state === state ? this.status.since : Date.now(),
     };
@@ -138,42 +144,59 @@ export class EngineManager {
     const changed =
       next.state !== this.status.state ||
       next.detail !== this.status.detail ||
-      next.models.dit !== this.status.models.dit ||
-      next.lmReady !== this.status.lmReady;
+      next.baseUrl !== this.status.baseUrl ||
+      next.owned !== this.status.owned ||
+      next.models.music !== this.status.models.music ||
+      next.capabilities.text2music !== this.status.capabilities.text2music;
     this.status = next;
     if (changed) this.emit(this.snapshot());
   }
 
-  private async health(): Promise<Health | null> {
+  private async health(baseUrl = this.baseUrl()): Promise<Health | null> {
     try {
       // A server busy with the LM can answer slowly; a short timeout here would report it as off.
-      const response = await this.dependencies.fetch(`${this.baseUrl()}/health`, {
+      const response = await this.dependencies.fetch(`${baseUrl}/health`, {
         headers: await this.dependencies.authHeaders(),
         signal: AbortSignal.timeout(6000),
         redirect: "error",
       });
       if (!response.ok) return null;
-      const body = (await response.json()) as { data?: Health & { status?: string } };
-      return body?.data?.status === "ok" ? body.data : null;
+      const body = (await response.json()) as { data?: Health };
+      // A model-loading failure leaves the HTTP process alive. Preserve that
+      // state without forwarding its exception text or response body to UI.
+      return body?.data?.status === "ok" || body?.data?.status === "error" ? body.data : null;
     } catch {
       return null;
     }
   }
 
   async check(): Promise<EngineStatus> {
-    const health = await this.health();
-    const owned = Boolean(this.child);
+    const checkedUrl = this.baseUrl();
+    const health = await this.health(checkedUrl);
+    // Ignore a poll for an address that changed while its response was in flight.
+    if (checkedUrl !== this.baseUrl()) return this.snapshot();
+    const owned = Boolean(this.child && this.ownedLaunchUrl === checkedUrl);
     if (health) {
       this.failures = 0;
-      this.lastHealthyAt = Date.now();
-      if (!health.models_initialized) {
+      const mismatch = this.modelMismatch(health);
+      if (mismatch) {
+        this.lastHealthyAt = 0;
+        this.set(this.make("failed", mismatch, owned, health));
+      } else if (health.status === "error" || health.stage === "failed") {
+        this.lastHealthyAt = 0;
+        const recovery = owned ? "다시 켜 보세요. 계속 실패하면 엔진 기록을 확인하세요."
+          : "앱 밖에서 켠 엔진을 끈 뒤 다시 켜 주세요.";
+        this.set(this.make("failed", `Music 3 모델을 불러오지 못했어요. ${recovery}`, owned, health));
+      } else if (!health.models_initialized) {
+        this.lastHealthyAt = 0;
         this.set(this.make("starting", "모델을 메모리에 올리는 중", owned, health));
       } else {
-        const detail = this.modelMismatch(health) ?? (owned ? "앱이 켠 엔진" : "이미 켜져 있던 엔진");
-        this.set(this.make(owned ? "ready" : "external", detail, owned, health));
+        this.lastHealthyAt = Date.now();
+        this.set(this.make(owned ? "ready" : "external", owned ? "앱이 켠 Music 3" : "이미 켜져 있던 Music 3", owned, health));
       }
     } else if (this.child && !this.stopping) {
-      this.set(this.make("starting", this.lastLogLine() || "엔진을 켜는 중", true));
+      if (owned) this.set(this.make("starting", this.lastLogLine() || "엔진을 켜는 중", true));
+      else this.set(this.make("failed", "앱이 켠 엔진과 설정 주소가 달라요. 엔진을 끈 뒤 주소를 바꿔 주세요.", false));
     } else if (this.handoff.active() && !this.child) {
       this.set(this.make("offline", "AI 도우미가 답하는 동안 메모리를 비워 두려고 엔진을 잠시 껐어요. 끝나면 다시 켜요.", false));
     } else if (this.status.state !== "failed" && this.status.state !== "missing") {
@@ -192,11 +215,12 @@ export class EngineManager {
   }
 
   private modelMismatch(health: Health): string | null {
-    const wanted = this.models();
-    const loaded = [health.loaded_model, health.loaded_lm_model];
-    if ((!loaded[0] || loaded[0] === wanted.dit) && (!loaded[1] || loaded[1] === wanted.lm)) return null;
-    const restart = this.child ? "엔진을 껐다 켜면 설정한 모델로 바뀌어요." : "앱 밖에서 켠 엔진이라 그 엔진을 설정한 모델로 다시 켜야 해요.";
-    return `설정과 다른 모델이 켜져 있어요 (${loaded.filter(Boolean).join(" · ")}). ${restart}`;
+    if (health.engine !== "minimax-music3") return "다른 음악 엔진이 이 주소에 켜져 있어요. Music 3 주소를 확인하세요.";
+    if (health.models_initialized && health.capabilities?.text2music !== true) return "이 엔진은 곡 만들기를 지원하지 않아요.";
+    if (!health.models_initialized && !health.loaded_model) return null;
+    if (health.loaded_model === this.model() && !health.loaded_lm_model) return null;
+    const restart = this.child ? "엔진을 껐다 켜면 설정한 모델로 바뀌어요." : "앱 밖에서 켠 엔진이라 그 엔진을 Music 3 모델로 다시 켜야 해요.";
+    return `설정과 다른 모델이 켜져 있어요. ${restart}`;
   }
 
   private lastLogLine(): string {
@@ -216,8 +240,23 @@ export class EngineManager {
   }
 
   private async ownership(): Promise<Ownership> {
-    if (this.child) return "owned";
-    return (await this.health()) ? "external" : "off";
+    if (this.child && this.ownedLaunchUrl === this.baseUrl()) return "owned";
+    if (await this.health()) return "external";
+    return this.child ? "owned" : "off";
+  }
+
+  // Connection changes share the startup/assistant lock. In particular, an app-owned
+  // process at A must never become apparent ownership of an external process at B.
+  async withConnectionChange<T>(nextUrl: string, save: () => Promise<T>): Promise<T> {
+    const next = requireLoopbackUrl(nextUrl, "음악 엔진");
+    if (next === this.baseUrl()) return save();
+    const error = () => new Error("음악 엔진과 AI 도우미가 꺼진 뒤 주소를 바꿀 수 있어요. 앱 밖에서 켠 엔진은 그곳에서 먼저 꺼 주세요.");
+    if (this.startInFlight || this.stopInFlight || this.handoff.active()) throw error();
+    return this.handoff.withEngineStarting(async () => {
+      if (this.child || this.startInFlight || this.stopInFlight || this.handoff.active()) throw error();
+      if (await this.health()) throw error();
+      return save();
+    });
   }
 
   start(): Promise<EngineStatus> {
@@ -249,18 +288,25 @@ export class EngineManager {
     if (!this.currentStartup(lifecycle)) return this.snapshot();
     const existing = await this.health();
     if (!this.currentStartup(lifecycle)) return this.snapshot();
-    if (existing) return this.check();
+    if (existing) {
+      if (this.child && this.ownedLaunchUrl === this.baseUrl()
+        && (existing.status === "error" || existing.stage === "failed")) {
+        await this.stopOwned();
+        if (!this.currentStartup(lifecycle)) return this.snapshot();
+      } else return this.check();
+    }
     if (this.child) return this.snapshot();
     try {
       await this.dependencies.installed();
     } catch {
       if (this.currentStartup(lifecycle)) {
-        this.set(this.make("missing", "ACE 런타임이 설치되지 않았어요. 터미널에서 ./scripts/bootstrap_ace.sh를 먼저 실행하세요.", false));
+        this.set(this.make("missing", "Music 3가 아직 설치되지 않았어요. 설치를 마친 뒤 다시 켜 주세요.", false));
       }
       return this.snapshot();
     }
     if (!this.currentStartup(lifecycle)) return this.snapshot();
-    const { host, port } = aceLaunchAddress(this.baseUrl());
+    const launchUrl = this.baseUrl();
+    const { host, port } = music3LaunchAddress(launchUrl);
     await this.beforeStart();
     if (!this.currentStartup(lifecycle)) return this.snapshot();
     await this.dependencies.ensureApiKey();
@@ -271,29 +317,32 @@ export class EngineManager {
       return this.snapshot();
     }
     this.logStream = logStream;
-    const models = this.models();
-    this.appendLog(`\n--- ${new Date().toISOString()} 앱에서 엔진 시작 (port ${port}, ${models.dit} · ${models.lm}) ---\n`);
+    const model = this.model();
+    this.appendLog(`\n--- ${new Date().toISOString()} 앱에서 엔진 시작 (port ${port}, ${model}) ---\n`);
     this.stopping = false;
-    const child = this.dependencies.spawn("/bin/bash", [aceStartScript], {
+    const child = this.dependencies.spawn("/bin/bash", [music3StartScript], {
       cwd: engineRoot,
       env: {
         ...process.env,
-        MUSIC_ENGINE_ACE_HOST: host,
-        MUSIC_ENGINE_ACE_PORT: port,
-        MUSIC_ENGINE_ACE_DIT_MODEL: models.dit,
-        MUSIC_ENGINE_ACE_LM_MODEL: models.lm,
+        MUSIC_ENGINE_MUSIC3_HOST: host,
+        MUSIC_ENGINE_MUSIC3_PORT: port,
+        MUSIC_ENGINE_MUSIC3_MODEL: model,
         PYTHONUNBUFFERED: "1",
       },
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.child = child;
+    this.ownedLaunchUrl = launchUrl;
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => this.appendLog(chunk));
     child.stderr?.on("data", (chunk: string) => this.appendLog(chunk));
     child.once("exit", (code, signal) => {
-      if (this.child === child) this.child = null;
+      if (this.child === child) {
+        this.child = null;
+        this.ownedLaunchUrl = null;
+      }
       this.logStream?.end();
       this.logStream = null;
       if (this.stopping) {
@@ -310,11 +359,11 @@ export class EngineManager {
   }
 
   private async waitUntilReady(child: ChildProcess): Promise<void> {
-    // The first start can download ~10GB of weights, so there is no short deadline here;
+    // The first start may need to download model weights, so there is no short deadline here;
     // the log line shown in the UI tells the person what the server is doing.
     while (this.child === child) {
       const status = await this.check();
-      if (status.state === "ready") return;
+      if (status.state === "ready" || status.state === "failed") return;
       await this.dependencies.pause(1500);
     }
   }
@@ -336,7 +385,7 @@ export class EngineManager {
     const child = this.child;
     if (!child?.pid) return this.check();
     this.stopping = true;
-    this.set(this.make("stopping", "엔진을 끄는 중", true));
+    this.set(this.make("stopping", "앱이 켠 엔진을 끄는 중", true, undefined, this.ownedLaunchUrl ?? undefined));
     this.dependencies.kill(child, "SIGTERM");
     const timer = setTimeout(() => this.dependencies.kill(child, "SIGKILL"), 10_000);
     await new Promise<void>((resolve) => child.once("exit", () => resolve()));

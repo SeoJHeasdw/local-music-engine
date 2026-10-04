@@ -30,7 +30,7 @@ export function applySong(next: SongState, focusVersionId?: string | null): void
     activeVersionId: active,
     ...(sameSong
       ? {}
-      : { selection: null, plan: null, feedback: "", listenToParent: false, scope: "song" as const, tab: "fix" as const }),
+      : { selection: null, plan: null, feedback: "", listenToParent: false, comparisonVersionId: null, scope: "song" as const, tab: "fix" as const }),
   }, true);
   if (next.status === "error" && next.error) toast(next.error, { tone: "error" });
 }
@@ -95,8 +95,9 @@ export async function startEngine(): Promise<void> {
 }
 
 export function engineReady(): boolean {
-  const state = get().engine.state;
-  return state === "ready" || state === "external";
+  const engine = get().engine;
+  return engine.engine === "minimax-music3" && engine.capabilities.text2music
+    && (engine.state === "ready" || engine.state === "external");
 }
 
 export function songBusy(): boolean {

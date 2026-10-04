@@ -46,7 +46,7 @@ export function elapsed(since: number): string {
 
 export const reviewCopy: Record<ReviewStatus, { label: string; short: string }> = {
   unreviewed: { label: "아직 안 들음", short: "안 들음" },
-  listened: { label: "애매해요", short: "애매" },
+  listened: { label: "들어 봤어요", short: "들었음" },
   approved: { label: "좋아요", short: "좋아요" },
   rejected: { label: "별로예요", short: "별로" },
 };
@@ -88,8 +88,8 @@ export function versionTree(song: Song): { roots: VersionNode[]; flat: VersionNo
       roots.push(node);
     } else {
       const automatic = isAutomaticAttempt(version);
-      const index = parent.children.filter((child) => !isAutomaticAttempt(child.version)).length + 1;
-      const short = automatic ? `자동 시도 ${version.quality?.attempt ?? 1} · ${version.quality?.processing ? "정리본" : "원본"}` : `수정 ${index}`;
+      const index = parent.children.filter((child) => !isAutomaticAttempt(child.version) && (child.version.kind === "cover") === (version.kind === "cover")).length + 1;
+      const short = automatic ? `자동 시도 ${version.quality?.attempt ?? 1} · ${version.quality?.processing ? "정리본" : "원본"}` : `${version.kind === "cover" ? "커버" : "수정"} ${index}`;
       const node = { version, name: `${parent.name} › ${short}`, short, depth: parent.depth + 1, children: [] };
       byId.set(version.id, node);
       parent.children.push(node);

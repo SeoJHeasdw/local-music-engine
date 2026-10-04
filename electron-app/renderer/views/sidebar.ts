@@ -88,13 +88,13 @@ export function renderSidebar(): void {
       ),
       engine.state === "starting" && h("p", { class: "engine-detail" }, engine.detail, " · ", elapsed(engine.since)),
       ["failed", "missing"].includes(engine.state) && h("p", { class: "engine-detail" }, engine.detail),
-      engineReady() && engine.models.dit && h("p", { class: "engine-detail mono" }, engine.models.dit),
+      engineReady() && engine.models.music && h("p", { class: "engine-detail mono" }, "Music 3"),
       canStart &&
         h(
           "button",
           { type: "button", class: "button small primary block", onClick: () => void startEngine() },
           icon("power", 14),
-          "엔진 켜기",
+          engine.owned && engine.state === "failed" ? "엔진 다시 켜기" : "엔진 켜기",
         ),
     ),
   );

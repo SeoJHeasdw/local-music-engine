@@ -14,6 +14,8 @@ import type {
   TimeRange,
   Version,
   AutomaticQuality,
+  ProductionSnapshot,
+  SongPlanResult,
 } from "../shared.ts";
 import { runCli } from "./cli.ts";
 import { audioUrlFor, wavPeaks } from "./audio.ts";
@@ -42,6 +44,12 @@ type RawCandidate = {
   path: string;
   quality?: Partial<AutomaticQuality> | null;
   recommended?: boolean;
+  baseStylePrompt?: string | null;
+  productionRules?: ProductionSnapshot | null;
+  coverStrength?: number | null;
+  coverSource?: Version["coverSource"];
+  songPlan?: SongPlanResult | null;
+  lyricsOriginal?: string | null;
 };
 
 type RawExport = ExportView & { path: string; externalPath: string | null };
@@ -179,7 +187,7 @@ export async function loadSong(folder: string, read: typeof runCli = runCli): Pr
         versionPaths.set(candidate.candidateId, candidate.path);
         return {
           id: candidate.candidateId,
-          kind: candidate.taskType === "repaint" || candidate.editRange ? "edit" : "full",
+          kind: candidate.coverSource || candidate.taskType === "cover" ? "cover" : candidate.taskType === "repaint" || candidate.editRange ? "edit" : "full",
           parentId: candidate.parentCandidateId,
           editRange: candidate.editRange,
           seed: candidate.seed,
@@ -202,6 +210,12 @@ export async function loadSong(folder: string, read: typeof runCli = runCli): Pr
           waveform: candidate.artifactValid ? await wavPeaks(candidate.path) : [],
           quality: qualityFromStatus(candidate.quality),
           recommended: Boolean(candidate.recommended || raw.recommendedCandidateId === candidate.candidateId),
+          baseStylePrompt: candidate.baseStylePrompt ?? undefined,
+          productionRules: candidate.productionRules ?? null,
+          coverStrength: candidate.coverStrength ?? null,
+          coverSource: candidate.coverSource ?? null,
+          songPlan: candidate.songPlan ?? null,
+          lyricsOriginal: candidate.lyricsOriginal ?? undefined,
         } satisfies Version;
       }),
     );

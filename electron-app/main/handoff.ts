@@ -1,6 +1,5 @@
-// The music engine (turbo DiT + 4B LM, about 22 GB) and a local assistant LLM
-// (qwen3.6:27b, about 17 GB) do not fit a 36 GB Mac together: on 2026-09-24 macOS
-// terminated the engine while both were resident. The app never runs them at once.
+// Music generation and a local assistant can exceed the available memory together.
+// Serialize their residency and never stop an engine launched outside this app.
 
 export type Ownership = "owned" | "external" | "off";
 
@@ -42,7 +41,7 @@ export class MemoryHandoff {
   }
 
   // Keep the same lock from checking an existing server through unloading the assistant,
-  // preparing files and spawning ACE. An assistant cannot claim memory between these steps.
+  // preparing files and spawning Music3. An assistant cannot claim memory between these steps.
   withEngineStarting<T>(start: () => Promise<T>): Promise<T> {
     return this.exclusive(start);
   }
@@ -62,6 +61,12 @@ export class MemoryHandoff {
         if (ownership === "owned") {
           restart = true;
           await this.engine.stop();
+        }
+        // A responding external server may have appeared while our process stopped,
+        // or the configured connection may have changed during an earlier app version.
+        // Recheck immediately before allowing the assistant to claim memory.
+        if (await this.engine.ownership() !== "off") {
+          throw new Error("음악 엔진이 아직 메모리를 쓰고 있어서 AI 도우미를 부르지 않았어요. 엔진을 끈 뒤 다시 시도하세요.");
         }
         return use();
       });
