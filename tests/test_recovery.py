@@ -57,7 +57,7 @@ def test_resume_cannot_borrow_same_seed_from_unrelated_batch(tmp_path: Path):
     assert FakeAceClient.submitted == [1, 2, 2, 2, 2]
 
 
-@pytest.mark.parametrize("damage", ["missing", "size", "hash"])
+@pytest.mark.parametrize("damage", ["missing", "size", "hash", "unsafe-symlink", "absolute-path", "traversal", "symlink-loop"])
 def test_resume_regenerates_only_damaged_outputs(tmp_path: Path, damage: str):
     make_project(tmp_path)
     first = generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeAceClient)
@@ -68,14 +68,81 @@ def test_resume_regenerates_only_damaged_outputs(tmp_path: Path, damage: str):
         audio.unlink()
     elif damage == "size":
         audio.write_bytes(b"broken")
-    else:
+    elif damage == "hash":
         data = bytearray(audio.read_bytes())
         data[-1] ^= 1
         audio.write_bytes(data)
+    elif damage in {"unsafe-symlink", "symlink-loop"}:
+        audio.unlink()
+        if damage == "unsafe-symlink":
+            outside = tmp_path.parent / f"{tmp_path.name}-outside.wav"
+            outside.write_bytes(b"must not be read or deleted")
+            audio.symlink_to(outside)
+        else:
+            audio.symlink_to(audio)
+    else:
+        with store.transaction() as project:
+            project["artifacts"][0]["path"] = str(audio) if damage == "absolute-path" else "../outside.wav"
+    before = store.manifest_path.read_bytes()
+    rows = project_status(store, store.load())["candidates"]
+    assert [row["artifactValid"] for row in rows] == [False, True]
+    if damage in {"unsafe-symlink", "absolute-path", "traversal", "symlink-loop"}:
+        assert rows[0]["path"] == ""
+    assert store.manifest_path.read_bytes() == before
     result = resume_latest_batch(tmp_path, client_factory=FakeAceClient)
     assert result["reusedCandidateIds"] == first["candidateIds"][1:]
     assert FakeAceClient.submitted == [1, 2, 1]
     assert len(store.load()["candidates"]) == 3
+
+
+@pytest.mark.parametrize("seed", [-1, 2**32, 1.5, True, "1"])
+def test_invalid_seeds_fail_before_any_input_job_or_engine_mutation(tmp_path: Path, seed):
+    make_project(tmp_path)
+    result = generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient)
+    store = ProjectStore(tmp_path)
+    before = store.manifest_path.read_bytes()
+    submitted = list(FakeAceClient.submitted)
+
+    def forbidden_client(base_url):
+        pytest.fail("invalid seed must be rejected before creating an engine client")
+
+    with pytest.raises(ValueError, match="seed must be an integer between"):
+        generate_candidates(tmp_path, seeds=[2, seed], style_prompt="must not persist", lyrics="must not persist",
+                            client_factory=forbidden_client)
+    with pytest.raises(ValueError, match="seed must be an integer between"):
+        repaint_candidate(tmp_path, start_seconds=1, end_seconds=2, seed=seed,
+                          candidate_id=result["candidateIds"][0], client_factory=forbidden_client)
+    assert store.manifest_path.read_bytes() == before
+    assert FakeAceClient.submitted == submitted
+
+
+def test_seed_range_boundaries_are_frozen_and_submitted(tmp_path: Path):
+    make_project(tmp_path)
+    generate_candidates(tmp_path, seeds=[0, 2**32 - 1], client_factory=FakeAceClient)
+    assert FakeAceClient.submitted == [0, 2**32 - 1]
+    assert [item["parameters"]["seed"] for item in ProjectStore(tmp_path).load()["requests"]] == [0, 2**32 - 1]
+
+
+@pytest.mark.parametrize("snapshot", ["frozen", "legacy-child"])
+def test_legacy_negative_seed_cannot_be_resumed_as_deterministic(tmp_path: Path, snapshot: str):
+    make_project(tmp_path)
+    FakeAceClient.fail_seeds = {1}
+    generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient)
+    store = ProjectStore(tmp_path)
+    with store.transaction() as project:
+        batch = project["jobs"][0]
+        if snapshot == "frozen":
+            batch["parameters"]["seeds"] = [-1]
+            batch["parameters"]["frozenPayloads"][0]["seed"] = -1
+        else:
+            batch["parameters"].pop("frozenPayloads")
+            project["requests"][0]["parameters"]["seed"] = -1
+    before = store.manifest_path.read_bytes()
+    with pytest.raises(ValueError, match="seed must be an integer between"):
+        resume_latest_batch(tmp_path, client_factory=FakeAceClient)
+    assert store.manifest_path.read_bytes() == before
+    row = project_status(store, store.load())["jobs"][0]
+    assert not row["canResume"] and "seed" in row["resumeBlockedReason"]
 
 
 def test_complete_resume_needs_no_engine_and_keeps_human_review(tmp_path: Path):

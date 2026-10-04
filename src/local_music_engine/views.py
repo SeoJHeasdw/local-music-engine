@@ -6,10 +6,17 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from .jobs import ACTIVE_STATUSES, GENERATION_KINDS, frozen_batch_payloads
+from .jobs import ACTIVE_STATUSES, RECOVERABLE_KINDS, frozen_batch_payloads
 from .storage import PROJECT_FILENAME, ProjectStore
 
 TOP_LEVEL_JOB_KINDS = {"candidate-batch", "repaint-candidate", "export"}
+
+
+def _artifact_path(store: ProjectStore, artifact: dict[str, Any]) -> Path | None:
+    try:
+        return store.resolve_artifact(artifact)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+        return None
 
 
 def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[str, Any]]:
@@ -29,6 +36,7 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
     for candidate in project["candidates"]:
         artifact = artifacts[candidate["artifactId"]]
         valid, reason = store.verify_artifact(artifact)
+        path = _artifact_path(store, artifact)
         request = requests[candidate["requestId"]]
         parameters = request["parameters"]
         job = jobs.get(artifact.get("createdByJobId") or "")
@@ -65,16 +73,17 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
                 "instruction": parameters.get("instruction"),
                 "feedbackId": feedback_id,
                 "createdAt": candidate.get("createdAt"),
-                "path": str(store.resolve_artifact(artifact)),
+                "path": str(path) if path is not None else "",
             }
         )
     return rows
 
 
-def _job_view(project: dict[str, Any], job: dict[str, Any], generation_active: bool) -> dict[str, Any]:
+def _job_view(project: dict[str, Any], job: dict[str, Any], generation_active: bool, export_active: bool) -> dict[str, Any]:
     parameters = job.get("parameters", {})
     children = [record for record in project["jobs"] if record.get("parentJobId") == job["jobId"]]
-    interrupted = job["kind"] in GENERATION_KINDS and job["status"] in ACTIVE_STATUSES and not generation_active
+    owner_active = export_active if job["kind"] == "export" else generation_active
+    interrupted = job["kind"] in RECOVERABLE_KINDS and job["status"] in ACTIVE_STATUSES and not owner_active
     view = {
         "jobId": job["jobId"],
         "kind": job["kind"],
@@ -115,6 +124,7 @@ def _job_view(project: dict[str, Any], job: dict[str, Any], generation_active: b
         view["parentCandidateId"] = parameters.get("parentCandidateId")
     elif job["kind"] == "export":
         view["candidateId"] = parameters.get("candidateId")
+        view["outputCleanupErrors"] = job.get("outputCleanupErrors", [])
     return view
 
 
@@ -128,15 +138,15 @@ def _exports(store: ProjectStore, project: dict[str, Any]) -> list[dict[str, Any
     for artifact in project["artifacts"]:
         if artifact.get("kind") != "export-wav":
             continue
-        internal = store.resolve_artifact(artifact)
+        internal = _artifact_path(store, artifact)
         external = artifact.get("externalPath")
         rows.append(
             {
                 "artifactId": artifact["artifactId"],
                 "candidateId": candidate_by_export.get(artifact["artifactId"]),
                 "createdAt": artifact.get("createdAt"),
-                "path": str(internal),
-                "exists": internal.is_file(),
+                "path": str(internal) if internal is not None else "",
+                "exists": internal is not None and internal.is_file(),
                 "externalPath": external,
                 "externalExists": bool(external) and Path(external).is_file(),
             }
@@ -154,6 +164,7 @@ def _can_undo_selection(project: dict[str, Any]) -> bool:
 def project_status(store: ProjectStore, project: dict[str, Any]) -> dict[str, Any]:
     inputs = project["inputs"]
     generation_active = store.generation_active()
+    export_active = store.export_active()
     return {
         "projectId": project["projectId"],
         "title": project["title"],
@@ -175,7 +186,7 @@ def project_status(store: ProjectStore, project: dict[str, Any]) -> dict[str, An
         "candidates": candidate_rows(store, project),
         "feedback": project.get("feedback", []),
         "jobs": [
-            _job_view(project, job, generation_active)
+            _job_view(project, job, generation_active, export_active)
             for job in project["jobs"]
             if job["kind"] in TOP_LEVEL_JOB_KINDS and not job.get("parentJobId")
         ],
@@ -194,10 +205,12 @@ def _summary(path: Path) -> dict[str, Any]:
         inputs = project["inputs"]
         candidates = project["candidates"]
         generation_active = ProjectStore(path).generation_active()
+        export_active = ProjectStore(path).export_active()
         interrupted = [
             job for job in project["jobs"]
-            if job["kind"] in GENERATION_KINDS and not job.get("parentJobId")
-            and (job["status"] == "interrupted" or (job["status"] in ACTIVE_STATUSES and not generation_active))
+            if job["kind"] in RECOVERABLE_KINDS and not job.get("parentJobId")
+            and (job["status"] == "interrupted" or (job["status"] in ACTIVE_STATUSES
+                 and not (export_active if job["kind"] == "export" else generation_active)))
         ]
         return {
             "path": str(path),
@@ -217,7 +230,7 @@ def _summary(path: Path) -> dict[str, Any]:
             ),
             "selectedCandidateId": project.get("selectedCandidateId"),
             "exported": any(record.get("kind") == "export-wav" for record in project["artifacts"]),
-            "runningJobs": int(generation_active),
+            "runningJobs": int(generation_active) + int(export_active),
             "interruptedJobs": len(interrupted),
             "error": None,
         }

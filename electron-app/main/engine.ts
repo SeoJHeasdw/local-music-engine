@@ -1,9 +1,11 @@
-import { app } from "electron";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream, type WriteStream } from "node:fs";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import { createWriteStream } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
+import { createRequire } from "node:module";
 import type { EngineStatus } from "../shared.ts";
+import { aceAuthHeaders, ensureAceApiKey } from "./ace-auth.ts";
+import { requireLoopbackUrl } from "./files.ts";
 import { MemoryHandoff, type Ownership } from "./handoff.ts";
 import { aceApiBinary, aceStartScript, engineRoot } from "./paths.ts";
 
@@ -14,26 +16,69 @@ type Health = {
   loaded_lm_model?: string | null;
 };
 
+type LogSink = { write(chunk: string): unknown; end(): unknown };
+export type EngineDependencies = {
+  fetch: typeof fetch;
+  installed(): Promise<unknown>;
+  logFile(): string;
+  openLog(file: string): Promise<LogSink>;
+  spawn(command: string, args: string[], options: SpawnOptions): ChildProcess;
+  kill(child: ChildProcess, signal: NodeJS.Signals): void;
+  pause(milliseconds: number): Promise<void>;
+  ensureApiKey(): Promise<void>;
+  authHeaders(): Promise<Record<string, string>>;
+};
+
+const defaultDependencies: EngineDependencies = {
+  fetch: (...args) => fetch(...args),
+  installed: () => access(aceApiBinary),
+  logFile: () => {
+    // Lazy loading lets the manager run with injected OS dependencies in Node tests.
+    const { app } = createRequire(import.meta.url)("electron") as typeof import("electron");
+    return path.join(app.getPath("userData"), "logs", "ace-server.log");
+  },
+  openLog: async (file) => {
+    await mkdir(path.dirname(file), { recursive: true });
+    return createWriteStream(file, { flags: "a" });
+  },
+  spawn,
+  kill: killGroup,
+  pause: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  ensureApiKey: ensureAceApiKey,
+  authHeaders: aceAuthHeaders,
+};
+
+export function aceLaunchAddress(baseUrl: string): { host: string; port: string } {
+  const url = new URL(requireLoopbackUrl(baseUrl, "음악 엔진"));
+  if (url.pathname !== "/") throw new Error("앱에서 켤 음악 엔진 주소에는 경로를 넣을 수 없어요.");
+  return { host: url.hostname.replace(/^\[|\]$/g, ""), port: url.port || "80" };
+}
+
 // The ACE server may already be running (started from a terminal). A responding server
 // is used as-is and never stopped by the app; only a server this app started is owned.
 export class EngineManager {
   private child: ChildProcess | null = null;
   private stopping = false;
   private log: string[] = [];
-  private logStream: WriteStream | null = null;
+  private logStream: LogSink | null = null;
   private monitor: NodeJS.Timeout | null = null;
   private status: EngineStatus;
   private failures = 0;
   private lastHealthyAt = 0;
   private startInFlight: Promise<EngineStatus> | null = null;
+  private stopInFlight: Promise<EngineStatus> | null = null;
+  private dependencies: EngineDependencies;
+  private lifecycle = 0;
+  private wantsEngine = false;
+  private disposed = false;
   // Assistant LLM calls run with this engine stopped; see handoff.ts.
   readonly handoff = new MemoryHandoff({
     ownership: () => this.ownership(),
     stop: async () => {
-      await this.stop();
+      await this.stopOwned();
       await this.check();
     },
-    start: () => this.start(),
+    start: () => this.wantsEngine && !this.disposed ? this.start() : Promise.resolve(this.snapshot()),
   });
 
   constructor(
@@ -44,7 +89,9 @@ export class EngineManager {
     private models: () => { dit: string; lm: string },
     // Frees memory held by the assistant LLM before the engine loads its models.
     private beforeStart: () => Promise<void> = async () => undefined,
+    dependencies: Partial<EngineDependencies> = {},
   ) {
+    this.dependencies = { ...defaultDependencies, ...dependencies };
     this.status = this.make("checking", "엔진 상태를 확인하는 중", false);
   }
 
@@ -53,7 +100,7 @@ export class EngineManager {
   }
 
   logFile(): string {
-    return path.join(app.getPath("userData"), "logs", "ace-server.log");
+    return this.dependencies.logFile();
   }
 
   isReady(): boolean {
@@ -100,7 +147,11 @@ export class EngineManager {
   private async health(): Promise<Health | null> {
     try {
       // A server busy with the LM can answer slowly; a short timeout here would report it as off.
-      const response = await fetch(`${this.baseUrl()}/health`, { signal: AbortSignal.timeout(6000), redirect: "error" });
+      const response = await this.dependencies.fetch(`${this.baseUrl()}/health`, {
+        headers: await this.dependencies.authHeaders(),
+        signal: AbortSignal.timeout(6000),
+        redirect: "error",
+      });
       if (!response.ok) return null;
       const body = (await response.json()) as { data?: Health & { status?: string } };
       return body?.data?.status === "ok" ? body.data : null;
@@ -170,34 +221,64 @@ export class EngineManager {
   }
 
   start(): Promise<EngineStatus> {
-    this.startInFlight ??= this.startOnce().finally(() => {
-      this.startInFlight = null;
-    });
+    if (this.disposed) return Promise.resolve(this.snapshot());
+    this.wantsEngine = true;
+    if (!this.startInFlight) {
+      const lifecycle = this.lifecycle;
+      const pending = this.handoff.withEngineStarting(() => this.startOnce(lifecycle)).catch((error: unknown) => {
+        if (this.currentStartup(lifecycle)) {
+          this.set(this.make("failed", error instanceof Error ? error.message : "엔진을 켜지 못했어요.", false));
+        }
+        return this.snapshot();
+      }).finally(() => {
+        if (this.startInFlight === pending) this.startInFlight = null;
+      });
+      this.startInFlight = pending;
+    }
     return this.startInFlight;
   }
 
-  private async startOnce(): Promise<EngineStatus> {
-    await this.handoff.settled();
+  private currentStartup(lifecycle: number): boolean {
+    return !this.disposed && this.wantsEngine && lifecycle === this.lifecycle;
+  }
+
+  private async startOnce(lifecycle: number): Promise<EngineStatus> {
+    if (!this.currentStartup(lifecycle)) return this.snapshot();
+    // An explicit stop may still be waiting for the process to exit when Start arrives.
+    if (this.stopInFlight) await this.stopInFlight;
+    if (!this.currentStartup(lifecycle)) return this.snapshot();
     const existing = await this.health();
+    if (!this.currentStartup(lifecycle)) return this.snapshot();
     if (existing) return this.check();
     if (this.child) return this.snapshot();
     try {
-      await access(aceApiBinary);
+      await this.dependencies.installed();
     } catch {
-      this.set(this.make("missing", "ACE 런타임이 설치되지 않았어요. 터미널에서 ./scripts/bootstrap_ace.sh를 먼저 실행하세요.", false));
+      if (this.currentStartup(lifecycle)) {
+        this.set(this.make("missing", "ACE 런타임이 설치되지 않았어요. 터미널에서 ./scripts/bootstrap_ace.sh를 먼저 실행하세요.", false));
+      }
       return this.snapshot();
     }
-    await this.beforeStart().catch(() => undefined);
-    const port = new URL(this.baseUrl()).port || "18001";
-    await mkdir(path.dirname(this.logFile()), { recursive: true });
-    this.logStream = createWriteStream(this.logFile(), { flags: "a" });
+    if (!this.currentStartup(lifecycle)) return this.snapshot();
+    const { host, port } = aceLaunchAddress(this.baseUrl());
+    await this.beforeStart();
+    if (!this.currentStartup(lifecycle)) return this.snapshot();
+    await this.dependencies.ensureApiKey();
+    if (!this.currentStartup(lifecycle)) return this.snapshot();
+    const logStream = await this.dependencies.openLog(this.logFile());
+    if (!this.currentStartup(lifecycle)) {
+      logStream.end();
+      return this.snapshot();
+    }
+    this.logStream = logStream;
     const models = this.models();
     this.appendLog(`\n--- ${new Date().toISOString()} 앱에서 엔진 시작 (port ${port}, ${models.dit} · ${models.lm}) ---\n`);
     this.stopping = false;
-    const child = spawn("/bin/bash", [aceStartScript], {
+    const child = this.dependencies.spawn("/bin/bash", [aceStartScript], {
       cwd: engineRoot,
       env: {
         ...process.env,
+        MUSIC_ENGINE_ACE_HOST: host,
         MUSIC_ENGINE_ACE_PORT: port,
         MUSIC_ENGINE_ACE_DIT_MODEL: models.dit,
         MUSIC_ENGINE_ACE_LM_MODEL: models.lm,
@@ -234,17 +315,30 @@ export class EngineManager {
     while (this.child === child) {
       const status = await this.check();
       if (status.state === "ready") return;
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await this.dependencies.pause(1500);
     }
   }
 
-  async stop(): Promise<EngineStatus> {
+  stop(): Promise<EngineStatus> {
+    this.wantsEngine = false;
+    this.lifecycle += 1;
+    this.startInFlight = null;
+    if (!this.stopInFlight) {
+      const pending = this.stopOwned().finally(() => {
+        if (this.stopInFlight === pending) this.stopInFlight = null;
+      });
+      this.stopInFlight = pending;
+    }
+    return this.stopInFlight;
+  }
+
+  private async stopOwned(): Promise<EngineStatus> {
     const child = this.child;
     if (!child?.pid) return this.check();
     this.stopping = true;
     this.set(this.make("stopping", "엔진을 끄는 중", true));
-    killGroup(child, "SIGTERM");
-    const timer = setTimeout(() => killGroup(child, "SIGKILL"), 10_000);
+    this.dependencies.kill(child, "SIGTERM");
+    const timer = setTimeout(() => this.dependencies.kill(child, "SIGKILL"), 10_000);
     await new Promise<void>((resolve) => child.once("exit", () => resolve()));
     clearTimeout(timer);
     return this.snapshot();
@@ -252,10 +346,14 @@ export class EngineManager {
 
   // Called while the app quits; cannot await.
   disposeOwned(): void {
+    this.disposed = true;
+    this.wantsEngine = false;
+    this.lifecycle += 1;
+    this.startInFlight = null;
     if (this.monitor) clearInterval(this.monitor);
     if (this.child) {
       this.stopping = true;
-      killGroup(this.child, "SIGTERM");
+      this.dependencies.kill(this.child, "SIGTERM");
     }
   }
 }

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .local_http import open_local
+from .ace_auth import read_api_key
 
 
 class AceApiError(RuntimeError):
@@ -38,7 +39,7 @@ class AceStepClient:
         request_timeout_seconds: float = 30.0,
     ):
         self.base_url = _require_loopback(base_url)
-        self.api_key = api_key
+        self.api_key = api_key if api_key is not None else read_api_key()
         self.request_timeout_seconds = request_timeout_seconds
 
     def _request(

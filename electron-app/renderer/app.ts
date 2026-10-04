@@ -1,6 +1,6 @@
-import { api, applySong, go } from "./actions.ts";
+import { api, applySongForContext, go, refreshSong } from "./actions.ts";
 import { byId, icon, isTyping } from "./dom.ts";
-import { get, initStore, set, subscribe, type State, type View } from "./store.ts";
+import { get, initStore, isSongTicket, set, songTicket, subscribe, type State, type View } from "./store.ts";
 import { errorText, installTooltips, toast } from "./ui.ts";
 import { renderCreate, submitCreateShortcut } from "./views/create.ts";
 import { renderLibrary } from "./views/library.ts";
@@ -180,22 +180,23 @@ async function start(): Promise<void> {
     else if (event.type === "task") set({ task: event.task });
     else if (event.type === "songs") set({ songs: event.songs });
     else if (event.type === "song") {
-      if (get().song.song?.songId === event.song.song?.songId) applySong(event.song);
+      applySongForContext(event.song, songTicket(event.songId));
     } else if (event.type === "task-finished") {
       const outcome = event.outcome;
       const state = get();
       const here = state.song.song?.songId === outcome.songId;
+      const ticket = songTicket(outcome.songId);
       const firstNew = outcome.newVersionIds[0];
       if (here && firstNew && outcome.kind === "repaint") {
         // A finished edit is what the listener was waiting for; open it next to its original.
-        void api.refreshSong().then((next) => applySong(next, firstNew));
+        void refreshSong(outcome.songId, firstNew);
       }
       toast(`「${outcome.songTitle}」 ${outcome.message}`, {
         tone: outcome.cancelled ? "info" : outcome.ok ? "ok" : "error",
         timeout: 6000,
         action:
           firstNew && here && outcome.kind !== "repaint"
-            ? { label: "새 버전 듣기", run: () => set({ activeVersionId: firstNew, listenToParent: false }) }
+            ? { label: "새 버전 듣기", run: () => { if (isSongTicket(ticket)) set({ activeVersionId: firstNew, listenToParent: false }); } }
             : undefined,
       });
     }

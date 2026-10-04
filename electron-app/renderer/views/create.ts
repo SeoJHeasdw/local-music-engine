@@ -1,7 +1,9 @@
 import { api, applySong, engineReady, go, startEngine } from "../actions.ts";
 import { byId, h, icon, mount } from "../dom.ts";
 import { clock, hasTag, lengthLabel, splitTags, toggleTag } from "../format.ts";
-import { get, set, type CreateDraft } from "../store.ts";
+import { beginSongOpen, finishSongOpen, get, set, type CreateDraft } from "../store.ts";
+import { DraftEdits } from "../draft-edits.ts";
+import type { DraftResult } from "../../shared.ts";
 import { toast, withBusy } from "../ui.ts";
 
 // Plain-Korean labels for the English tags ACE-Step was trained on. The chip shows the
@@ -84,6 +86,8 @@ type Refs = {
 };
 
 let refs: Refs | null = null;
+const draftEdits = new DraftEdits();
+let drafting = false;
 
 export function blankDraft(): CreateDraft {
   const settings = get()?.settings;
@@ -103,6 +107,7 @@ export function blankDraft(): CreateDraft {
 }
 
 function patch(change: Partial<CreateDraft>): void {
+  draftEdits.edited(change);
   set({ create: { ...get().create, ...change } });
 }
 
@@ -133,7 +138,7 @@ function insertSection(tag: string): void {
 }
 
 async function requestDraft(): Promise<void> {
-  if (!refs) return;
+  if (!refs || drafting || refs.draftButton.disabled) return;
   const draft = get().create;
   if (!draft.description.trim()) {
     toast("어떤 곡인지 한 줄이라도 적어 주세요.", { tone: "error" });
@@ -141,23 +146,30 @@ async function requestDraft(): Promise<void> {
     return;
   }
   const llm = get().settings.assistant.kind !== "rules";
+  drafting = true;
+  const ticket = draftEdits.begin(draft);
   refs.draftStatus.textContent = llm
     ? "로컬 LLM이 제목·스타일·가사를 쓰고 있어요. 모델을 불러오느라 30초쯤 걸릴 수 있어요."
     : "음악 엔진이 스타일을 쓰고 있어요.";
-  const result = await withBusy(refs.draftButton, "초안을 쓰는 중", () => api.draft(draft.description, draft.instrumental, draft.durationSeconds));
-  if (!refs) return;
+  let result: DraftResult | undefined;
+  try {
+    result = await withBusy(refs.draftButton, "초안을 쓰는 중", () => api.draft(draft.description, draft.instrumental, draft.durationSeconds));
+  } finally {
+    drafting = false;
+    syncCreate();
+  }
+  if (!refs || !draftEdits.isLatest(ticket)) return;
   refs.draftStatus.replaceChildren();
   if (!result) return;
-  // Keep what the person already wrote; a draft only fills empty or drafted fields.
-  const keepLyrics = !draft.drafted && draft.lyrics.trim() && !draft.instrumental;
-  const lyrics = draft.instrumental ? INSTRUMENTAL : keepLyrics ? draft.lyrics : result.lyrics;
-  const title = draft.title.trim() && !draft.drafted ? draft.title : result.title || draft.title || fallbackTitle(draft.description);
-  patch({ stylePrompt: result.stylePrompt, lyrics, title, drafted: true });
-  refs.style.value = result.stylePrompt;
-  if (!draft.instrumental) refs.lyrics.value = lyrics;
-  refs.title.value = title;
-  flash(refs.style);
-  if (!keepLyrics) flash(refs.lyrics);
+  const change = draftEdits.merge(ticket, get().create, result, fallbackTitle(draft.description));
+  if (!change) return;
+  set({ create: { ...get().create, ...change } });
+  const latest = get().create;
+  refs.style.value = latest.stylePrompt;
+  if (!latest.instrumental) refs.lyrics.value = latest.lyrics;
+  refs.title.value = latest.title;
+  if (change.stylePrompt !== undefined) flash(refs.style);
+  if (change.lyrics !== undefined) flash(refs.lyrics);
   syncCreate();
   const source = result.source === "llm" ? `로컬 LLM(${result.sourceModel})이 쓴 초안이에요.` : "음악 엔진이 쓴 초안이에요.";
   mount(
@@ -169,6 +181,7 @@ async function requestDraft(): Promise<void> {
 }
 
 async function submit(button: HTMLButtonElement): Promise<void> {
+  if (button.disabled) return;
   const draft = get().create;
   const lyrics = draft.instrumental ? INSTRUMENTAL : draft.lyrics.trim();
   if (!draft.stylePrompt.trim()) {
@@ -182,6 +195,7 @@ async function submit(button: HTMLButtonElement): Promise<void> {
     return;
   }
   const bpm = Number.parseInt(draft.bpm, 10);
+  const request = beginSongOpen();
   const state = await withBusy(button, "만드는 중", () =>
     api.createSong({
       title: draft.title.trim() || fallbackTitle(draft.description),
@@ -194,9 +208,10 @@ async function submit(button: HTMLButtonElement): Promise<void> {
       timeSignature: draft.timeSignature.trim() || null,
     }),
   );
-  if (!state) return;
+  if (!finishSongOpen(request) || !state) return;
   applySong(state);
   set({ create: blankDraft() });
+  draftEdits.reset();
   refs = null;
   go("studio");
   toast(`버전 ${draft.versions}개를 만들기 시작했어요. 끝나는 대로 하나씩 들어 볼 수 있어요.`, { tone: "ok" });
@@ -494,7 +509,7 @@ export function syncCreate(): void {
     h("p", { class: "hint center" }, "⌘ Enter로도 시작해요. 새 곡은 ", h("span", { class: "mono" }, state.settings.projectsDir.replace(/^\/Users\/[^/]+/, "~")), "에 저장돼요."),
   );
   const llm = state.settings.assistant.kind !== "rules";
-  refs.draftButton.disabled = !ready && !llm;
+  refs.draftButton.disabled = drafting || (!ready && !llm);
   refs.draftButton.dataset.tip = ready || llm ? "" : "음악 엔진을 켜거나 설정에서 로컬 LLM 도우미를 켜세요";
   if (!refs.draftStatus.childNodes.length && !llm) {
     mount(
@@ -524,4 +539,3 @@ export function submitCreateShortcut(): void {
 export function resetCreateView(): void {
   refs = null;
 }
-

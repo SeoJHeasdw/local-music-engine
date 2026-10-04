@@ -86,6 +86,7 @@ export type JobView = {
   stage: string | null;
   progress: number;
   error: string | null;
+  outputCleanupErrors?: string[];
   createdAt: string | null;
   startedAt: string | null;
   finishedAt: string | null;
@@ -271,6 +272,7 @@ export type DraftResult = {
 };
 
 export type PlanInput = {
+  songId: string;
   versionId: string;
   feedback: string;
   range: TimeRange | null;
@@ -279,6 +281,7 @@ export type PlanInput = {
 };
 
 export type ReviewInput = {
+  songId: string;
   versionId: string;
   status: ReviewStatus;
   rating?: number | null;
@@ -286,6 +289,7 @@ export type ReviewInput = {
 };
 
 export type ReviseInput = {
+  songId: string;
   title?: string;
   stylePrompt?: string;
   lyrics?: string;
@@ -295,7 +299,7 @@ export type ReviseInput = {
 
 export type RevealTarget =
   | { kind: "version"; versionId: string }
-  | { kind: "song"; songId?: string }
+  | { kind: "song"; songId: string }
   | { kind: "export"; artifactId: string }
   | { kind: "songs-dir" }
   | { kind: "engine-log" };
@@ -306,28 +310,28 @@ export type MusicEvent =
   | { type: "engine"; engine: EngineStatus }
   | { type: "task"; task: ActiveTask | null }
   | { type: "task-finished"; outcome: TaskOutcome }
-  | { type: "song"; song: SongState }
+  | { type: "song"; songId: string; song: SongState }
   | { type: "songs"; songs: SongSummary[] };
 
 export type MusicAppApi = {
   bootstrap(): Promise<Bootstrap>;
   listSongs(): Promise<SongSummary[]>;
-  openSong(songId: string): Promise<SongState>;
+  openSong(songId: string): Promise<SongState | null>;
   openSongFolder(): Promise<SongState | null>;
-  closeSong(): Promise<SongState>;
+  closeSong(songId: string): Promise<SongState>;
   createSong(input: CreateSongInput): Promise<SongState>;
-  refreshSong(): Promise<SongState>;
+  refreshSong(songId: string): Promise<SongState>;
   review(input: ReviewInput): Promise<SongState>;
-  setFinal(versionId: string): Promise<SongState>;
-  undoFinal(): Promise<SongState>;
-  exportFinal(): Promise<ExportResult | null>;
+  setFinal(songId: string, versionId: string): Promise<SongState>;
+  undoFinal(songId: string): Promise<SongState>;
+  exportFinal(songId: string): Promise<ExportResult | null>;
   revise(input: ReviseInput): Promise<SongState>;
   draft(query: string, instrumental: boolean, durationSeconds: number): Promise<DraftResult>;
   plan(input: PlanInput): Promise<Plan>;
-  applyPlan(plan: Plan, feedbackText: string): Promise<SongState>;
-  generateMore(count: number): Promise<SongState>;
-  resume(jobId: string): Promise<SongState>;
-  cancelTask(): Promise<void>;
+  applyPlan(songId: string, plan: Plan, feedbackText: string): Promise<SongState>;
+  generateMore(songId: string, count: number): Promise<SongState>;
+  resume(songId: string, jobId: string): Promise<SongState>;
+  cancelTask(songId: string, startedAt: number): Promise<void>;
   reveal(target: RevealTarget): Promise<void>;
   saveSettings(partial: Partial<Settings>): Promise<Settings>;
   pickProjectsDir(): Promise<Settings>;

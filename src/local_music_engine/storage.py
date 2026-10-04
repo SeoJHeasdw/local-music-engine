@@ -220,6 +220,34 @@ class ProjectStore:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return False
 
+    @contextmanager
+    def export_lock(self):
+        """Keep export ownership observable after a crash without blocking inference."""
+
+        self.load()
+        with (self.root / ".export.lock").open("a+b") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise RuntimeError("project export is already running") from error
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def export_active(self) -> bool:
+        try:
+            handle = (self.root / ".export.lock").open("rb")
+        except FileNotFoundError:
+            return False
+        with handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+
     def relative_path(self, path: Path | str) -> str:
         resolved = Path(path).expanduser().resolve()
         try:
@@ -238,15 +266,18 @@ class ProjectStore:
         return candidate
 
     def verify_artifact(self, artifact: dict[str, Any]) -> tuple[bool, str]:
-        path = self.resolve_artifact(artifact)
-        if not path.is_file():
-            return False, f"missing artifact file: {path}"
-        actual_size = path.stat().st_size
-        if actual_size != artifact["bytes"]:
-            return False, f"artifact size changed: {path}"
-        actual_hash = sha256_file(path)
-        if actual_hash != artifact["sha256"]:
-            return False, f"artifact hash changed: {path}"
+        try:
+            path = self.resolve_artifact(artifact)
+            if not path.is_file():
+                return False, f"missing artifact file: {path}"
+            actual_size = path.stat().st_size
+            if actual_size != artifact["bytes"]:
+                return False, f"artifact size changed: {path}"
+            actual_hash = sha256_file(path)
+            if actual_hash != artifact["sha256"]:
+                return False, f"artifact hash changed: {path}"
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+            return False, f"invalid artifact: {type(error).__name__}: {error}"
         return True, "ok"
 
     def append_job(

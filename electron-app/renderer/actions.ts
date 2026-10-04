@@ -1,5 +1,5 @@
 import type { SongState, Version } from "../shared.ts";
-import { get, set, type View } from "./store.ts";
+import { beginSongOpen, finishSongOpen, get, isSongTicket, set, songTicket, type SongTicket, type View } from "./store.ts";
 import { errorText, toast } from "./ui.ts";
 
 export const api = window.musicApp;
@@ -34,23 +34,45 @@ export function applySong(next: SongState, focusVersionId?: string | null): void
   if (next.status === "error" && next.error) toast(next.error, { tone: "error" });
 }
 
-export async function openSong(songId: string): Promise<void> {
+export function applySongForContext(next: SongState, ticket: SongTicket | null, focusVersionId?: string | null): boolean {
+  if (!isSongTicket(ticket) || (next.song && next.song.songId !== ticket.songId)) return false;
+  applySong(next, focusVersionId);
+  return true;
+}
+
+export async function refreshSong(songId: string, focusVersionId?: string | null): Promise<void> {
+  const ticket = songTicket(songId);
+  if (!ticket) return;
+  const versionId = get().activeVersionId;
   try {
-    applySong(await api.openSong(songId));
+    const next = await api.refreshSong(songId);
+    applySongForContext(next, ticket, get().activeVersionId === versionId ? focusVersionId : undefined);
+  } catch (error) {
+    if (isSongTicket(ticket)) toast(errorText(error), { tone: "error" });
+  }
+}
+
+export async function openSong(songId: string): Promise<void> {
+  const request = beginSongOpen();
+  try {
+    const opened = await api.openSong(songId);
+    if (!finishSongOpen(request) || !opened) return;
+    applySong(opened);
     go("studio");
   } catch (error) {
-    toast(errorText(error), { tone: "error" });
+    if (finishSongOpen(request)) toast(errorText(error), { tone: "error" });
   }
 }
 
 export async function openFolderDialog(): Promise<void> {
+  const request = beginSongOpen();
   try {
     const opened = await api.openSongFolder();
-    if (!opened) return;
+    if (!finishSongOpen(request) || !opened) return;
     applySong(opened);
     go("studio");
   } catch (error) {
-    toast(errorText(error), { tone: "error" });
+    if (finishSongOpen(request)) toast(errorText(error), { tone: "error" });
   }
 }
 

@@ -13,7 +13,8 @@ from typing import Any, Callable, Iterable
 
 from .ace_adapter import AceApiError, AceStepClient
 from .execution import execute_candidate
-from .jobs import (ACTIVE_STATUSES, frozen_batch_payloads, recover_jobs, reusable_candidates, resume_source)
+from .jobs import (ACTIVE_STATUSES, cleanup_export_outputs, frozen_batch_payloads, recover_export_jobs, recover_jobs,
+                   reusable_candidates, resume_source, validate_seed)
 from .qc import artifact_and_findings, inspect_wav
 from .storage import ProjectStore, fingerprint, new_id, sha256_file, utc_now
 
@@ -102,7 +103,7 @@ def _frozen_generation_payload(
         "audio_duration": float(inputs["targetDurationSeconds"]),
         **_dit_sampling(model),
         "use_random_seed": False,
-        "seed": int(seed),
+        "seed": validate_seed(seed),
         "batch_size": 1,
         "model": model,
         "lm_model_path": lm_model,
@@ -391,7 +392,7 @@ def generate_candidates(
     client_factory: Callable[..., AceStepClient] = AceStepClient,
 ) -> dict[str, Any]:
     store = ProjectStore(project_root)
-    seed_list = [int(seed) for seed in seeds]
+    seed_list = [validate_seed(seed) for seed in seeds]
     if not math.isfinite(lm_temperature) or not 0.0 < lm_temperature <= 2.0:
         raise ValueError("lm temperature must be in (0, 2]")
     if not seed_list:
@@ -475,6 +476,7 @@ def repaint_candidate(
     timeout_seconds: float = 1800.0,
     client_factory: Callable[..., AceStepClient] = AceStepClient,
 ) -> dict[str, Any]:
+    seed = validate_seed(seed)
     if not math.isfinite(start_seconds) or not math.isfinite(end_seconds) or start_seconds < 0 or end_seconds <= start_seconds:
         raise ValueError("repaint range must satisfy finite 0 <= start < end")
     if strength is not None and strength not in REPAINT_STRENGTHS:
@@ -650,14 +652,22 @@ def review_candidate(
         return deepcopy(review)
 
 
-def _copy_atomic(source: Path, destination: Path) -> None:
+def _copy_atomic(
+    source: Path, destination: Path, *, on_staged: Callable[[Path], None] | None = None,
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent
     )
     os.close(descriptor)
     temporary = Path(temporary_name)
+    retained = False
     try:
+        if on_staged is not None:
+            # Persist ownership before either copying or publishing. Keep this inode
+            # alive until the manifest commits so recovery can safely undo publication.
+            on_staged(temporary)
+            retained = True
         shutil.copyfile(source, temporary)
         with temporary.open("rb") as handle:
             os.fsync(handle.fileno())
@@ -670,87 +680,117 @@ def _copy_atomic(source: Path, destination: Path) -> None:
         finally:
             os.close(directory_fd)
     finally:
-        temporary.unlink(missing_ok=True)
+        if not retained:
+            temporary.unlink(missing_ok=True)
 
 
 def export_selected(
     project_root: Path | str, *, output: Path | str | None = None
 ) -> dict[str, Any]:
     store = ProjectStore(project_root)
-    with store.locked():
-        project = store.load()
-        selected_id = project.get("selectedCandidateId")
-        if not selected_id:
-            raise ValueError("no candidate is selected")
-        candidate = store.find_by_id(project, "candidates", "candidateId", selected_id)
-        source_artifact = store.find_by_id(
-            project, "artifacts", "artifactId", candidate["artifactId"]
-        )
-        valid, reason = store.verify_artifact(source_artifact)
-        if not valid:
-            raise ValueError(reason)
-        source = store.resolve_artifact(source_artifact)
-        external = None
-        if output is not None:
-            requested = Path(output).expanduser().absolute()
-            external = requested.resolve()
-            if external.is_relative_to(store.root):
-                raise ValueError("export output must be outside the project; omit --output for an internal export")
-            if requested.exists() or requested.is_symlink():
-                raise FileExistsError("export output already exists; choose a new filename")
-        job = store.append_job(
-            project,
-            kind="export",
-            parameters={"candidateId": selected_id, "requestedOutput": str(output or "")},
-        )
-        store.transition_job(job, "running", stage="copying", progress=0.1)
-        store.save(project)
-        internal = store.root / "exports" / f"{job['jobId']}-{selected_id}.wav"
+    with store.export_lock():
+        job_id = None
         try:
+            with store.transaction() as project:
+                selected_id = project.get("selectedCandidateId")
+                if not selected_id:
+                    raise ValueError("no candidate is selected")
+                candidate = store.find_by_id(project, "candidates", "candidateId", selected_id)
+                source_artifact = store.find_by_id(
+                    project, "artifacts", "artifactId", candidate["artifactId"]
+                )
+                valid, reason = store.verify_artifact(source_artifact)
+                if not valid:
+                    raise ValueError(reason)
+                source = store.resolve_artifact(source_artifact)
+                # Own the lease before recovering old exports, including an output
+                # filename left by a process killed after its atomic publication.
+                recover_export_jobs(store, project)
+                external = None
+                if output is not None:
+                    requested = Path(output).expanduser().absolute()
+                    external = requested.resolve()
+                    if external.is_relative_to(store.root):
+                        raise ValueError("export output must be outside the project; omit --output for an internal export")
+                    if requested.exists() or requested.is_symlink():
+                        raise FileExistsError("export output already exists; choose a new filename")
+                job = store.append_job(
+                    project, kind="export",
+                    parameters={"candidateId": selected_id, "requestedOutput": str(output or "")},
+                )
+                job_id = job["jobId"]
+                job["ownedOutputs"] = []
+                store.transition_job(job, "running", stage="copying", progress=0.1)
+            internal = store.root / "exports" / f"{job_id}-{selected_id}.wav"
+
+            def staged(destination: Path) -> Callable[[Path], None]:
+                def record(temporary: Path) -> None:
+                    identity = temporary.stat()
+                    with store.transaction() as project:
+                        current = store.find_by_id(project, "jobs", "jobId", job_id)
+                        current["ownedOutputs"].append({
+                            "path": str(destination), "temporaryPath": str(temporary),
+                            "device": identity.st_dev, "inode": identity.st_ino,
+                            "expectedBytes": source_artifact["bytes"],
+                            "expectedSha256": source_artifact["sha256"],
+                        })
+                return record
+
             store.relative_path(internal)
-            _copy_atomic(source, internal)
+            _copy_atomic(source, internal, on_staged=staged(internal))
             if sha256_file(internal) != source_artifact["sha256"]:
                 raise RuntimeError("export hash differs from the selected candidate")
             artifact, findings = artifact_and_findings(
                 path=internal,
                 project_relative_path=store.relative_path(internal),
                 artifact_kind="export-wav",
-                created_by_job_id=job["jobId"],
+                created_by_job_id=job_id,
                 requested_duration_seconds=source_artifact["audio"]["durationSeconds"],
             )
             if external is not None:
-                _copy_atomic(internal, external)
+                _copy_atomic(internal, external, on_staged=staged(external))
                 if sha256_file(external) != artifact["sha256"]:
                     raise RuntimeError("external export hash verification failed")
                 artifact["externalPath"] = str(external)
-            project["artifacts"].append(artifact)
-            project["findings"].extend(findings)
-            job["resultRefs"] = [artifact["artifactId"]]
-            revision = {
-                "revisionId": new_id("revision"),
-                "kind": "export",
-                "previousRevisionId": (
-                    project["revisions"][-1]["revisionId"] if project["revisions"] else None
-                ),
-                "before": {},
-                "after": {
-                    "candidateId": selected_id,
-                    "exportArtifactId": artifact["artifactId"],
-                },
-                "createdAt": utc_now(),
-            }
-            project["revisions"].append(revision)
-            store.transition_job(job, "succeeded", stage="verified", progress=1.0)
-            store.save(project)
+            with store.transaction() as project:
+                job = store.find_by_id(project, "jobs", "jobId", job_id)
+                project["artifacts"].append(artifact)
+                project["findings"].extend(findings)
+                job["resultRefs"] = [artifact["artifactId"]]
+                project["revisions"].append({
+                    "revisionId": new_id("revision"), "kind": "export",
+                    "previousRevisionId": (
+                        project["revisions"][-1]["revisionId"] if project["revisions"] else None
+                    ),
+                    "before": {},
+                    "after": {"candidateId": selected_id, "exportArtifactId": artifact["artifactId"]},
+                    "createdAt": utc_now(),
+                })
+                store.transition_job(job, "succeeded", stage="verified", progress=1.0)
+            # Published audio is now a historical artifact; only staging links may go.
+            cleanup_export_outputs(job, include_published=False)
             return {
                 "artifactId": artifact["artifactId"],
                 "path": str(internal),
                 "externalPath": artifact.get("externalPath"),
                 "sha256": artifact["sha256"],
             }
-        except Exception as error:
-            store.transition_job(
-                job, "failed", stage="failed", error=f"{type(error).__name__}: {error}"
-            )
-            store.save(project)
+        except (Exception, KeyboardInterrupt) as error:
+            if job_id is not None:
+                try:
+                    with store.transaction() as project:
+                        job = store.find_by_id(project, "jobs", "jobId", job_id)
+                        # A save can fail either before or after the atomic replace.
+                        # The canonical status, not the mutated local dict, decides.
+                        if job["status"] in ACTIVE_STATUSES:
+                            job["outputCleanupErrors"] = cleanup_export_outputs(job)
+                            cancelled = isinstance(error, KeyboardInterrupt)
+                            job["cancelRequested"] = cancelled
+                            state = "cancelled" if cancelled else "failed"
+                            store.transition_job(job, state, stage=state,
+                                                 error=f"{type(error).__name__}: {error}")
+                        elif job["status"] == "succeeded":
+                            cleanup_export_outputs(job, include_published=False)
+                except (Exception, KeyboardInterrupt) as recording_error:
+                    error.add_note(f"Could not record export failure: {recording_error}")
             raise

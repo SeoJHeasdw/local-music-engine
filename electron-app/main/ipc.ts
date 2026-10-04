@@ -34,6 +34,8 @@ import {
   versionFilePath,
 } from "./songs.ts";
 import { TaskRunner, type TaskSpec } from "./tasks.ts";
+import { SongSession, type SongContext } from "./song-session.ts";
+import { unloadAssistant } from "./assistant-model.ts";
 
 const versionIdPattern = /^candidate_[a-f0-9]{32}$/;
 const artifactIdPattern = /^artifact_[a-f0-9]{32}$/;
@@ -42,7 +44,7 @@ const strengths: Strength[] = ["light", "medium", "strong"];
 export class Controller {
   engine: EngineManager;
   tasks: TaskRunner;
-  private openFolder: string | null = null;
+  private session = new SongSession(songIdFor);
   private rules: RuleHint[] | null = null;
   private startingGeneration = false;
 
@@ -56,11 +58,11 @@ export class Controller {
     this.tasks = new TaskRunner({
       emit: (task) => this.send({ type: "task", task }),
       versionsChanged: (folder) => {
-        if (folder === this.openFolder) void this.pushSong();
+        if (folder === this.session.current()?.folder) void this.pushSong();
       },
       finished: (outcome, folder) => {
         this.send({ type: "task-finished", outcome });
-        if (folder === this.openFolder) void this.pushSong();
+        if (folder === this.session.current()?.folder) void this.pushSong();
         void this.pushSongs();
       },
     });
@@ -71,7 +73,10 @@ export class Controller {
   }
 
   private async pushSong(): Promise<void> {
-    if (this.openFolder) this.send({ type: "song", song: await this.songState() });
+    const context = this.session.current();
+    if (!context) return;
+    const song = await loadSong(context.folder);
+    if (this.session.matches(context)) this.send({ type: "song", songId: context.songId, song });
   }
 
   private async pushSongs(): Promise<void> {
@@ -89,21 +94,12 @@ export class Controller {
     return listSongs(settings.projectsDir, state.extraSongPaths, new Set(busy ? [busy] : []));
   }
 
-  private async songState(): Promise<SongState> {
-    if (!this.openFolder) return { status: "none", song: null };
-    return loadSong(this.openFolder);
+  private async songState(folder = this.session.current()?.folder): Promise<SongState> {
+    return folder ? loadSong(folder) : { status: "none", song: null };
   }
 
-  private async open(folder: string): Promise<SongState> {
-    this.openFolder = folder;
-    songIdFor(folder);
-    await updateAppState({ lastSongPath: folder });
-    return this.songState();
-  }
-
-  private requireFolder(): string {
-    if (!this.openFolder) throw new Error("먼저 곡을 여세요.");
-    return this.openFolder;
+  private open(resolveFolder: () => Promise<string | null>, revision?: number): Promise<SongState | null> {
+    return this.session.open(resolveFolder, loadSong, (folder) => updateAppState({ lastSongPath: folder }), revision);
   }
 
   private requireIdle(folder: string): void {
@@ -156,8 +152,9 @@ export class Controller {
     ];
   }
 
-  private async startTask(spec: Omit<TaskSpec, "songId" | "songTitle">): Promise<SongState> {
-    const state = await this.songState();
+  private async startTask(spec: Omit<TaskSpec, "songId" | "songTitle">, context?: SongContext): Promise<SongState> {
+    const state = await loadSong(spec.folder);
+    if (context) this.session.assert(context);
     const song = state.song;
     this.tasks.start({
       ...spec,
@@ -171,11 +168,11 @@ export class Controller {
   async bootstrap(): Promise<Bootstrap> {
     const settings = await loadSettings();
     const state = await loadAppState();
-    if (state.lastSongPath && !this.openFolder) {
+    if (state.lastSongPath && !this.session.current()) {
       try {
-        this.openFolder = await validateSongFolder(state.lastSongPath);
+        await this.open(() => validateSongFolder(state.lastSongPath!));
       } catch {
-        this.openFolder = null;
+        // A missing recent song leaves the library open.
       }
     }
     const [songs, song, rules] = await Promise.all([this.songs(), this.songState(), this.ruleHints()]);
@@ -217,8 +214,8 @@ export class Controller {
 
     handle("bootstrap", () => this.bootstrap());
     handle("list-songs", () => this.songs());
-    handle("open-song", async (songId: unknown) => this.open(await validateSongFolder(songPath(songId))));
-    handle("open-song-folder", async () => {
+    handle("open-song", (songId: unknown) => this.open(() => validateSongFolder(songPath(songId))));
+    handle("open-song-folder", () => this.open(async () => {
       const window = this.window();
       const result = window
         ? await dialog.showOpenDialog(window, { title: "곡 폴더 열기", properties: ["openDirectory"] })
@@ -230,16 +227,16 @@ export class Controller {
         const state = await loadAppState();
         await updateAppState({ extraSongPaths: [folder, ...state.extraSongPaths.filter((item) => item !== folder)] });
       }
-      const opened = await this.open(folder);
       void this.pushSongs();
-      return opened;
-    });
-    handle("close-song", async () => {
-      this.openFolder = null;
+      return folder;
+    }));
+    handle("close-song", async (songId: unknown) => {
+      this.session.require(songId);
+      this.session.close();
       await updateAppState({ lastSongPath: null });
       return { status: "none", song: null } satisfies SongState;
     });
-    handle("refresh-song", () => this.songState());
+    handle("refresh-song", (songId: unknown) => this.songState(this.session.require(songId).folder));
 
     handle("create-song", async (input: CreateSongInput) => {
       const title = String(input?.title ?? "").trim().slice(0, 100);
@@ -252,27 +249,33 @@ export class Controller {
       if (!lyrics || lyrics.length > 4096) throw new Error("가사를 4,096자 안으로 적어 주세요. 가사가 없으면 연주곡을 고르세요.");
       if (!Number.isFinite(duration) || duration < 10 || duration > 600) throw new Error("곡 길이는 10초에서 10분 사이여야 해요.");
       if (!Number.isInteger(versions) || versions < 1 || versions > 4) throw new Error("버전은 1~4개까지 만들 수 있어요.");
-      await this.requireEngine();
-      const settings = currentSettings();
-      const folder = await newSongFolder(settings.projectsDir, title);
-      const args = ["init", folder, "--title", title, "--lyrics", lyrics, "--style", style, "--duration", String(Math.round(duration))];
-      if (input.bpm && Number.isInteger(input.bpm)) args.push("--bpm", String(input.bpm));
-      if (input.keyScale?.trim()) args.push("--key", input.keyScale.trim().slice(0, 40));
-      if (input.timeSignature?.trim()) args.push("--time-signature", input.timeSignature.trim().slice(0, 10));
-      await runCli(args);
-      await this.open(folder);
-      return this.startTask({
-        kind: "generate",
-        folder,
-        label: `버전 ${versions}개 만들기`,
-        args: this.generationArgs(folder, versions),
-        total: versions,
-        jobKind: "candidate-batch",
-      });
+      const opening = this.session.beginOpen();
+      try {
+        await this.requireEngine();
+        const settings = currentSettings();
+        const folder = await newSongFolder(settings.projectsDir, title);
+        const args = ["init", folder, "--title", title, "--lyrics", lyrics, "--style", style, "--duration", String(Math.round(duration))];
+        if (input.bpm && Number.isInteger(input.bpm)) args.push("--bpm", String(input.bpm));
+        if (input.keyScale?.trim()) args.push("--key", input.keyScale.trim().slice(0, 40));
+        if (input.timeSignature?.trim()) args.push("--time-signature", input.timeSignature.trim().slice(0, 10));
+        await runCli(args);
+        await this.open(async () => folder, opening);
+        return this.startTask({
+          kind: "generate",
+          folder,
+          label: `버전 ${versions}개 만들기`,
+          args: this.generationArgs(folder, versions),
+          total: versions,
+          jobKind: "candidate-batch",
+        });
+      } finally {
+        this.session.cancelOpen(opening);
+      }
     });
 
     handle("review", async (input: ReviewInput) => {
-      const folder = this.requireFolder();
+      const context = this.session.require(input?.songId);
+      const { folder } = context;
       const versionId = requireVersionId(input?.versionId);
       const status = input?.status;
       if (!(["unreviewed", "listened", "approved", "rejected"] as const).includes(status)) throw new Error("알 수 없는 평가예요.");
@@ -284,26 +287,30 @@ export class Controller {
       if (note) args.push("--note", note);
       await runCli(args);
       void this.pushSongs();
-      return this.songState();
+      return this.songState(folder);
     });
-    handle("set-final", async (versionId: unknown) => {
-      const folder = this.requireFolder();
+    handle("set-final", async (songId: unknown, versionId: unknown) => {
+      const context = this.session.require(songId);
+      const { folder } = context;
       this.requireIdle(folder);
       await runCli(["select", folder, requireVersionId(versionId)]);
       void this.pushSongs();
-      return this.songState();
+      return this.songState(folder);
     });
-    handle("undo-final", async () => {
-      const folder = this.requireFolder();
+    handle("undo-final", async (songId: unknown) => {
+      const context = this.session.require(songId);
+      const { folder } = context;
       this.requireIdle(folder);
       await runCli(["undo-selection", folder]);
       void this.pushSongs();
-      return this.songState();
+      return this.songState(folder);
     });
-    handle("export-final", async () => {
-      const folder = this.requireFolder();
+    handle("export-final", async (songId: unknown) => {
+      const context = this.session.require(songId);
+      const { folder } = context;
       this.requireIdle(folder);
-      const state = await this.songState();
+      const state = await this.songState(folder);
+      this.session.assert(context);
       if (!state.song?.finalVersionId) throw new Error("먼저 최종본을 지정하세요.");
       const settings = currentSettings();
       const directory = settings.lastExportDir ?? app.getPath("music");
@@ -316,14 +323,17 @@ export class Controller {
         filters: [{ name: "WAV 오디오", extensions: ["wav"] }],
       });
       if (result.canceled || !result.filePath) return null;
+      this.session.assert(context);
+      this.requireIdle(folder);
       const output = result.filePath.toLowerCase().endsWith(".wav") ? result.filePath : `${result.filePath}.wav`;
       await runCli(["export", folder, "--output", output]);
       await saveSettings({ lastExportDir: path.dirname(output) });
       void this.pushSongs();
-      return { state: await this.songState(), path: output };
+      return { state: await this.songState(folder), path: output };
     });
     handle("revise", async (input: ReviseInput) => {
-      const folder = this.requireFolder();
+      const context = this.session.require(input?.songId);
+      const { folder } = context;
       this.requireIdle(folder);
       const args = ["revise", folder];
       if (input?.title !== undefined) args.push("--title", String(input.title).slice(0, 100));
@@ -333,7 +343,7 @@ export class Controller {
       if (input?.bpm !== undefined) args.push("--bpm", String(input.bpm ?? 0));
       await runCli(args);
       void this.pushSongs();
-      return this.songState();
+      return this.songState(folder);
     });
 
     handle("draft", async (query: unknown, instrumental: unknown, duration: unknown): Promise<DraftResult> => {
@@ -348,7 +358,8 @@ export class Controller {
       return this.withAssistant(() => runCli<DraftResult>(args));
     });
     handle("plan", async (input: PlanInput): Promise<Plan> => {
-      const folder = this.requireFolder();
+      const context = this.session.require(input?.songId);
+      const { folder } = context;
       const versionId = requireVersionId(input?.versionId);
       const feedback = String(input?.feedback ?? "").trim().slice(0, 2000);
       if (!feedback) throw new Error("무엇이 마음에 안 드는지 적어 주세요.");
@@ -364,8 +375,9 @@ export class Controller {
       args.push(...this.assistantArgs());
       return this.withAssistant(() => runCli<Plan>(args));
     });
-    handle("apply-plan", async (plan: Plan, feedbackText: unknown) => {
-      const folder = this.requireFolder();
+    handle("apply-plan", async (songId: unknown, plan: Plan, feedbackText: unknown) => {
+      const context = this.session.require(songId);
+      const { folder } = context;
       this.requireIdle(folder);
       const versionId = requireVersionId(plan?.candidateId);
       if (plan.action !== "repaint" && plan.action !== "regenerate") throw new Error("알 수 없는 수정 방식이에요.");
@@ -373,6 +385,7 @@ export class Controller {
       if (!style || style.length > 1500) throw new Error("스타일 문장이 비어 있거나 너무 길어요.");
       const strength = strengths.includes(plan.strength) ? plan.strength : "medium";
       await this.requireEngine();
+      this.session.assert(context);
       const settings = currentSettings();
       const text = String(feedbackText ?? "").trim().slice(0, 2000);
       const feedback = JSON.stringify({ text, candidateId: versionId, range: plan.range, plan });
@@ -400,18 +413,20 @@ export class Controller {
           ],
           total: 1,
           jobKind: "repaint-candidate",
-        });
+        }, context);
       }
       const count = Math.min(4, Math.max(1, Math.round(Number(plan.versions) || 2)));
       const args = [...this.generationArgs(folder, count), "--source-candidate-id", versionId, "--style", style, "--feedback-json", feedback];
       if (typeof plan.lyrics === "string" && plan.lyrics.trim()) args.push("--lyrics", plan.lyrics);
       if (plan.bpm && Number.isInteger(plan.bpm)) args.push("--bpm", String(plan.bpm));
-      return this.startTask({ kind: "generate", folder, label: `새 버전 ${count}개 만들기`, args, total: count, jobKind: "candidate-batch" });
+      return this.startTask({ kind: "generate", folder, label: `새 버전 ${count}개 만들기`, args, total: count, jobKind: "candidate-batch" }, context);
     });
-    handle("generate-more", async (count: unknown) => {
-      const folder = this.requireFolder();
+    handle("generate-more", async (songId: unknown, count: unknown) => {
+      const context = this.session.require(songId);
+      const { folder } = context;
       this.requireIdle(folder);
       await this.requireEngine();
+      this.session.assert(context);
       const total = Math.min(4, Math.max(1, Math.round(Number(count) || 1)));
       return this.startTask({
         kind: "generate",
@@ -420,13 +435,15 @@ export class Controller {
         args: this.generationArgs(folder, total),
         total,
         jobKind: "candidate-batch",
-      });
+      }, context);
     });
-    handle("resume", async (jobId: unknown) => {
-      const folder = this.requireFolder();
+    handle("resume", async (songId: unknown, jobId: unknown) => {
+      const context = this.session.require(songId);
+      const { folder } = context;
       this.requireIdle(folder);
       await this.requireEngine();
-      const state = await this.songState();
+      this.session.assert(context);
+      const state = await this.songState(folder);
       const target = state.song?.jobs.find((job) => job.jobId === jobId && job.kind === "candidate-batch");
       if (!target?.canResume) throw new Error("이어서 만들 수 있는 작업을 골라 주세요. 곡을 새로 열면 상태를 확인할 수 있어요.");
       return this.startTask({
@@ -436,15 +453,19 @@ export class Controller {
         args: ["resume", folder, "--job-id", target.jobId, "--base-url", currentSettings().aceBaseUrl],
         total: target.seeds?.length ?? 1,
         jobKind: "candidate-batch",
-      });
+      }, context);
     });
-    handle("cancel-task", () => this.tasks.cancel());
+    handle("cancel-task", (songId: unknown, startedAt: unknown) => {
+      const task = this.tasks.snapshot();
+      if (!task || task.songId !== songId || task.startedAt !== startedAt) throw new Error("진행 중인 작업이 바뀌었어요. 현재 작업에서 다시 시도하세요.");
+      return this.tasks.cancel();
+    });
 
     handle("reveal", async (target: RevealTarget) => {
       if (target?.kind === "version") {
         shell.showItemInFolder(versionFilePath(requireVersionId(target.versionId)));
       } else if (target?.kind === "song") {
-        const folder = target.songId ? songPath(target.songId) : this.requireFolder();
+        const folder = songPath(target.songId);
         shell.showItemInFolder(path.join(folder, "project.json"));
       } else if (target?.kind === "export") {
         if (!artifactIdPattern.test(String(target.artifactId))) throw new Error("알 수 없는 파일이에요.");
@@ -517,17 +538,5 @@ function clock(seconds: number): string {
 // Ollama keeps a model resident for minutes after its last answer (the engine's own
 // calls pass keep_alive 0). Unload the assistant model before the engine loads its own.
 async function unloadAssistantModel(): Promise<void> {
-  const assistant = currentSettings().assistant;
-  if (assistant.kind !== "ollama" || !assistant.model) return;
-  const base = requireLoopbackUrl(assistant.baseUrl, "AI 도우미").replace(/\/$/, "");
-  const loaded = await fetch(`${base}/api/ps`, { signal: AbortSignal.timeout(3000), redirect: "error" });
-  const body = (await loaded.json()) as { models?: { name?: string; model?: string }[] };
-  if (!body.models?.some((item) => item.name === assistant.model || item.model === assistant.model)) return;
-  await fetch(`${base}/api/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: assistant.model, keep_alive: 0 }),
-    signal: AbortSignal.timeout(15000),
-    redirect: "error",
-  });
+  await unloadAssistant(currentSettings().assistant);
 }

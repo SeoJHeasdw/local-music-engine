@@ -55,9 +55,50 @@ type Listener = (state: State, changed: Set<keyof State>) => void;
 
 let state: State;
 const listeners = new Set<Listener>();
+let songRevision = 0;
+let openingSong = false;
+let planRevision = 0;
+
+export type SongTicket = Readonly<{ songId: string; revision: number }>;
+export type PlanTicket = Readonly<{ song: SongTicket; revision: number }>;
+
+export function beginSongOpen(): number {
+  openingSong = true;
+  ++planRevision;
+  const revision = ++songRevision;
+  set({ plan: null });
+  return revision;
+}
+
+export function finishSongOpen(revision: number): boolean {
+  if (revision !== songRevision) return false;
+  openingSong = false;
+  return true;
+}
+
+export function songTicket(songId = state.song.song?.songId): SongTicket | null {
+  if (openingSong || !songId || state.song.song?.songId !== songId) return null;
+  return { songId, revision: songRevision };
+}
+
+export function isSongTicket(ticket: SongTicket | null): ticket is SongTicket {
+  return Boolean(ticket && !openingSong && ticket.revision === songRevision && state.song.song?.songId === ticket.songId);
+}
+
+export function planTicket(): PlanTicket | null {
+  const song = songTicket();
+  return song ? { song, revision: planRevision } : null;
+}
+
+export function isPlanTicket(ticket: PlanTicket | null): boolean {
+  return Boolean(ticket && isSongTicket(ticket.song) && ticket.revision === planRevision);
+}
 
 export function initStore(initial: State): void {
   state = initial;
+  ++songRevision;
+  ++planRevision;
+  openingSong = false;
 }
 
 export function get(): State {
@@ -66,6 +107,15 @@ export function get(): State {
 
 // Shallow merge + notify with the set of changed keys so views re-render only what moved.
 export function set(patch: Partial<State>): void {
+  const songChanged = patch.song !== undefined && patch.song.song?.songId !== state.song.song?.songId;
+  if (songChanged) ++songRevision;
+  const planKeys: Array<keyof State> = ["activeVersionId", "selection", "scope", "strength", "planVersions", "feedback"];
+  const planChanged = songChanged || planKeys.some((key) => key in patch && patch[key] !== state[key])
+    || (patch.settings !== undefined && JSON.stringify(patch.settings.assistant) !== JSON.stringify(state.settings.assistant));
+  if (planChanged) {
+    ++planRevision;
+    patch = { ...patch, plan: null };
+  }
   const changed = new Set<keyof State>();
   for (const key of Object.keys(patch) as Array<keyof State>) {
     if (state[key] !== patch[key]) changed.add(key);

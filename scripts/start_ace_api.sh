@@ -6,6 +6,11 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ACE_ROOT="$PROJECT_ROOT/.runtime/ace-step-1.5"
 MODEL_ROOT="$PROJECT_ROOT/.runtime/models"
 PORT="${MUSIC_ENGINE_ACE_PORT:-18001}"
+HOST="${MUSIC_ENGINE_ACE_HOST:-127.0.0.1}"
+case "$HOST" in
+  127.0.0.1|localhost|::1) ;;
+  *) echo "ACE host must be a loopback address" >&2; exit 1 ;;
+esac
 # The server loads one DiT and one LM at start and ignores per-request model names
 # for anything else, so the model choice belongs here, not in each request.
 DIT_MODEL="${MUSIC_ENGINE_ACE_DIT_MODEL:-acestep-v15-turbo}"
@@ -25,11 +30,12 @@ export ACESTEP_NO_INIT="false"
 export ACESTEP_DOWNLOAD_SOURCE="huggingface"
 export TOKENIZERS_PARALLELISM="false"
 export HF_HUB_DISABLE_TELEMETRY="1"
+export MUSIC_ENGINE_ACE_API_KEY_FILE="${MUSIC_ENGINE_ACE_API_KEY_FILE:-$PROJECT_ROOT/.runtime/ace-api-key}"
 
 cd "$ACE_ROOT"
 # ace_api_server.py wraps ACE's own server CLI; see its docstring for the memory fix.
 exec .venv/bin/python "$SCRIPT_DIR/ace_api_server.py" \
-  --host 127.0.0.1 \
+  --host "$HOST" \
   --port "$PORT" \
   --download-source huggingface \
   --init-llm \

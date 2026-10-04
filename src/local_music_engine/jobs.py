@@ -2,13 +2,82 @@
 
 from __future__ import annotations
 
+import stat
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
-from .storage import ProjectStore, fingerprint
+from .storage import ProjectStore, fingerprint, sha256_file
 
 ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 GENERATION_KINDS = {"candidate-batch", "generate-candidate", "repaint-candidate"}
+RECOVERABLE_KINDS = GENERATION_KINDS | {"export"}
+
+
+def validate_seed(seed: Any) -> int:
+    """ACE replaces negative seeds with randomness; accept only its fixed seed range."""
+
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 2**32 - 1:
+        raise ValueError("seed must be an integer between 0 and 4294967295")
+    return seed
+
+
+def cleanup_export_outputs(job: dict[str, Any], *, include_published: bool = True) -> list[str]:
+    """Roll back only files whose identity was saved before this job published them.
+
+    The temporary hard link remains until the success manifest is durable. Never
+    delete a symlink or a file replaced/changed by the user at the same output path.
+    """
+
+    errors = []
+    for output in job.get("ownedOutputs", []):
+        expected = (output["device"], output["inode"])
+        for key in (("path", "temporaryPath") if include_published else ("temporaryPath",)):
+            path = Path(output[key])
+            try:
+                current = path.lstat()
+                matches_identity = stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == expected
+                if key == "path":
+                    try:
+                        anchor = Path(output["temporaryPath"]).lstat()
+                        matches_anchor = stat.S_ISREG(anchor.st_mode) and (anchor.st_dev, anchor.st_ino) == expected
+                    except FileNotFoundError:
+                        matches_anchor = False
+                    if (not matches_identity or not matches_anchor
+                            or current.st_size != output.get("expectedBytes")
+                            or sha256_file(path) != output.get("expectedSha256")):
+                        errors.append(f"Preserved changed or unowned export output: {path}")
+                        continue
+                if matches_identity:
+                    path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                errors.append(f"{path}: {error}")
+    return errors
+
+
+def recover_export_jobs(store: ProjectStore, project: dict[str, Any]) -> list[str]:
+    """Caller owns the export lease, or has established that no exporter owns it."""
+
+    recovered = []
+    for job in project["jobs"]:
+        if job["kind"] != "export" or job["status"] not in ACTIVE_STATUSES:
+            continue
+        job["outputCleanupErrors"] = cleanup_export_outputs(job)
+        error = "Local export process ended before recording completion"
+        if not job.get("ownedOutputs"):
+            error += "; no output ownership was recorded, so existing files were preserved"
+        elif job["outputCleanupErrors"]:
+            error += "; some files were preserved or could not be removed; see output cleanup warnings"
+        else:
+            error += "; incomplete owned outputs were cleaned up"
+        store.transition_job(
+            job, "interrupted", stage="interrupted",
+            error=error,
+        )
+        recovered.append(job["jobId"])
+    return recovered
 
 
 def recover_jobs(store: ProjectStore, project: dict[str, Any]) -> list[str]:
@@ -18,7 +87,7 @@ def recover_jobs(store: ProjectStore, project: dict[str, Any]) -> list[str]:
     remoteTaskId and all completed results for diagnosis; never resubmit implicitly.
     """
 
-    recovered = []
+    recovered = [] if store.export_active() else recover_export_jobs(store, project)
     for job in project["jobs"]:
         if job["kind"] in GENERATION_KINDS and job["status"] in ACTIVE_STATUSES:
             store.transition_job(
@@ -58,10 +127,14 @@ def frozen_batch_payloads(project: dict[str, Any], batch: dict[str, Any]) -> lis
 
     parameters = batch["parameters"]
     seeds = parameters["seeds"]
+    for seed in seeds:
+        validate_seed(seed)
     saved = parameters.get("frozenPayloads")
     if saved is not None:
         if not isinstance(saved, list) or [item.get("seed") for item in saved] != seeds:
             raise ValueError("batch frozen payloads do not match its seeds")
+        for payload in saved:
+            validate_seed(payload["seed"])
         return deepcopy(saved)
     requests = {item["requestId"]: item["parameters"] for item in project["requests"]}
     children = [item for item in project["jobs"] if item.get("parentJobId") == batch["jobId"]]
@@ -72,7 +145,12 @@ def frozen_batch_payloads(project: dict[str, Any], batch: dict[str, Any]) -> lis
     if not by_seed:
         raise ValueError("original batch inputs are unavailable; start a new generation explicitly")
     template = next(iter(by_seed.values()))
-    return [deepcopy(by_seed.get(seed, {**template, "seed": seed})) for seed in seeds]
+    payloads = [deepcopy(by_seed.get(seed, {**template, "seed": seed})) for seed in seeds]
+    for seed, payload in zip(seeds, payloads, strict=True):
+        validate_seed(payload.get("seed"))
+        if payload["seed"] != seed:
+            raise ValueError("batch original payloads do not match its seeds")
+    return payloads
 
 
 def batch_lineage(project: dict[str, Any], batch: dict[str, Any]) -> set[str]:

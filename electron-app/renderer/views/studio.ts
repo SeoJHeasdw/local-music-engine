@@ -1,5 +1,5 @@
 import type { Plan, ReviewStatus, Song, Strength, Version } from "../../shared.ts";
-import { activeVersion, api, applySong, engineReady, go, songBusy, startEngine } from "../actions.ts";
+import { activeVersion, api, applySongForContext, engineReady, go, refreshSong, songBusy, startEngine } from "../actions.ts";
 import { byId, h, icon, mount, type Child } from "../dom.ts";
 import {
   clock,
@@ -18,7 +18,7 @@ import {
   type VersionNode,
 } from "../format.ts";
 import { Player } from "../player.ts";
-import { get, set, type InspectorTab, type State } from "../store.ts";
+import { get, isPlanTicket, isSongTicket, planTicket, set, songTicket, type InspectorTab, type State } from "../store.ts";
 import { confirmDialog, errorText, toast, withBusy } from "../ui.ts";
 
 type Els = {
@@ -293,7 +293,7 @@ function renderHead(song: Song): void {
       class: "button primary",
       disabled: !final || busy,
       "data-tip": final ? `${final.name}을 WAV 파일로 저장해요` : "먼저 최종본을 지정하세요",
-      onClick: (event: Event) => void exportFinal(event.currentTarget as HTMLButtonElement),
+      onClick: (event: Event) => void exportFinal(event.currentTarget as HTMLButtonElement, song.songId),
     },
     icon("export", 16),
     "WAV 내보내기",
@@ -321,7 +321,7 @@ function renderHead(song: Song): void {
       "div",
       { class: "head-actions" },
       h("button", { type: "button", class: "button ghost", disabled: busy, "data-tip": "제목·스타일·가사·길이를 고쳐요. 다음 버전부터 적용돼요.", onClick: () => openSongSettings(song) }, icon("settings", 16), "곡 설정"),
-      h("button", { type: "button", class: "button ghost", "data-tip": "Finder에서 곡 폴더 보기", onClick: () => reveal({ kind: "song" }) }, icon("folder", 16), "폴더 열기"),
+      h("button", { type: "button", class: "button ghost", "data-tip": "Finder에서 곡 폴더 보기", onClick: () => reveal({ kind: "song", songId: song.songId }) }, icon("folder", 16), "폴더 열기"),
       exportButton,
     ),
   );
@@ -358,7 +358,13 @@ function renderBanner(state: State, song: Song): void {
                 confirm: "취소하기",
                 danger: true,
               });
-              if (ok) await api.cancelTask();
+              if (ok) {
+                try {
+                  await api.cancelTask(task.songId, task.startedAt);
+                } catch (error) {
+                  toast(errorText(error), { tone: "error" });
+                }
+              }
             },
           },
           task.cancelling ? "취소하는 중" : "취소",
@@ -370,7 +376,7 @@ function renderBanner(state: State, song: Song): void {
   if (song.generationActive) {
     mount(els.banner, h("div", { class: "notice row", role: "status" },
       h("p", null, h("b", null, "다른 창이나 터미널에서 만드는 중이에요. "), "평가와 메모는 지금 저장할 수 있어요."),
-      h("button", { type: "button", class: "button small ghost", onClick: async () => applySong(await api.refreshSong()) }, "상태 새로 고침"),
+      h("button", { type: "button", class: "button small ghost", onClick: () => void refreshSong(song.songId) }, "상태 새로 고침"),
     ));
     return;
   }
@@ -390,7 +396,10 @@ function renderBanner(state: State, song: Song): void {
           type: "button", class: "button small secondary", disabled: !engineReady() || Boolean(state.task),
           "data-tip": !engineReady() ? "음악 엔진을 먼저 켜세요" : state.task ? "진행 중인 작업이 끝나면 이어 만들 수 있어요" : "",
           onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "이어서 만드는 중",
-            async () => applySong(await api.resume(job.jobId))),
+            async () => {
+              const ticket = songTicket(song.songId);
+              if (ticket) applySongForContext(await api.resume(song.songId, job.jobId), ticket);
+            }),
         }, "이어서 만들기"),
       );
     }));
@@ -480,7 +489,8 @@ function renderRail(state: State, song: Song): void {
               onClick: async (event: Event) => {
                 (event.currentTarget as HTMLElement).closest("details")?.removeAttribute("open");
                 try {
-                  applySong(await api.generateMore(count));
+                  const ticket = songTicket(song.songId);
+                  if (!ticket || !applySongForContext(await api.generateMore(song.songId, count), ticket)) return;
                   toast(`버전 ${count}개를 더 만들기 시작했어요.`, { tone: "ok" });
                 } catch (error) {
                   toast(errorText(error), { tone: "error" });
@@ -562,7 +572,8 @@ function renderPlayer(state: State, song: Song): void {
                 disabled: busy,
                 onClick: (event: Event) =>
                   void withBusy(event.currentTarget as HTMLButtonElement, "되돌리는 중", async () => {
-                    applySong(await api.undoFinal());
+                    const ticket = songTicket(song.songId);
+                    if (!ticket || !applySongForContext(await api.undoFinal(song.songId), ticket)) return;
                     toast("최종본 지정을 되돌렸어요.");
                   }),
               },
@@ -579,7 +590,8 @@ function renderPlayer(state: State, song: Song): void {
               disabled: busy || !version.fileOk,
               onClick: (event: Event) =>
                 void withBusy(event.currentTarget as HTMLButtonElement, "지정하는 중", async () => {
-                  applySong(await api.setFinal(version.id));
+                  const ticket = songTicket(song.songId);
+                  if (!ticket || !applySongForContext(await api.setFinal(song.songId, version.id), ticket)) return;
                   toast(`${current.name}을 최종본으로 지정했어요.`, { tone: "ok" });
                 }),
             },
@@ -830,7 +842,7 @@ function renderFix(state: State, song: Song): void {
 }
 
 async function requestPlan(): Promise<void> {
-  if (!els) return;
+  if (!els || get().planning || els.planButton.disabled) return;
   const state = get();
   const version = activeVersion();
   if (!version) return;
@@ -840,14 +852,17 @@ async function requestPlan(): Promise<void> {
     els.fixArea.focus();
     return;
   }
-  const range = state.scope === "range" ? state.selection : null;
+  const ticket = planTicket();
+  if (!ticket) return;
+  const range = state.scope === "range" && state.selection ? { ...state.selection } : null;
   set({ planning: true, plan: null });
   const label = state.settings.assistant.kind === "rules" ? "해석하는 중" : "LLM이 해석하는 중";
   const plan = await withBusy(els.planButton, label, () =>
-    api.plan({ versionId: version.id, feedback, range, strength: state.strength, versions: state.planVersions }),
+    api.plan({ songId: ticket.song.songId, versionId: version.id, feedback, range, strength: state.strength, versions: state.planVersions }),
   );
-  set({ planning: false, plan: plan ?? null });
-  if (plan) els?.planBox.scrollIntoView({ block: "start", behavior: "smooth" });
+  const fresh = isPlanTicket(ticket);
+  set({ planning: false, ...(fresh ? { plan: plan ?? null } : {}) });
+  if (fresh && plan) els?.planBox.scrollIntoView({ block: "start", behavior: "smooth" });
 }
 
 function planActionText(plan: Plan): string {
@@ -864,7 +879,14 @@ function renderPlan(state: State, song: Song): void {
     els.planBox.replaceChildren();
     return;
   }
-  const updatePlan = (change: Partial<Plan>) => set({ plan: { ...plan, ...change } });
+  const context = planTicket();
+  if (plan.candidateId !== state.activeVersionId || !context) {
+    els.planBox.replaceChildren();
+    return;
+  }
+  const updatePlan = (change: Partial<Plan>) => {
+    if (isPlanTicket(context) && get().plan) set({ plan: { ...get().plan!, ...change } });
+  };
   const busy = songBusy();
   const ready = engineReady();
   const caption = h("textarea", {
@@ -927,10 +949,14 @@ function renderPlan(state: State, song: Song): void {
             "data-tip": ready ? (busy ? "지금 작업이 끝난 뒤 만들 수 있어요" : "") : "음악 엔진을 켜야 만들 수 있어요",
             onClick: (event: Event) =>
               void withBusy(event.currentTarget as HTMLButtonElement, "시작하는 중", async () => {
-                const next = await api.applyPlan(get().plan ?? plan, els?.fixArea.value.trim() ?? "");
-                applySong(next);
-                if (els) els.fixArea.value = "";
-                set({ plan: null, feedback: "" });
+                const applyingPlan = get().plan;
+                if (!isPlanTicket(context) || !applyingPlan) return;
+                const next = await api.applyPlan(song.songId, applyingPlan, get().feedback.trim());
+                if (!applySongForContext(next, context.song)) return;
+                if (isPlanTicket(context)) {
+                  if (els) els.fixArea.value = "";
+                  set({ plan: null, feedback: "" });
+                }
                 toast(plan.action === "repaint" ? "구간을 다시 만들기 시작했어요. 끝나면 새 수정본이 열려요." : `새 버전 ${plan.versions}개를 만들기 시작했어요.`, { tone: "ok" });
               }),
           },
@@ -996,9 +1022,12 @@ function renderReview(state: State): void {
     return;
   }
   const review = version.review;
+  const songId = state.song.song!.songId;
   const save = async (status: ReviewStatus, rating: number | null, note?: string) => {
     try {
-      applySong(await api.review({ versionId: version.id, status, rating, note }));
+      const ticket = songTicket(songId);
+      if (!ticket) return false;
+      if (!applySongForContext(await api.review({ songId, versionId: version.id, status, rating, note }), ticket)) return false;
       if (songBusy()) toast("만드는 동안에도 평가와 메모를 저장했어요.", { tone: "ok" });
       return true;
     } catch (error) {
@@ -1060,7 +1089,7 @@ function renderReview(state: State): void {
           const note = els?.noteArea.value.trim();
           if (!note) return;
           const saved = await save(review.status, review.rating, note);
-          if (saved && els) els.noteArea.value = "";
+          if (saved && els && get().activeVersionId === version.id && els.noteArea.value.trim() === note) els.noteArea.value = "";
         },
       },
       "메모 남기기",
@@ -1143,10 +1172,11 @@ function renderDetails(song: Song): void {
 // Dialogs and exports
 // ---------------------------------------------------------------------------
 
-async function exportFinal(button: HTMLButtonElement): Promise<void> {
-  const result = await withBusy(button, "내보내는 중", () => api.exportFinal());
-  if (!result) return;
-  applySong(result.state);
+async function exportFinal(button: HTMLButtonElement, songId: string): Promise<void> {
+  const ticket = songTicket(songId);
+  if (!ticket) return;
+  const result = await withBusy(button, "내보내는 중", () => api.exportFinal(songId));
+  if (!result || !applySongForContext(result.state, ticket)) return;
   const artifact = result.state.song?.exports.at(-1);
   toast(`WAV로 내보냈어요: ${result.path.split("/").pop()}`, {
     tone: "ok",
@@ -1155,6 +1185,9 @@ async function exportFinal(button: HTMLButtonElement): Promise<void> {
 }
 
 function openSongSettings(song: Song): void {
+  const ticket = songTicket(song.songId);
+  if (!ticket) return;
+  const versions = get().settings.defaultVersions;
   const title = h("input", { class: "input", value: song.title, maxlength: 100 });
   const style = h("textarea", { class: "input mono-input", rows: 3, value: song.inputs.stylePrompt, maxlength: 1500 });
   const lyrics = h("textarea", { class: "input lyrics-input", rows: 10, value: song.inputs.lyrics, maxlength: 4096 });
@@ -1186,20 +1219,25 @@ function openSongSettings(song: Song): void {
     const action = dialog.returnValue;
     dialog.remove();
     if (action !== "save" && action !== "generate") return;
+    if (!isSongTicket(ticket)) {
+      toast("열린 곡이 바뀌었어요. 현재 곡에서 다시 시도하세요.", { tone: "error" });
+      return;
+    }
     try {
       const bpmValue = bpm.value.trim() ? Number.parseInt(bpm.value, 10) : null;
       let next = await api.revise({
+        songId: song.songId,
         title: title.value,
         stylePrompt: style.value,
         lyrics: lyrics.value,
         durationSeconds: Number(duration.value),
         bpm: bpmValue,
       });
-      applySong(next);
+      if (!applySongForContext(next, ticket)) return;
       if (action === "generate") {
-        next = await api.generateMore(get().settings.defaultVersions);
-        applySong(next);
-        toast(`새 설정으로 버전 ${get().settings.defaultVersions}개를 만들기 시작했어요.`, { tone: "ok" });
+        next = await api.generateMore(song.songId, versions);
+        if (!applySongForContext(next, ticket)) return;
+        toast(`새 설정으로 버전 ${versions}개를 만들기 시작했어요.`, { tone: "ok" });
       } else {
         toast("곡 설정을 저장했어요. 다음 버전부터 적용돼요.", { tone: "ok" });
       }
@@ -1254,7 +1292,7 @@ export function renderStudio(changed: Set<keyof State>): void {
   }
   if (versionChanged) renderInputs(state, song);
   if (versionChanged || changed.has("tab")) renderTabs(state);
-  const fixKeys: Array<keyof State> = ["selection", "scope", "strength", "planVersions", "plan", "planning", "settings", "rules", "engine"];
+  const fixKeys: Array<keyof State> = ["selection", "scope", "strength", "planVersions", "feedback", "plan", "planning", "settings", "rules", "engine"];
   if (versionChanged || taskMoved || fixKeys.some((key) => changed.has(key))) renderFix(state, song);
   if (versionChanged) renderReview(state);
   if (versionChanged) renderDetails(song);

@@ -27,6 +27,10 @@ running on a second copy.
 from __future__ import annotations
 
 import gc
+import argparse
+import os
+import sys
+from pathlib import Path
 
 
 def release_torch_decoder_after_mlx_init() -> None:
@@ -76,11 +80,27 @@ def seed_lm_sampler_from_request() -> None:
 
 
 def main() -> None:
+    # This wrapper shares only the engine's stdlib auth/boundary code, not its venv.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from local_music_engine.ace_auth import ensure_api_key
+    from local_music_engine.ace_security import MusicApiGuard
+
+    options = argparse.ArgumentParser(add_help=False)
+    options.add_argument("--api-key")
+    options.add_argument("--host", default=os.environ.get("ACESTEP_API_HOST", "127.0.0.1"), choices=["127.0.0.1", "localhost", "::1"])
+    supplied, _ = options.parse_known_args()
+    if supplied.api_key is not None:
+        os.environ["MUSIC_ENGINE_ACE_API_KEY"] = supplied.api_key
+    api_key = ensure_api_key()
+    os.environ["ACESTEP_API_KEY"] = api_key
     seed_lm_sampler_from_request()
     release_torch_decoder_after_mlx_init()
-    from acestep.api_server import main as ace_main
+    from acestep import api_server
 
-    ace_main()
+    # Uvicorn loads this module's already-created app in the same (single) worker.
+    api_server.app = MusicApiGuard(api_server.app, api_key)
+
+    api_server.main()
 
 
 if __name__ == "__main__":
