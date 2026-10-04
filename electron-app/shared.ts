@@ -24,6 +24,30 @@ export type Review = {
   updatedAt: string | null;
 };
 
+export type AutomaticQuality = {
+  complete?: boolean;
+  status: "passed" | "attention" | "unknown";
+  summary: string;
+  attempt: number;
+  maxAttempts: number;
+  originalSeed: number;
+  groupId?: string;
+  preferred: boolean;
+  score: number | null;
+  retryReasons: string[];
+  audio: Record<string, unknown>;
+  lyrics: {
+    status: "pass" | "warning" | "unknown" | "not_applicable";
+    orderedCoverage?: number | null;
+    koreanCER?: number | null;
+    englishWER?: number | null;
+    [key: string]: unknown;
+  };
+  processing: Record<string, unknown> | null;
+  preparation?: { requestedDurationSeconds?: number; effectiveDurationSeconds?: number; changes?: string[] };
+  observation?: { loudness?: Record<string, unknown>; separation?: Record<string, unknown>; [key: string]: unknown };
+};
+
 export type Version = {
   id: string;
   kind: "full" | "edit";
@@ -47,6 +71,8 @@ export type Version = {
   createdAt: string | null;
   audioUrl: string | null;
   waveform: number[];
+  quality?: AutomaticQuality | null;
+  recommended?: boolean;
 };
 
 export type TagChange = { op: "add" | "remove"; term: string; label?: string };
@@ -133,6 +159,7 @@ export type Song = {
   updatedAt: string | null;
   inputs: SongInputs;
   finalVersionId: string | null;
+  recommendedVersionId?: string | null;
   canUndoFinal: boolean;
   generationActive: boolean;
   versions: Version[];
@@ -191,6 +218,7 @@ export type TaskOutcome = {
   cancelled: boolean;
   message: string;
   newVersionIds: string[];
+  recommendedVersionId?: string | null;
 };
 
 export type EngineState =

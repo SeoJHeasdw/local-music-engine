@@ -106,6 +106,23 @@ SIGINT로 CLI를 멈춰 batch와 진행 중이던 하위 job을 모두 `cancelle
 
 ## 생성과 repaint
 
+앱과 CLI의 기본 생성은 [자동 품질 흐름](AUTO-QUALITY.md)을 사용한다. 요청 버전마다 최초 생성과
+재시도를 합쳐 최대 4회다. 모든 시도의 입력·seed·예산을 첫 batch에 고정하며, 명시적 재개도 그
+예산을 늘리지 않는다. 가사 받아쓰기가 불확실하거나 로컬 검사기가 실패하면 가사 문제를 추측해
+추가 추론하지 않는다. 원격 timeout은 진행 중인 추론이 남을 수 있어 추가 자동 제출을 멈춘다.
+
+`quality-check`와 `audio-finish`는 별도 하위 job이다. 후처리는 원본을 읽어 새 artifact·candidate·
+revision을 만들고, 게시 전에 fsync한 임시 파일의 inode·byte 수·SHA-256 소유 정보를 정본에 쓴다.
+복구는 성공 저장 전의 소유 출력만 제거하며, 성공 저장 뒤에는 게시한 WAV를 남기고 임시 링크만
+정리한다. `recommendedCandidateId`는 자동 추천이며 사람이 정한 `selectedCandidateId`와
+`humanReview`를 바꾸지 않는다. 원본·재시도는 화면의 자동 생성 이력에서 접근할 수 있다.
+
+로컬 품질 모델은 `.runtime/quality/.venv`에서 실행하는 수명 제한 subprocess에만 적재한다.
+모델 적재 전 `analysis.lock`을 획득해 여러 검사기가 메모리를 동시에 점유하지 않으며, 호출한
+프로세스가 사라지면 검사기도 종료한다. 음원·가사는 외부 음성 API에 전송하지 않는다.
+구간 수정은 입력과 길이를 변경하지 않고 전체 수정 음원을 한 번 검사·정리한다. 자동으로
+repaint를 반복하지 않으며 선택 범위는 후처리 후보에도 남긴다.
+
 text-to-music는 JSON 요청, repaint는 공식 서버의 absolute-path 거부 정책 때문에 multipart
 업로드를 사용한다. repaint는 원본과 같은 길이의 새 artifact를 만들며 자동 채택하지 않는다.
 사용자가 고른 범위는 `editRange`, 실제로 모델에 제공한 전체 곡은 `contextRange`로 분리한다.

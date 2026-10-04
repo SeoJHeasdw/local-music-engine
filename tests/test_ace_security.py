@@ -117,3 +117,20 @@ def test_adapter_uses_the_shared_private_credential(key_file, monkeypatch):
     client = AceStepClient()
     assert client.api_key == key
     assert AceStepClient(api_key="explicit-client-key").api_key == "explicit-client-key"
+
+
+def test_readiness_client_discovers_a_key_published_after_its_construction(key_file, monkeypatch):
+    from io import BytesIO
+    from local_music_engine import ace_adapter
+    client = ace_adapter.AceStepClient()
+    assert client.api_key is None
+    key = ensure_api_key()
+    captured = []
+
+    def local(request, timeout):
+        captured.append(request.get_header("Authorization"))
+        return BytesIO(b'{"data":{"status":"ok"}}')
+
+    monkeypatch.setattr(ace_adapter, "open_local", local)
+    assert client.health()["status"] == "ok"
+    assert captured == ["Bearer " + key]

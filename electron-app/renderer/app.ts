@@ -1,6 +1,7 @@
 import { api, applySongForContext, go, refreshSong } from "./actions.ts";
 import { byId, icon, isTyping } from "./dom.ts";
-import { get, initStore, isSongTicket, set, songTicket, subscribe, type State, type View } from "./store.ts";
+import { get, initStore, isSongTicket, listeningRevision, set, songTicket, subscribe, type State, type View } from "./store.ts";
+import { TaskListeningFocus } from "./quality.ts";
 import { errorText, installTooltips, toast } from "./ui.ts";
 import { renderCreate, submitCreateShortcut } from "./views/create.ts";
 import { renderLibrary } from "./views/library.ts";
@@ -19,6 +20,7 @@ import {
 } from "./views/studio.ts";
 
 const views: View[] = ["library", "create", "studio", "settings"];
+const taskFocus = new TaskListeningFocus();
 
 function showView(view: View): void {
   for (const name of views) byId(`view-${name}`).hidden = name !== view;
@@ -146,7 +148,7 @@ async function start(): Promise<void> {
     task: boot.task,
     rules: boot.rules,
     info: boot.info,
-    activeVersionId: song?.finalVersionId ?? song?.versions.at(-1)?.id ?? null,
+    activeVersionId: song?.finalVersionId ?? song?.recommendedVersionId ?? song?.versions.findLast((version) => version.quality?.preferred !== false)?.id ?? null,
     selection: null,
     listenToParent: false,
     loop: false,
@@ -172,12 +174,16 @@ async function start(): Promise<void> {
     },
   });
   subscribe(render);
+  taskFocus.track(boot.task, listeningRevision());
   const all = new Set(Object.keys(get()) as Array<keyof State>);
   render(get(), all);
 
   api.onEvent((event) => {
     if (event.type === "engine") set({ engine: event.engine });
-    else if (event.type === "task") set({ task: event.task });
+    else if (event.type === "task") {
+      taskFocus.track(event.task, listeningRevision());
+      set({ task: event.task });
+    }
     else if (event.type === "songs") set({ songs: event.songs });
     else if (event.type === "song") {
       applySongForContext(event.song, songTicket(event.songId));
@@ -186,10 +192,10 @@ async function start(): Promise<void> {
       const state = get();
       const here = state.song.song?.songId === outcome.songId;
       const ticket = songTicket(outcome.songId);
-      const firstNew = outcome.newVersionIds[0];
-      if (here && firstNew && outcome.kind === "repaint") {
-        // A finished edit is what the listener was waiting for; open it next to its original.
-        void refreshSong(outcome.songId, firstNew);
+      const firstNew = outcome.recommendedVersionId ?? outcome.newVersionIds[0];
+      const focus = taskFocus.complete(outcome, state.song.song?.songId, listeningRevision());
+      if (here && focus) {
+        void refreshSong(outcome.songId, focus);
       }
       toast(`「${outcome.songTitle}」 ${outcome.message}`, {
         tone: outcome.cancelled ? "info" : outcome.ok ? "ok" : "error",

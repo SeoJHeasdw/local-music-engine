@@ -50,6 +50,7 @@ def main() -> None:
         child = subprocess.Popen([
             sys.executable, "-m", "local_music_engine", "generate", str(root),
             "--seeds", "63011,63012", "--base-url", base,
+            "--quality", "off",  # This probe isolates generation/repaint; smoke_auto_quality checks the full chain.
         ], stdout=stdout, stderr=stderr)
         noted = False
         try:

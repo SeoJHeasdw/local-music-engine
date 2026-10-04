@@ -58,6 +58,11 @@ const listeners = new Set<Listener>();
 let songRevision = 0;
 let openingSong = false;
 let planRevision = 0;
+let listeningVersionRevision = 0;
+
+export function listeningRevision(): number {
+  return listeningVersionRevision;
+}
 
 export type SongTicket = Readonly<{ songId: string; revision: number }>;
 export type PlanTicket = Readonly<{ song: SongTicket; revision: number }>;
@@ -65,6 +70,7 @@ export type PlanTicket = Readonly<{ song: SongTicket; revision: number }>;
 export function beginSongOpen(): number {
   openingSong = true;
   ++planRevision;
+  ++listeningVersionRevision;
   const revision = ++songRevision;
   set({ plan: null });
   return revision;
@@ -98,6 +104,7 @@ export function initStore(initial: State): void {
   state = initial;
   ++songRevision;
   ++planRevision;
+  ++listeningVersionRevision;
   openingSong = false;
 }
 
@@ -106,7 +113,9 @@ export function get(): State {
 }
 
 // Shallow merge + notify with the set of changed keys so views re-render only what moved.
-export function set(patch: Partial<State>): void {
+export function set(patch: Partial<State>, passive = false): void {
+  if (!passive && (("activeVersionId" in patch && patch.activeVersionId !== state.activeVersionId)
+    || ("listenToParent" in patch && patch.listenToParent !== state.listenToParent))) ++listeningVersionRevision;
   const songChanged = patch.song !== undefined && patch.song.song?.songId !== state.song.song?.songId;
   if (songChanged) ++songRevision;
   const planKeys: Array<keyof State> = ["activeVersionId", "selection", "scope", "strength", "planVersions", "feedback"];

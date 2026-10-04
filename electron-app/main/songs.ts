@@ -13,6 +13,7 @@ import type {
   SongSummary,
   TimeRange,
   Version,
+  AutomaticQuality,
 } from "../shared.ts";
 import { runCli } from "./cli.ts";
 import { audioUrlFor, wavPeaks } from "./audio.ts";
@@ -39,6 +40,8 @@ type RawCandidate = {
   feedbackId: string | null;
   createdAt: string | null;
   path: string;
+  quality?: Partial<AutomaticQuality> | null;
+  recommended?: boolean;
 };
 
 type RawExport = ExportView & { path: string; externalPath: string | null };
@@ -51,6 +54,7 @@ type RawStatus = {
   updatedAt: string | null;
   inputs: SongInputs;
   selectedCandidateId: string | null;
+  recommendedCandidateId?: string | null;
   canUndoSelection: boolean;
   generationActive: boolean;
   candidates: RawCandidate[];
@@ -109,6 +113,24 @@ export function exportFilePath(artifactId: string): string {
   return file;
 }
 
+export function qualityFromStatus(report: Partial<AutomaticQuality> | null | undefined): AutomaticQuality | null {
+  if (!report) return null;
+  return {
+    ...report,
+    status: report.status ?? "unknown",
+    summary: report.summary ?? "자동 검사 결과가 아직 없어요.",
+    attempt: report.attempt ?? 1,
+    maxAttempts: report.maxAttempts ?? 4,
+    originalSeed: report.originalSeed ?? 0,
+    preferred: report.preferred === true,
+    score: report.score ?? null,
+    retryReasons: report.retryReasons ?? [],
+    audio: report.audio ?? {},
+    lyrics: report.lyrics ?? { status: "unknown" },
+    processing: report.processing ?? null,
+  };
+}
+
 export async function validateSongFolder(input: string): Promise<string> {
   const resolved = await realpath(input);
   try {
@@ -149,15 +171,15 @@ export async function listSongs(
   }));
 }
 
-export async function loadSong(folder: string): Promise<SongState> {
+export async function loadSong(folder: string, read: typeof runCli = runCli): Promise<SongState> {
   try {
-    const raw = await runCli<RawStatus>(["status", folder]);
+    const raw = await read<RawStatus>(["status", folder]);
     const versions: Version[] = await Promise.all(
       raw.candidates.map(async (candidate) => {
         versionPaths.set(candidate.candidateId, candidate.path);
         return {
           id: candidate.candidateId,
-          kind: candidate.taskType === "repaint" ? "edit" : "full",
+          kind: candidate.taskType === "repaint" || candidate.editRange ? "edit" : "full",
           parentId: candidate.parentCandidateId,
           editRange: candidate.editRange,
           seed: candidate.seed,
@@ -178,6 +200,8 @@ export async function loadSong(folder: string): Promise<SongState> {
           createdAt: candidate.createdAt,
           audioUrl: candidate.artifactValid ? audioUrlFor(candidate.path) : null,
           waveform: candidate.artifactValid ? await wavPeaks(candidate.path) : [],
+          quality: qualityFromStatus(candidate.quality),
+          recommended: Boolean(candidate.recommended || raw.recommendedCandidateId === candidate.candidateId),
         } satisfies Version;
       }),
     );
@@ -202,6 +226,7 @@ export async function loadSong(folder: string): Promise<SongState> {
       updatedAt: raw.updatedAt,
       inputs: raw.inputs,
       finalVersionId: raw.selectedCandidateId,
+      recommendedVersionId: raw.recommendedCandidateId ?? null,
       canUndoFinal: raw.canUndoSelection,
       generationActive: raw.generationActive,
       versions,

@@ -28,6 +28,7 @@ def execute_candidate(
     parent_candidate_id: str | None = None,
     edit_range: dict[str, float] | None = None,
     context_range: dict[str, float] | None = None,
+    quality_context: dict[str, Any] | None = None,
 ) -> str:
     seed = request["parameters"]["seed"]
 
@@ -84,6 +85,8 @@ def execute_candidate(
             "humanReview": {"status": "unreviewed", "rating": None, "notes": [], "updatedAt": None},
             "createdAt": utc_now(),
         }
+        if quality_context is not None:
+            candidate["quality"] = deepcopy(quality_context)
         with store.transaction() as project:
             job = store.find_by_id(project, "jobs", "jobId", job_id)
             project["artifacts"].append(artifact)
@@ -101,6 +104,18 @@ def execute_candidate(
                 batch["progress"] = (index + 1) / total
         return candidate["candidateId"]
     except (Exception, KeyboardInterrupt) as error:
+        if not isinstance(error, KeyboardInterrupt):
+            # Directory fsync can fail after atomic replacement. A committed result
+            # must not cause another inference or an illegal terminal-state rewrite.
+            saved = store.load()
+            persisted = store.find_by_id(saved, "jobs", "jobId", job_id)
+            if persisted["status"] == "succeeded":
+                for reference in persisted.get("resultRefs", []):
+                    candidate = next((item for item in saved["candidates"] if item["candidateId"] == reference), None)
+                    if candidate:
+                        artifact = store.find_by_id(saved, "artifacts", "artifactId", candidate["artifactId"])
+                        if store.verify_artifact(artifact)[0]:
+                            return candidate["candidateId"]
         with store.transaction() as project:
             job = store.find_by_id(project, "jobs", "jobId", job_id)
             if job["status"] in ACTIVE_STATUSES:

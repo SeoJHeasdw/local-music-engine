@@ -1,4 +1,5 @@
 import type { Finding, ReviewStatus, Song, Strength, TimeRange, Version } from "../shared.ts";
+import { isAutomaticAttempt } from "./quality.ts";
 
 export function clock(seconds: number | null | undefined, precise = false, decimalPlaces: 1 | 2 = 1): string {
   if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return precise ? "0:00.0" : "0:00";
@@ -71,16 +72,24 @@ export function versionTree(song: Song): { roots: VersionNode[]; flat: VersionNo
   const byId = new Map<string, VersionNode>();
   const roots: VersionNode[] = [];
   let fullIndex = 0;
+  const versions = new Map(song.versions.map((version) => [version.id, version]));
   for (const version of song.versions) {
-    const parent = version.parentId ? byId.get(version.parentId) : undefined;
+    // An automatically finished render is a ready version. Its raw source remains
+    // available in history, rather than turning every result into a nested edit.
+    const source = version.parentId ? versions.get(version.parentId) : undefined;
+    const parentId = version.quality?.processing ? source?.parentId : version.parentId;
+    const parent = parentId ? byId.get(parentId) : undefined;
     if (!parent) {
-      fullIndex += 1;
-      const node = { version, name: `버전 ${fullIndex}`, short: `버전 ${fullIndex}`, depth: 0, children: [] };
+      const automatic = isAutomaticAttempt(version);
+      if (!automatic) fullIndex += 1;
+      const name = automatic ? `자동 시도 ${version.quality?.attempt ?? 1} · ${version.quality?.processing ? "정리본" : "원본"}` : `버전 ${fullIndex}`;
+      const node = { version, name, short: name, depth: 0, children: [] };
       byId.set(version.id, node);
       roots.push(node);
     } else {
-      const index = parent.children.length + 1;
-      const short = `수정 ${index}`;
+      const automatic = isAutomaticAttempt(version);
+      const index = parent.children.filter((child) => !isAutomaticAttempt(child.version)).length + 1;
+      const short = automatic ? `자동 시도 ${version.quality?.attempt ?? 1} · ${version.quality?.processing ? "정리본" : "원본"}` : `수정 ${index}`;
       const node = { version, name: `${parent.name} › ${short}`, short, depth: parent.depth + 1, children: [] };
       byId.set(version.id, node);
       parent.children.push(node);
@@ -94,7 +103,22 @@ export function versionTree(song: Song): { roots: VersionNode[]; flat: VersionNo
     }
   };
   walk(roots);
+  const preferredNames = new Map(flat.filter((node) => !isAutomaticAttempt(node.version) && node.version.quality?.groupId)
+    .map((node) => [node.version.quality!.groupId!, node.name]));
+  for (const node of flat) {
+    const group = node.version.quality?.groupId;
+    if (isAutomaticAttempt(node.version) && group && preferredNames.has(group)) {
+      node.name = `${preferredNames.get(group)} · 시도 ${node.version.quality?.attempt ?? 1} · ${node.version.quality?.processing ? "정리본" : "원본"}`;
+      node.short = node.name;
+    }
+  }
   return { roots, flat, byId };
+}
+
+export function versionSourceParent(song: Song, version: Version): Version | undefined {
+  const source = song.versions.find((item) => item.id === version.parentId);
+  if (version.quality?.processing && source?.parentId) return song.versions.find((item) => item.id === source.parentId) ?? source;
+  return source;
 }
 
 export function splitTags(caption: string): string[] {

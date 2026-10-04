@@ -214,7 +214,7 @@ async function submit(button: HTMLButtonElement): Promise<void> {
   draftEdits.reset();
   refs = null;
   go("studio");
-  toast(`버전 ${draft.versions}개를 만들기 시작했어요. 끝나는 대로 하나씩 들어 볼 수 있어요.`, { tone: "ok" });
+  toast(`버전 ${draft.versions}개를 만들고 자동으로 확인해요. 필요한 재시도까지 마치면 추천본을 골라 드려요.`, { tone: "ok" });
 }
 
 function segmented<T extends number>(values: T[], current: T, label: (value: T) => string, onPick: (value: T) => void) {
@@ -506,6 +506,7 @@ export function syncCreate(): void {
           h("button", { type: "button", class: "button small secondary", onClick: () => void startEngine() }, icon("power", 14), "엔진 켜기"),
       ),
     createButton,
+    h("p", { class: "hint" }, "소리와 가사를 자동으로 확인해요. 가사가 아주 많으면 원문을 담도록 길이를 늘려요. 확실한 문제가 있으면 버전마다 처음 생성과 재시도를 합쳐 최대 4번 만들고, 추천본을 골라요."),
     h("p", { class: "hint center" }, "⌘ Enter로도 시작해요. 새 곡은 ", h("span", { class: "mono" }, state.settings.projectsDir.replace(/^\/Users\/[^/]+/, "~")), "에 저장돼요."),
   );
   const llm = state.settings.assistant.kind !== "rules";

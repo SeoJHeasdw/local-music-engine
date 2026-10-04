@@ -1,6 +1,7 @@
 import type { SongState, Version } from "../shared.ts";
-import { beginSongOpen, finishSongOpen, get, isSongTicket, set, songTicket, type SongTicket, type View } from "./store.ts";
+import { beginSongOpen, finishSongOpen, get, isSongTicket, listeningRevision, set, songTicket, type SongTicket, type View } from "./store.ts";
 import { errorText, toast } from "./ui.ts";
+import { isAutomaticAttempt } from "./quality.ts";
 
 export const api = window.musicApp;
 
@@ -22,7 +23,7 @@ export function applySong(next: SongState, focusVersionId?: string | null): void
   const sameSong = state.song.song?.songId === next.song?.songId;
   let active = focusVersionId ?? (sameSong ? state.activeVersionId : null);
   if (!versions.some((item) => item.id === active)) {
-    active = next.song?.finalVersionId ?? versions.at(-1)?.id ?? null;
+    active = next.song?.finalVersionId ?? next.song?.recommendedVersionId ?? versions.findLast((version) => !isAutomaticAttempt(version))?.id ?? null;
   }
   set({
     song: next,
@@ -30,7 +31,7 @@ export function applySong(next: SongState, focusVersionId?: string | null): void
     ...(sameSong
       ? {}
       : { selection: null, plan: null, feedback: "", listenToParent: false, scope: "song" as const, tab: "fix" as const }),
-  });
+  }, true);
   if (next.status === "error" && next.error) toast(next.error, { tone: "error" });
 }
 
@@ -44,9 +45,10 @@ export async function refreshSong(songId: string, focusVersionId?: string | null
   const ticket = songTicket(songId);
   if (!ticket) return;
   const versionId = get().activeVersionId;
+  const revision = listeningRevision();
   try {
     const next = await api.refreshSong(songId);
-    applySongForContext(next, ticket, get().activeVersionId === versionId ? focusVersionId : undefined);
+    applySongForContext(next, ticket, get().activeVersionId === versionId && listeningRevision() === revision ? focusVersionId : undefined);
   } catch (error) {
     if (isSongTicket(ticket)) toast(errorText(error), { tone: "error" });
   }

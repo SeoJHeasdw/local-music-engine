@@ -39,6 +39,7 @@ class AceStepClient:
         request_timeout_seconds: float = 30.0,
     ):
         self.base_url = _require_loopback(base_url)
+        self._implicit_api_key = api_key is None
         self.api_key = api_key if api_key is not None else read_api_key()
         self.request_timeout_seconds = request_timeout_seconds
 
@@ -56,8 +57,11 @@ class AceStepClient:
         headers = {"Accept": "application/json"}
         if content_type:
             headers["Content-Type"] = content_type
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        # A readiness client may exist before the managed server publishes its key.
+        # Keep explicit external credentials fixed; discover managed credentials per call.
+        api_key = read_api_key() if self._implicit_api_key else self.api_key
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         request = urllib.request.Request(
             f"{self.base_url}{path}", data=body, method=method, headers=headers
         )

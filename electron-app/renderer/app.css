@@ -213,6 +213,7 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 .pill.tone-accent { border-color: var(--accent-edge); background: var(--accent-soft); color: var(--accent); }
 .pill.tone-edit { border-color: var(--edit-edge); background: var(--edit-soft); color: var(--edit); }
 .pill.tone-ok, .pill.tone-approved { border-color: var(--ok-edge); background: var(--ok-soft); color: var(--ok); }
+.pill.tone-warn { border-color: var(--warn-edge); background: var(--warn-soft); color: var(--warn); }
 .pill.tone-danger, .pill.tone-rejected { border-color: var(--danger-edge); background: var(--danger-soft); color: var(--danger); }
 .pill.tone-listened { color: var(--text-2); }
 
@@ -394,6 +395,18 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 .version-text b { font-size: var(--fs-sm); font-weight: 600; }
 .version-text small { color: var(--text-3); font-family: var(--mono); font-size: var(--fs-micro); }
 .final-badge { flex: none; padding: 2px 7px; border-radius: var(--r-full); background: var(--accent-soft); color: var(--accent); font-size: 10.5px; font-weight: 700; }
+.recommend-badge { flex: none; padding: 2px 6px; border-radius: var(--r-full); color: var(--accent); background: var(--accent-soft); font-size: 10px; }
+.version-text .quality-caption { font-family: inherit; }
+.quality-caption.tone-ok { color: var(--ok); }
+.quality-caption.tone-warn { color: var(--warn); }
+.automatic-attempts { margin-top: var(--s2); padding-top: var(--s2); border-top: 1px solid var(--line); }
+.automatic-attempts summary { padding: var(--s2); font-size: var(--fs-xs); color: var(--text-3); cursor: pointer; }
+.automatic-attempts .footnote { padding: 0 var(--s2) var(--s2); }
+.quality-report { display: flex; flex-direction: column; gap: var(--s3); padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r-md); }
+.quality-report p { margin: 0; font-size: var(--fs-xs); line-height: 1.6; }
+.quality-report .row { flex-wrap: wrap; gap: var(--s2); }
+.quality-check { display: flex; flex-direction: column; gap: var(--s1); }
+.quality-reasons { margin: var(--s2) 0 0; padding-left: var(--s4); font-size: var(--fs-xs); line-height: 1.6; }
 .review-mark { display: grid; place-items: center; width: 22px; height: 22px; flex: none; color: var(--text-3); }
 .review-mark.tone-ok { color: var(--ok); }
 .review-mark.tone-danger { color: var(--danger); }

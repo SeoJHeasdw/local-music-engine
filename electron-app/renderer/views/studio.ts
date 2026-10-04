@@ -15,11 +15,13 @@ import {
   tagDiff,
   toggleTag,
   versionTree,
+  versionSourceParent,
   type VersionNode,
 } from "../format.ts";
 import { Player } from "../player.ts";
 import { get, isPlanTicket, isSongTicket, planTicket, set, songTicket, type InspectorTab, type State } from "../store.ts";
 import { confirmDialog, errorText, toast, withBusy } from "../ui.ts";
+import { audioQualityText, isAutomaticAttempt, lyricQualityText, processingText, qualityLabel, qualityRetryReason } from "../quality.ts";
 
 type Els = {
   head: HTMLElement;
@@ -84,7 +86,8 @@ export function nudge(seconds: number): void {
 }
 
 export function stepVersion(direction: 1 | -1): void {
-  const flat = tree()?.flat ?? [];
+  const history = Boolean(activeVersion() && isAutomaticAttempt(activeVersion()!));
+  const flat = (tree()?.flat ?? []).filter((item) => isAutomaticAttempt(item.version) === history);
   const index = flat.findIndex((item) => item.version.id === get().activeVersionId);
   const next = flat[Math.min(flat.length - 1, Math.max(0, index + direction))];
   if (next) selectVersion(next.version.id);
@@ -284,15 +287,17 @@ function renderHead(song: Song): void {
   if (!els) return;
   const t = tree();
   const final = node(song.finalVersionId);
-  const edits = song.versions.filter((item) => item.parentId).length;
+  const recommended = node(song.recommendedVersionId);
+  const exporting = final ?? recommended;
+  const edits = song.versions.filter((item) => !isAutomaticAttempt(item) && item.kind === "edit").length;
   const busy = songBusy();
   const exportButton = h(
     "button",
     {
       type: "button",
       class: "button primary",
-      disabled: !final || busy,
-      "data-tip": final ? `${final.name}을 WAV 파일로 저장해요` : "먼저 최종본을 지정하세요",
+      disabled: !exporting || busy,
+      "data-tip": exporting ? `${exporting.name}${final ? "" : " · 자동 추천"}을 WAV 파일로 저장해요` : "버전이 준비되면 WAV로 저장할 수 있어요",
       onClick: (event: Event) => void exportFinal(event.currentTarget as HTMLButtonElement, song.songId),
     },
     icon("export", 16),
@@ -308,9 +313,9 @@ function renderHead(song: Song): void {
         "p",
         { class: "studio-meta" },
         [
-          `버전 ${t?.roots.length ?? 0}개`,
+          `버전 ${t?.roots.filter((item) => !isAutomaticAttempt(item.version)).length ?? 0}개`,
           edits ? `수정 ${edits}개` : null,
-          final ? `최종본 ${final.name}` : "최종본 없음",
+          final ? `최종본 ${final.name}` : recommended ? `자동 추천 ${recommended.name}` : "자동 검사 후 추천본을 골라요",
           `목표 ${lengthLabel(song.inputs.durationSeconds)}`,
         ]
           .filter(Boolean)
@@ -429,12 +434,14 @@ function renderRail(state: State, song: Song): void {
   const task = state.task && state.task.songId === song.songId ? state.task : null;
   const busy = Boolean(task);
   const rows: Child[] = [];
+  const attempts: Child[] = [];
   const placeholder = (label: string, depth: number) =>
     h("div", { class: `version-row is-pending depth-${depth}`, "aria-hidden": "true" }, h("span", { class: "version-glyph" }, h("span", { class: "task-spinner small" })), h("span", { class: "version-text" }, h("b", null, label), h("small", null, "만드는 중")));
   for (const item of t.flat) {
     const version = item.version;
     const active = version.id === state.activeVersionId;
-    rows.push(
+    const quality = qualityLabel(version.quality);
+    const row =
       h(
         "button",
         {
@@ -444,7 +451,7 @@ function renderRail(state: State, song: Song): void {
           class: `version-row depth-${Math.min(item.depth, 3)}${active ? " is-active" : ""}${version.isFinal ? " is-final" : ""}${version.fileOk ? "" : " is-broken"}`,
           onClick: () => selectVersion(version.id),
         },
-        h("span", { class: "version-glyph" }, item.depth ? icon("branch", 14) : item.short.replace("버전 ", "")),
+        h("span", { class: "version-glyph" }, isAutomaticAttempt(version) ? String(version.quality?.attempt ?? "·") : item.depth ? icon("branch", 14) : item.short.replace("버전 ", "")),
         h(
           "span",
           { class: "version-text" },
@@ -454,25 +461,32 @@ function renderRail(state: State, song: Song): void {
             null,
             version.fileOk ? (version.editRange ? rangeLabel(version.editRange) : lengthLabel(version.durationSeconds)) : "파일 없음",
           ),
+          quality && h("small", { class: `quality-caption tone-${quality.tone}` }, quality.label),
         ),
+        version.recommended && h("span", { class: "recommend-badge" }, "추천"),
         version.isFinal ? h("span", { class: "final-badge" }, "최종본") : reviewMark(version.review.status),
-      ),
-    );
+      );
+    (isAutomaticAttempt(version) ? attempts : rows).push(row);
     if (task?.kind === "repaint" && song.feedback.at(-1)?.candidateId === version.id && !song.versions.some((item) => item.feedbackId === song.feedback.at(-1)?.feedbackId)) {
       rows.push(placeholder(`수정 ${item.children.length + 1}`, Math.min(item.depth + 1, 3)));
     }
   }
   if (task && task.kind !== "repaint") {
     const remaining = Math.max(0, task.total - task.done);
-    for (let index = 0; index < remaining; index += 1) rows.push(placeholder(`버전 ${t.roots.length + index + 1}`, 0));
+    const ready = t.roots.filter((item) => !isAutomaticAttempt(item.version)).length;
+    for (let index = 0; index < remaining; index += 1) rows.push(placeholder(`버전 ${ready + index + 1}`, 0));
   }
   const settings = state.settings;
   mount(
     els.rail,
-    h("div", { class: "rail-head" }, h("h2", null, "버전"), h("span", { class: "rail-count" }, String(song.versions.length))),
+    h("div", { class: "rail-head" }, h("h2", null, "버전"), h("span", { class: "rail-count" }, String(song.versions.filter((version) => !isAutomaticAttempt(version)).length))),
     rows.length
       ? h("div", { class: "rail-list", role: "listbox", "aria-label": "버전 목록" }, rows)
       : h("p", { class: "rail-empty" }, "아직 버전이 없어요."),
+    attempts.length ? h("details", { class: "automatic-attempts", open: Boolean(activeVersion() && isAutomaticAttempt(activeVersion()!)) },
+      h("summary", null, `자동 생성 이력 ${attempts.length}개`),
+      h("p", { class: "footnote" }, "처음 만든 음원과 다시 만든 시도를 모두 남겨 두었어요."),
+      h("div", { class: "rail-list", role: "listbox", "aria-label": "자동 생성 이력" }, attempts)) : null,
     h(
       "details",
       { class: "more-menu" },
@@ -522,7 +536,7 @@ function renderPlayer(state: State, song: Song): void {
     return;
   }
   const version = current.version;
-  const parent = node(version.parentId);
+  const parent = node(versionSourceParent(song, version)?.id);
   const listeningParent = state.listenToParent && parent;
   const strength = strengthFromValue(version.repaintStrength);
   mount(
@@ -535,6 +549,8 @@ function renderPlayer(state: State, song: Song): void {
         "div",
         { class: "player-badges" },
         version.isFinal && h("span", { class: "pill tone-accent" }, "최종본"),
+        version.recommended && h("span", { class: "pill tone-accent" }, "자동 추천"),
+        qualityLabel(version.quality) && h("span", { class: `pill tone-${qualityLabel(version.quality)!.tone}` }, qualityLabel(version.quality)!.label),
         version.editRange && parent && h("span", { class: "pill tone-edit" }, `${parent.short}의 ${rangeLabel(version.editRange)} 수정${strength ? ` · 변화 ${strengthCopy[strength].label}` : ""}`),
         h("span", { class: `pill tone-${version.review.status}` }, reviewCopy[version.review.status].label),
       ),
@@ -543,8 +559,8 @@ function renderPlayer(state: State, song: Song): void {
       h(
         "div",
         { class: "segmented small compare", role: "group", "aria-label": "원본과 비교", "data-tip": "같은 위치에서 바꿔 들어요 (C)" },
-        h("button", { type: "button", class: listeningParent ? "is-active" : "", "aria-pressed": listeningParent ? "true" : "false", onClick: () => set({ listenToParent: true }) }, `원본 · ${parent.short}`),
-        h("button", { type: "button", class: listeningParent ? "" : "is-active", "aria-pressed": listeningParent ? "false" : "true", onClick: () => set({ listenToParent: false }) }, "수정본"),
+        h("button", { type: "button", class: listeningParent ? "is-active" : "", "aria-pressed": listeningParent ? "true" : "false", onClick: () => set({ listenToParent: true }) }, version.quality?.processing && !version.editRange ? "생성 원본" : `원본 · ${parent.short}`),
+        h("button", { type: "button", class: listeningParent ? "" : "is-active", "aria-pressed": listeningParent ? "false" : "true", onClick: () => set({ listenToParent: false }) }, version.quality?.processing && !version.editRange ? "정리본" : "수정본"),
       ),
   );
   const source = listeningParent ? parent.version : version;
@@ -598,7 +614,7 @@ function renderPlayer(state: State, song: Song): void {
             icon("check", 16),
             "최종본으로 지정",
           ),
-          h("span", { class: "hint" }, "최종본은 WAV로 내보낼 버전이에요. 언제든 다른 버전으로 바꿀 수 있어요."),
+          h("span", { class: "hint" }, !song.finalVersionId && song.recommendedVersionId ? "추천본은 바로 WAV로 저장할 수 있어요. 직접 최종본을 지정하면 그 버전이 우선해요." : "최종본은 WAV로 내보낼 버전이에요. 언제든 다른 버전으로 바꿀 수 있어요."),
         ],
   );
 }
@@ -625,7 +641,7 @@ function renderSelectionBar(state: State): void {
 }
 
 function previousFull(song: Song, version: Version): Version | null {
-  const fulls = song.versions.filter((item) => !item.parentId);
+  const fulls = song.versions.filter((item) => !isAutomaticAttempt(item) && item.kind === "full");
   const index = fulls.findIndex((item) => item.id === version.id);
   return index > 0 ? fulls[index - 1] : null;
 }
@@ -639,7 +655,7 @@ function renderInputs(state: State, song: Song): void {
     return;
   }
   const version = current.version;
-  const parent = node(version.parentId);
+  const parent = node(versionSourceParent(song, version)?.id);
   const baselineVersion = parent?.version ?? previousFull(song, version);
   const baselineName = parent?.short ?? (baselineVersion ? node(baselineVersion.id)?.short : null);
   const diff = baselineVersion ? tagDiff(baselineVersion.stylePrompt, version.stylePrompt) : [];
@@ -681,7 +697,7 @@ function renderInputs(state: State, song: Song): void {
             h("span", { class: "label" }, `${baselineName}에서 바뀐 태그`),
             h("div", { class: "chips" }, diff.map((change) => h("span", { class: `tag-chip op-${change.op}` }, change.op === "add" ? "+ " : "− ", change.term))),
           )
-        : h("p", { class: "hint" }, version.parentId ? `${baselineName}과 같은 스타일로 구간만 다시 만들었어요.` : `${baselineName}과 스타일이 같아요. 무작위 시드만 달라요.`)),
+        : h("p", { class: "hint" }, version.editRange ? `${baselineName}과 같은 스타일로 구간만 다시 만들었어요.` : version.quality?.processing ? "처음 생성한 음원을 보존하고 별도 재생본을 정리했어요." : `${baselineName}과 스타일이 같아요.`)),
     h("p", { class: "caption-text mono" }, version.stylePrompt),
     h(
       "dl",
@@ -1106,6 +1122,33 @@ function renderReview(state: State): void {
   void state;
 }
 
+function qualityReport(version: Version): Child {
+  const quality = version.quality;
+  if (!quality) return null;
+  const badge = qualityLabel(quality)!;
+  if (quality.complete === false) return h("div", { class: "quality-report" },
+    h("span", { class: "pill" }, badge.label), h("p", null, quality.summary),
+    h("p", { class: "footnote" }, "소리와 가사를 확인한 뒤 필요한 재시도와 재생본 정리를 이어서 진행해요."));
+  const coverage = quality.lyrics.orderedCoverage;
+  const knownLyrics = quality.lyrics.status === "pass" || quality.lyrics.status === "warning";
+  const processing = processingText(quality.processing);
+  const retries = [...new Set(quality.retryReasons.map(qualityRetryReason))];
+  const preparation = quality.preparation;
+  const extended = preparation && typeof preparation.requestedDurationSeconds === "number" && typeof preparation.effectiveDurationSeconds === "number"
+    && preparation.effectiveDurationSeconds > preparation.requestedDurationSeconds;
+  return h("div", { class: "quality-report" },
+    h("div", { class: "row" }, h("span", { class: `pill tone-${badge.tone}` }, badge.label), version.recommended && h("span", { class: "pill tone-accent" }, "자동 추천")),
+    h("p", null, quality.summary),
+    extended && h("p", { class: "quality-check" }, `가사 원문을 담도록 길이를 ${lengthLabel(preparation.requestedDurationSeconds)}에서 ${lengthLabel(preparation.effectiveDurationSeconds)}로 늘렸어요.`),
+    h("p", { class: "footnote" }, `선택된 결과: ${quality.attempt}번째 시도 · 버전당 처음 생성과 재시도를 합쳐 최대 ${quality.maxAttempts}회`),
+    h("div", { class: "quality-check" }, h("h3", { class: "panel-subtitle" }, "소리"), h("p", null, audioQualityText(quality))),
+    h("div", { class: "quality-check" }, h("h3", { class: "panel-subtitle" }, "가사"), h("p", null, lyricQualityText(quality)),
+      knownLyrics && typeof coverage === "number" && Number.isFinite(coverage) && h("p", { class: "footnote" }, `작성한 순서대로 인식된 가사 ${(Math.max(0, Math.min(1, coverage)) * 100).toFixed(0)}%`)),
+    processing && h("div", { class: "quality-check" }, h("h3", { class: "panel-subtitle" }, "재생본 정리"), h("p", null, processing)),
+    retries.length ? h("details", { class: "disclosure" }, h("summary", null, "자동 재시도 이유"), h("ul", { class: "quality-reasons" }, retries.map((reason) => h("li", null, reason)))) : null,
+    h("p", { class: "footnote" }, "자동 추천과 직접 들은 평가는 따로 남아요."));
+}
+
 function renderDetails(song: Song): void {
   if (!els) return;
   const version = activeVersion();
@@ -1117,11 +1160,12 @@ function renderDetails(song: Song): void {
   mount(
     els.details,
     h("h2", { class: "panel-title" }, "자동 검사"),
+    qualityReport(version),
     h(
       "div",
       { class: `file-state ${version.fileOk ? "tone-ok" : "tone-danger"}` },
       icon(version.fileOk ? "check" : "close", 16),
-      h("div", null, h("b", null, version.fileOk ? "원본 파일 확인됨" : "파일을 쓸 수 없어요"), h("p", null, version.fileOk ? "크기와 SHA-256이 만들 때 기록과 같아요." : version.fileMessage)),
+      h("div", null, h("b", null, version.fileOk ? "음원 파일 확인됨" : "파일을 쓸 수 없어요"), h("p", null, version.fileOk ? "크기와 SHA-256이 만들 때 기록과 같아요." : version.fileMessage)),
     ),
     h("button", { type: "button", class: "button secondary block", disabled: !version.fileOk, onClick: () => reveal({ kind: "version", versionId: version.id }) }, icon("folder", 16), "Finder에서 음원 파일 보기"),
     h(
@@ -1164,7 +1208,7 @@ function renderDetails(song: Song): void {
           ),
         )
       : null,
-    h("p", { class: "footnote" }, "자동 검사는 파일이 온전한지와 음량·무음·길이만 봐요. 발음과 음악성은 직접 들어야 알 수 있어요."),
+    h("p", { class: "footnote" }, version.quality ? "자동 검사는 소리의 측정값과 인식한 가사를 기준으로 해요. 노래의 표현과 음악성은 직접 들어 보세요." : "자동 검사는 파일이 온전한지와 음량·무음·길이만 봐요. 발음과 음악성은 직접 들어야 알 수 있어요."),
   );
 }
 

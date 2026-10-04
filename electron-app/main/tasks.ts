@@ -26,6 +26,7 @@ type RunningTask = {
   stage: string;
   detail: string;
   done: number;
+  resultShape: string;
 };
 
 type Hooks = {
@@ -43,10 +44,18 @@ type ManifestJob = {
   parentJobId?: string | null;
   createdAt?: string;
   reusedCandidateIds?: string[];
+  resultRefs?: string[];
+  qualityPlan?: unknown;
+  parameters?: { qualityPolicy?: { enabled?: boolean }; qualityPlan?: unknown };
 };
 
-function stageText(raw: string | undefined): string {
+export function stageText(raw: string | undefined): string {
   const stage = (raw ?? "").replace(/^seed -?\d+:\s*/i, "").toLowerCase();
+  if (stage.includes("quality_setup")) return "자동 검사를 준비하는 중";
+  if (stage.includes("quality_audio")) return "소리와 곡 길이를 확인하는 중";
+  if (stage.includes("quality_lyrics")) return "가사가 빠지거나 달라졌는지 확인하는 중";
+  if (stage.includes("quality_retry")) return "확실한 문제가 있어 다시 만드는 중";
+  if (stage.includes("finalizing")) return "추천할 재생본을 정리하는 중";
   if (!stage || stage === "queued" || stage.includes("preparing")) return "준비하는 중";
   if (stage.includes("submitting")) return "엔진에 요청하는 중";
   if (stage.includes("reused")) return "끝난 버전을 확인하는 중";
@@ -56,6 +65,20 @@ function stageText(raw: string | undefined): string {
   return "곡을 만드는 중";
 }
 
+export function isQualityBatch(job: ManifestJob): boolean {
+  return job.parameters?.qualityPolicy?.enabled === true || Array.isArray(job.parameters?.qualityPlan) || Array.isArray(job.qualityPlan);
+}
+
+export function completedVersions(job: ManifestJob, children: ManifestJob[], total: number): number {
+  const count = isQualityBatch(job) ? job.resultRefs?.length ?? 0
+    : children.filter((item) => item.status === "succeeded").length + (job.reusedCandidateIds?.length ?? 0);
+  return Math.min(total, Math.max(0, count));
+}
+
+export function stageForJob(job: ManifestJob, current?: ManifestJob): string {
+  return stageText(/quality_|finalizing/i.test(job.stage ?? "") ? job.stage : current?.stage ?? job.stage);
+}
+
 // The app runs one generation at a time. Listening notes use independent, short
 // manifest transactions and are saved immediately by the CLI.
 export class TaskRunner {
@@ -63,7 +86,7 @@ export class TaskRunner {
   private poller: NodeJS.Timeout | null = null;
   private completion: Promise<void> = Promise.resolve();
 
-  constructor(private hooks: Hooks, private launch: typeof spawnCli = spawnCli) {}
+  constructor(private hooks: Hooks, private launch: typeof spawnCli = spawnCli, private pollIntervalMs = 1000) {}
 
   busyFolder(): string | null {
     return this.active?.spec.folder ?? null;
@@ -107,10 +130,11 @@ export class TaskRunner {
       stage: "준비하는 중",
       detail: "",
       done: 0,
+      resultShape: "",
     };
     this.active = task;
     this.hooks.emit(this.snapshot());
-    this.poller = setInterval(() => void this.poll(task), 1000);
+    this.poller = setInterval(() => void this.poll(task), this.pollIntervalMs);
     this.completion = collectCli(child)
       .then((result) => this.finish(task, result.code, result.stdout, result.stderr))
       .catch((error: unknown) => this.finish(task, 1, "", String(error)));
@@ -162,18 +186,20 @@ export class TaskRunner {
       task.progress = Math.max(0, Math.min(1, Number(job.progress ?? 0)));
       if (task.spec.jobKind === "candidate-batch") {
         const children = manifest.jobs.filter((item) => item.parentJobId === job.jobId);
-        task.done = children.filter((item) => item.status === "succeeded").length + (job.reusedCandidateIds?.length ?? 0);
+        task.done = completedVersions(job, children, task.spec.total);
         const current = [...children].reverse().find((item) => item.status === "running");
-        task.stage = stageText(current?.stage ?? job.stage);
-        task.detail = current?.stage && !/^(submitting|running|queued)$/i.test(current.stage) ? current.stage : "";
+        task.stage = stageForJob(job, current);
+        task.detail = !isQualityBatch(job) && current?.stage && !/^(submitting|running|queued)$/i.test(current.stage) && !/quality_|finalizing/i.test(current.stage) ? current.stage : "";
       } else {
         task.stage = stageText(job.stage);
-        task.detail = job.stage && !/^(submitting|running|queued)$/i.test(job.stage) ? job.stage : "";
+        task.detail = job.stage && !/^(submitting|running|queued)$/i.test(job.stage) && !/quality_|finalizing/i.test(job.stage) ? job.stage : "";
       }
     }
     const count = manifest.candidates.length;
-    if (task.candidateCount !== null && count > task.candidateCount) this.hooks.versionsChanged(task.spec.folder);
+    const resultShape = job && isQualityBatch(job) ? (job.resultRefs ?? []).join("|") : "";
+    if ((task.candidateCount !== null && count > task.candidateCount) || (resultShape && resultShape !== task.resultShape)) this.hooks.versionsChanged(task.spec.folder);
     task.candidateCount = count;
+    task.resultShape = resultShape;
     this.hooks.emit(this.snapshot());
   }
 
@@ -201,6 +227,8 @@ export class TaskRunner {
         : [];
     const failures = Array.isArray(result.failures) ? result.failures.length : 0;
     const reused = Array.isArray(result.reusedCandidateIds) ? result.reusedCandidateIds.length : 0;
+    const recommendedVersionId = typeof result.recommendedCandidateId === "string" && newVersionIds.includes(result.recommendedCandidateId)
+      ? result.recommendedCandidateId : null;
     let message: string;
     if (cancelled) message = "작업을 취소했어요. 이미 끝난 버전은 남아 있어요.";
     else if (code !== 0) message = humanizeError(stderr.trim() || "작업이 실패했어요.");
@@ -210,6 +238,7 @@ export class TaskRunner {
     else message = reused
       ? `기존 버전 ${reused}개를 확인하고 새 버전 ${newVersionIds.length}개를 만들었어요.`
       : `버전 ${newVersionIds.length}개를 만들었어요.`;
+    if (!cancelled && code === 0 && recommendedVersionId) message += " 자동 확인 후 추천본을 골랐어요.";
 
     this.active = null;
     this.hooks.emit(null);
@@ -222,6 +251,7 @@ export class TaskRunner {
         cancelled,
         message,
         newVersionIds,
+        recommendedVersionId,
       },
       task.spec.folder,
     );

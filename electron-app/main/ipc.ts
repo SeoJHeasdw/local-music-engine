@@ -311,7 +311,8 @@ export class Controller {
       this.requireIdle(folder);
       const state = await this.songState(folder);
       this.session.assert(context);
-      if (!state.song?.finalVersionId) throw new Error("먼저 최종본을 지정하세요.");
+      const sourceId = state.song?.finalVersionId ?? state.song?.recommendedVersionId;
+      if (!sourceId || !state.song) throw new Error("내보낼 버전이 아직 없어요. 곡 만들기가 끝나면 추천본을 저장할 수 있어요.");
       const settings = currentSettings();
       const directory = settings.lastExportDir ?? app.getPath("music");
       const safeTitle = state.song.title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "").trim() || "song";
@@ -326,7 +327,7 @@ export class Controller {
       this.session.assert(context);
       this.requireIdle(folder);
       const output = result.filePath.toLowerCase().endsWith(".wav") ? result.filePath : `${result.filePath}.wav`;
-      await runCli(["export", folder, "--output", output]);
+      await runCli(["export", folder, "--candidate-id", sourceId, "--output", output]);
       await saveSettings({ lastExportDir: path.dirname(output) });
       void this.pushSongs();
       return { state: await this.songState(folder), path: output };

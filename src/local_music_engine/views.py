@@ -59,6 +59,8 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
                 "artifactValid": valid,
                 "artifactValidation": reason,
                 "humanReview": candidate["humanReview"],
+                "quality": candidate.get("quality"),
+                "recommended": candidate["candidateId"] == project.get("recommendedCandidateId"),
                 "findings": [
                     findings[finding_id]
                     for finding_id in candidate["findingIds"]
@@ -181,6 +183,7 @@ def project_status(store: ProjectStore, project: dict[str, Any]) -> dict[str, An
             "timeSignature": inputs.get("timeSignature"),
         },
         "selectedCandidateId": project.get("selectedCandidateId"),
+        "recommendedCandidateId": project.get("recommendedCandidateId"),
         "canUndoSelection": _can_undo_selection(project),
         "generationActive": generation_active,
         "candidates": candidate_rows(store, project),
@@ -222,8 +225,10 @@ def _summary(path: Path) -> dict[str, Any]:
             "stylePrompt": inputs.get("stylePrompt", ""),
             "durationSeconds": inputs.get("targetDurationSeconds"),
             "instrumental": inputs.get("lyricsNormalized", "").strip() == "[Instrumental]",
-            "versionCount": len(candidates),
-            "editCount": sum(1 for item in candidates if item.get("parentCandidateId")),
+            "versionCount": sum(1 for item in candidates if not item.get("quality") or item["quality"].get("preferred")),
+            "automaticAttemptCount": sum(1 for item in candidates if item.get("quality") and not item["quality"].get("preferred")),
+            "editCount": sum(1 for item in candidates if item.get("parentCandidateId") and (not item.get("quality") or item["quality"].get("preferred"))
+                             and (item.get("editRange") or not item.get("quality", {}).get("processing"))),
             "liked": sum(1 for item in candidates if item["humanReview"]["status"] == "approved"),
             "reviewed": sum(
                 1 for item in candidates if item["humanReview"]["status"] != "unreviewed"

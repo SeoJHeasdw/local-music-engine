@@ -15,6 +15,7 @@ from typing import Any
 
 from . import assistant
 from .drafting import draft_song
+from .auto_quality import quality_policy
 from .jobs import recover_project
 from .storage import ProjectStore
 from .views import candidate_rows, library, project_status
@@ -106,6 +107,10 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--lm-model", default=DEFAULT_LM_MODEL)
     generate.add_argument("--lm-temperature", type=float, default=DEFAULT_LM_TEMPERATURE,
                           help="sampling temperature of the LM that plans melody and phrasing")
+    generate.add_argument("--quality", choices=["auto", "audio", "off"], default="auto",
+                          help="automatic checks and bounded regeneration; audio skips local lyric STT")
+    generate.add_argument("--quality-attempts", type=int, choices=range(1, 5), default=4,
+                          help="maximum total generation attempts per requested version, including the first")
     generate.add_argument("--style", help="revise the project style prompt first")
     generate.add_argument("--lyrics", help="revise the project lyrics first")
     generate.add_argument("--bpm", type=int, help="revise bpm first; 0 clears it")
@@ -181,6 +186,8 @@ def build_parser() -> argparse.ArgumentParser:
     repaint.add_argument("--base-url", default=DEFAULT_BASE_URL)
     repaint.add_argument("--poll-seconds", type=float, default=1.0)
     repaint.add_argument("--timeout-seconds", type=float, default=1800.0)
+    repaint.add_argument("--quality", choices=["auto", "audio", "off"], default="auto",
+                         help="check and finish the edited audio once; never automatically repaint again")
 
     plan = subparsers.add_parser("plan", help="turn listening feedback into a proposed change")
     plan.add_argument("path", type=Path)
@@ -206,6 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     export = subparsers.add_parser("export", help="export the selected candidate as WAV")
     export.add_argument("path", type=Path)
     export.add_argument("--output", type=Path)
+    export.add_argument("--candidate-id", help="export this explicit version without changing the human final selection")
 
     inspect = subparsers.add_parser("inspect", help="summarize and verify a reopened project")
     inspect.add_argument("path", type=Path)
@@ -280,6 +288,7 @@ def run(args: argparse.Namespace) -> Any:
             source_candidate_id=args.source_candidate_id,
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
+            quality=quality_policy(args.quality, max_attempts=args.quality_attempts),
         )
     if args.command == "resume":
         return resume_latest_batch(
@@ -346,6 +355,7 @@ def run(args: argparse.Namespace) -> Any:
             model=args.model,
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
+            quality=quality_policy(args.quality, max_attempts=1),
         )
     if args.command == "plan":
         return _plan(args)
@@ -365,7 +375,7 @@ def run(args: argparse.Namespace) -> Any:
             return {"models": []}
         return {"models": assistant.list_models(config)}
     if args.command == "export":
-        return export_selected(args.path, output=args.output)
+        return export_selected(args.path, output=args.output, candidate_id=args.candidate_id)
     if args.command == "inspect":
         store = ProjectStore(args.path)
         project = store.load()

@@ -15,11 +15,16 @@ Apple Silicon Mac에서 한국어 곡을 만들고, 들어 보고, 말로 고치
 구간을 표시하며, 버튼으로 그 부분을 반복해 들을 수 있다.
 
 엔진은 ACE-Step 1.5(native MLX)이며 M4 Max에서 전체 생성과 구간 repaint를 실제 검증했다.
-보컬 분리·한국어 ASR은 아직 구현 전이다.
+**만들기**를 누르면 가사 준비, 음원 검사, 로컬 받아쓰기 비교, 필요한 재시도와 추천까지
+진행한다. 버전마다 첫 생성과 재시도를 합쳐 최대 4회이며, 검사 자체가 불확실하면 그 이유로
+다시 만들지 않는다. 가사가 아주 많으면 원문을 담도록 실제 생성 길이를 늘릴 수 있다.
+원래 목표 길이와 적용한 길이는 함께 기록한다. 랩·루프 의도가 명시된 요청은 이 길이 조정에서
+제외한다. [자동 품질 관리의 동작과 한계](docs/AUTO-QUALITY.md)를 참고한다.
 
 ## 준비
 
-- Apple Silicon Mac, [uv](https://docs.astral.sh/uv/), Node.js, Git
+- Apple Silicon Mac, [uv](https://docs.astral.sh/uv/), Node.js, Git,
+  [FFmpeg](https://ffmpeg.org/) — 로컬 받아쓰기와 true peak·음량 측정에 사용
 - 선택: [Ollama](https://ollama.com)와 한국어를 잘 쓰는 모델(예: `qwen3.6:27b`). 켜면 한글 가사
   초안과 자유 문장 피드백 해석을 맡는다.
 
@@ -28,6 +33,12 @@ chmod +x scripts/*.sh app.sh
 ./scripts/bootstrap_ace.sh   # ACE 런타임을 .runtime/에 설치. 첫 서버 시작 때 모델 약 17GB를 받는다
 ./app.sh                     # 엔진 Python·Electron 환경을 준비하고 앱을 연다
 ```
+
+가사가 있는 곡의 첫 자동 검사 때 별도의 `.runtime/quality/.venv`를 준비하고, MLX Whisper와
+UMXHQ 보컬 모델 가중치 약 **1.65GB**를 받는다(패키지 설치 용량은 별도). 음원과 가사는
+이 과정에서도 업로드하지 않는다. 미리 준비하려면 `./scripts/bootstrap_quality.sh`를 실행한다.
+설치나 받아쓰기가 실패하면 음원을 보존하고 **일부 자동 확인 어려움**으로 표시한다.
+연주곡은 받아쓰기 모델을 올리지 않고 음원만 검사한다.
 
 앱이 ACE 서버를 직접 켜고(`127.0.0.1:18001`에만 바인딩), 앱을 닫으면 앱이 켠 서버만 끈다.
 서버는 켤 때 DiT·LM 하나씩만 올린다. 앱은 설정의 모델로 켜고, 터미널에서는
@@ -52,8 +63,8 @@ chmod +x scripts/*.sh app.sh
 | 화면 | 하는 일 |
 | --- | --- |
 | 내 곡 | 곡 목록, 버전·수정·좋아요 수, Finder에서 곡 폴더 열기, 다른 폴더의 곡 열기 |
-| 새 곡 만들기 | 설명 → 초안(제목·스타일·가사) → 스타일 칩으로 다듬기 → 길이·버전 수 → 만들기 |
-| 작업실 | 버전 계보, 파형 재생·구간 선택, 원본↔수정본 비교, 고치기·평가·검사, 최종본, WAV 내보내기 |
+| 새 곡 만들기 | 설명 → 초안(제목·스타일·가사) → 스타일 칩으로 다듬기 → 만들기 → 자동 검사·필요한 재시도·추천 |
+| 작업실 | 추천본과 자동 생성 이력, 버전 계보, 파형 재생·구간 선택, 원본↔정리본·수정본 비교, 고치기·평가·검사, 최종본, WAV 내보내기 |
 | 설정 | 음악 엔진 켜기/끄기·기록, AI 도우미(규칙/Ollama/OpenAI 호환), 저장 위치, 기본값 |
 
 작업실 단축키: `Space` 재생, `←/→` 5초(Shift 1초), `↑/↓` 버전 이동, `C` 원본↔수정본,
@@ -61,6 +72,11 @@ chmod +x scripts/*.sh app.sh
 
 용어: **버전**은 같은 설정으로 만든 전체 곡 하나, **수정본**은 한 버전의 구간만 다시 만든 것,
 **최종본**은 WAV로 내보낼 버전이다(언제든 바꿀 수 있다).
+
+자동 추천은 직접 고른 최종본과 별도로 남는다. 이미 고른 최종본과 사람 평가는 바꾸지 않는다.
+새 작업이 끝나면 추천본을 들어 볼 수 있고, 원본과 다른 시도는 **자동 생성 이력**에서 확인한다.
+가사 일치와 음원 측정 결과는 **검사**에 표시된다. 추천본의 재생본 정리는 원본을 보존한 새
+파일이며, 소리를 키우거나 곡의 쉼을 잘라내지 않는다.
 
 ## CLI
 
@@ -74,6 +90,16 @@ uv run music-engine init projects/my-song --title "내 노래" --lyrics-file lyr
 uv run music-engine generate projects/my-song --seeds 101,102
 uv run music-engine status projects/my-song        # 버전 계보·사용한 스타일·피드백·작업
 uv run music-engine library --dir projects         # 곡 목록 (음원 해시 없이)
+```
+
+`generate`의 기본은 `--quality auto --quality-attempts 4`다. 위의 두 버전 요청은 버전마다
+최대 4회, 합쳐 최대 8회까지 생성할 수 있다. 뚜렷한 문제가 없으면 각 버전은 첫 생성에서
+끝난다. 가사 받아쓰기 없이 음원만 검사하려면 `--quality audio`, 기존 생성·무결성 검사만
+사용하려면 `--quality off`를 지정한다.
+
+```bash
+uv run music-engine generate projects/my-song --seeds 101 --quality-attempts 2
+uv run music-engine generate projects/my-song --seeds 102 --quality audio
 ```
 
 들은 뒤 사람의 판단은 따로 기록한다.
@@ -99,6 +125,10 @@ uv run music-engine generate projects/my-song --seeds 301,302 --style "<수정�
 
 `--instruction`은 ACE의 작업 템플릿을 덮어쓰므로 요청 전달에 쓰지 않는다. 요청은 `--style`과
 `--strength`(light·medium·strong)로 전한다.
+
+`repaint`도 기본 `--quality auto`로 생성된 수정 음원 전체를 한 번 검사하고 정리본을 만든다.
+구간·가사·길이를 추가로 준비하거나 자동으로 다시 repaint하지 않는다. 확인할 부분은 경고로
+남기며 원곡·수정 원본·정리본과 사람의 최종본 선택을 보존한다.
 
 ```bash
 uv run music-engine revise projects/my-song --title "새 제목" --duration 150   # 다음 버전부터 적용
@@ -169,6 +199,7 @@ uv run python scripts/smoke_real_engine.py --output-dir .runtime/smoke-001
 - [구현 계획](PLAN.md)
 - [아키텍처와 데이터 계약](docs/ARCHITECTURE.md)
 - [품질 검사와 청취 계약](docs/QUALITY.md)
+- [자동 품질 관리·재시도·로컬 모델과 실제 검증](docs/AUTO-QUALITY.md)
 - [모델·라이선스 결정](docs/DECISIONS.md)
 - [P0 Apple Silicon 실측](docs/P0-VALIDATION.md)
 - [현재 상태와 다음 작업](docs/HANDOFF.md)

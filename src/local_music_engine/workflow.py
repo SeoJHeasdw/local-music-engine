@@ -17,6 +17,7 @@ from .jobs import (ACTIVE_STATUSES, cleanup_export_outputs, frozen_batch_payload
                    reusable_candidates, resume_source, validate_seed)
 from .qc import artifact_and_findings, inspect_wav
 from .storage import ProjectStore, fingerprint, new_id, sha256_file, utc_now
+from .auto_quality import finish_single_edit, make_quality_plan, run_quality_batch, validate_quality_plan
 
 DEFAULT_BASE_URL = "http://127.0.0.1:18001"
 DEFAULT_DIT_MODEL = "acestep-v15-turbo"
@@ -390,6 +391,8 @@ def generate_candidates(
     feedback: dict[str, Any] | None = None,
     source_candidate_id: str | None = None,
     client_factory: Callable[..., AceStepClient] = AceStepClient,
+    quality: dict[str, Any] | None = None,
+    quality_backend: Any | None = None,
 ) -> dict[str, Any]:
     store = ProjectStore(project_root)
     seed_list = [validate_seed(seed) for seed in seeds]
@@ -423,9 +426,16 @@ def generate_candidates(
                 "baseUrl": base_url, "explicitResume": False, "frozenPayloads": payloads,
                 "sourceCandidateId": source_candidate_id,
             })
+            if quality and quality.get("enabled"):
+                plan = make_quality_plan(payloads, quality)
+                batch["parameters"].update(qualityPolicy=deepcopy(quality), qualityPlan=plan,
+                                           qualityRootJobId=batch["jobId"], frozenPayloads=[group[0] for group in plan])
             if feedback:
                 record = _append_feedback(project, feedback, job_id=batch["jobId"])
                 batch["parameters"]["feedbackId"] = record["feedbackId"]
+        if quality and quality.get("enabled"):
+            return run_quality_batch(store, batch_id=batch["jobId"], client=client, poll_seconds=poll_seconds,
+                                     timeout_seconds=timeout_seconds, backend=quality_backend)
         return _run_batch(store, batch_id=batch["jobId"], payloads=payloads, reusable={},
                           client=client, poll_seconds=poll_seconds, timeout_seconds=timeout_seconds)
 
@@ -438,6 +448,7 @@ def resume_latest_batch(
     poll_seconds: float = 1.0,
     timeout_seconds: float = 1800.0,
     client_factory: Callable[..., AceStepClient] = AceStepClient,
+    quality_backend: Any | None = None,
 ) -> dict[str, Any]:
     store = ProjectStore(project_root)
     with store.generation_lock():
@@ -446,6 +457,8 @@ def resume_latest_batch(
         payloads = frozen_batch_payloads(project, previous)
         reusable = reusable_candidates(store, project, previous, payloads)
         parameters = deepcopy(previous["parameters"])
+        if parameters.get("qualityPolicy", {}).get("enabled"):
+            validate_quality_plan(parameters)
         parameters.update(explicitResume=True, resumeOfJobId=previous["jobId"], frozenPayloads=payloads)
         if base_url is not None:
             parameters["baseUrl"] = base_url
@@ -453,6 +466,9 @@ def resume_latest_batch(
         with store.transaction() as project:
             recover_jobs(store, project)
             batch = _new_batch(store, project, parameters)
+        if parameters.get("qualityPolicy", {}).get("enabled"):
+            return run_quality_batch(store, batch_id=batch["jobId"], client=client, poll_seconds=poll_seconds,
+                                     timeout_seconds=timeout_seconds, backend=quality_backend)
         return _run_batch(store, batch_id=batch["jobId"], payloads=payloads, reusable=reusable,
                           client=client, poll_seconds=poll_seconds, timeout_seconds=timeout_seconds)
 
@@ -475,6 +491,8 @@ def repaint_candidate(
     poll_seconds: float = 1.0,
     timeout_seconds: float = 1800.0,
     client_factory: Callable[..., AceStepClient] = AceStepClient,
+    quality: dict[str, Any] | None = None,
+    quality_backend: Any | None = None,
 ) -> dict[str, Any]:
     seed = validate_seed(seed)
     if not math.isfinite(start_seconds) or not math.isfinite(end_seconds) or start_seconds < 0 or end_seconds <= start_seconds:
@@ -529,6 +547,7 @@ def repaint_candidate(
             request = _append_request(project, frozen, adapter_info=adapter_info)
             job = store.append_job(project, kind="repaint-candidate", parameters={
                 "requestId": request["requestId"], "parentCandidateId": parent_id, "strength": strength,
+                "qualityPolicy": deepcopy(quality),
             })
             if feedback:
                 record = _append_feedback(project, feedback, job_id=job["jobId"])
@@ -539,7 +558,14 @@ def repaint_candidate(
             poll_seconds=poll_seconds, timeout_seconds=timeout_seconds, source=source,
             parent_candidate_id=parent_id, edit_range=edit_range,
             context_range={"startSeconds": 0.0, "endSeconds": duration},
+            quality_context={"complete": False, "preferred": False, "attempt": 1, "maxAttempts": 1,
+                             "originalSeed": seed, "groupId": job["jobId"], "status": "unknown",
+                             "summary": "자동 검사를 진행하고 있어요."} if quality and quality.get("enabled") else None,
         )
+        if quality and quality.get("enabled"):
+            candidate_id = finish_single_edit(store, candidate_id, job_id=job["jobId"], payload=frozen,
+                                               policy=quality, backend=quality_backend)
+            return {"jobId": job["jobId"], "candidateId": candidate_id, "recommendedCandidateId": candidate_id}
         return {"jobId": job["jobId"], "candidateId": candidate_id}
 
 
@@ -685,14 +711,14 @@ def _copy_atomic(
 
 
 def export_selected(
-    project_root: Path | str, *, output: Path | str | None = None
+    project_root: Path | str, *, output: Path | str | None = None, candidate_id: str | None = None,
 ) -> dict[str, Any]:
     store = ProjectStore(project_root)
     with store.export_lock():
         job_id = None
         try:
             with store.transaction() as project:
-                selected_id = project.get("selectedCandidateId")
+                selected_id = candidate_id or project.get("selectedCandidateId")
                 if not selected_id:
                     raise ValueError("no candidate is selected")
                 candidate = store.find_by_id(project, "candidates", "candidateId", selected_id)
