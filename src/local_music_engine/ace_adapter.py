@@ -31,6 +31,8 @@ def _require_loopback(base_url: str) -> str:
 
 
 class AceStepClient:
+    credential_reader = staticmethod(read_api_key)
+    api_label = "ACE"
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:18001",
@@ -40,7 +42,7 @@ class AceStepClient:
     ):
         self.base_url = _require_loopback(base_url)
         self._implicit_api_key = api_key is None
-        self.api_key = api_key if api_key is not None else read_api_key()
+        self.api_key = api_key if api_key is not None else self.credential_reader()
         self.request_timeout_seconds = request_timeout_seconds
 
     def _request(
@@ -59,7 +61,7 @@ class AceStepClient:
             headers["Content-Type"] = content_type
         # A readiness client may exist before the managed server publishes its key.
         # Keep explicit external credentials fixed; discover managed credentials per call.
-        api_key = read_api_key() if self._implicit_api_key else self.api_key
+        api_key = self.credential_reader() if self._implicit_api_key else self.api_key
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         request = urllib.request.Request(
@@ -72,9 +74,9 @@ class AceStepClient:
                 return response.read()
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
-            raise AceApiError(f"ACE API HTTP {error.code}: {detail}") from error
+            raise AceApiError(f"{self.api_label} API HTTP {error.code}: {detail}") from error
         except urllib.error.URLError as error:
-            raise AceApiError(f"ACE API unavailable: {error.reason}") from error
+            raise AceApiError(f"{self.api_label} API unavailable: {error.reason}") from error
 
     def _json(
         self,
@@ -101,7 +103,7 @@ class AceStepClient:
         response = self._json("GET", "/health")
         data = response.get("data")
         if not isinstance(data, dict) or data.get("status") != "ok":
-            raise AceApiError(f"unhealthy ACE API response: {response!r}")
+            raise AceApiError(f"unhealthy {self.api_label} API response: {response!r}")
         return data
 
     def create_sample(
@@ -144,20 +146,20 @@ class AceStepClient:
         data = response.get("data")
         task_id = data.get("task_id") if isinstance(data, dict) else None
         if not task_id:
-            raise AceApiError(f"ACE API did not return a task id: {response!r}")
+            raise AceApiError(f"{self.api_label} API did not return a task id: {response!r}")
         return str(task_id)
 
     def query(self, task_id: str) -> dict[str, Any]:
         response = self._json("POST", "/query_result", {"task_id_list": [task_id]})
         rows = response.get("data")
         if not isinstance(rows, list) or not rows:
-            raise AceApiError(f"ACE API lost task {task_id}")
+            raise AceApiError(f"{self.api_label} API lost task {task_id}")
         row = rows[0]
         result_raw = row.get("result", "[]")
         try:
             results = json.loads(result_raw) if isinstance(result_raw, str) else result_raw
         except json.JSONDecodeError as error:
-            raise AceApiError(f"invalid ACE result payload for {task_id}") from error
+            raise AceApiError(f"invalid {self.api_label} result payload for {task_id}") from error
         result = results[0] if isinstance(results, list) and results else {}
         status = int(row.get("status", result.get("status", 0)))
         return {
@@ -186,13 +188,13 @@ class AceStepClient:
             if state["status"] == 2:
                 raise AceApiError(str(state["result"].get("error") or state["stage"]))
             if time.monotonic() >= deadline:
-                raise TimeoutError(f"ACE task timed out: {task_id}")
+                raise TimeoutError(f"{self.api_label} task timed out: {task_id}")
             time.sleep(max(0.1, poll_seconds))
 
     def download(self, file_path: str, destination: Path) -> None:
         parsed = urllib.parse.urlparse(file_path)
         if parsed.scheme or parsed.netloc or parsed.path != "/v1/audio":
-            raise AceApiError(f"unexpected ACE audio URL: {file_path}")
+            raise AceApiError(f"unexpected {self.api_label} audio URL: {file_path}")
         destination.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent
@@ -208,7 +210,7 @@ class AceStepClient:
                 handle.flush()
                 os.fsync(handle.fileno())
             if temporary.stat().st_size == 0:
-                raise AceApiError("ACE API returned an empty audio file")
+                raise AceApiError(f"{self.api_label} API returned an empty audio file")
             os.link(temporary, destination)
         finally:
             temporary.unlink(missing_ok=True)

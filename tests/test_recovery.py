@@ -27,10 +27,10 @@ def reset_client():
 def test_resume_freezes_all_original_inputs_and_does_not_revert_new_defaults(tmp_path: Path):
     make_project(tmp_path)
     FakeAceClient.fail_seeds = {2}
-    first = generate_candidates(tmp_path, seeds=[1, 2], bpm=88, client_factory=FakeAceClient)
+    first = generate_candidates(tmp_path, seeds=[1, 2], bpm=88, client_factory=FakeAceClient, engine="ace-step")
     revise_inputs(tmp_path, lyrics="새 가사", style_prompt="jazz", duration_seconds=120, bpm=140)
     FakeAceClient.fail_seeds.clear()
-    result = resume_latest_batch(tmp_path, client_factory=FakeAceClient)
+    result = resume_latest_batch(tmp_path, client_factory=FakeAceClient, engine="ace-step")
     project = ProjectStore(tmp_path).load()
     assert result["reusedCandidateIds"] == first["candidateIds"]
     assert len(result["newCandidateIds"]) == 1
@@ -46,12 +46,12 @@ def test_resume_freezes_all_original_inputs_and_does_not_revert_new_defaults(tmp
 
 def test_resume_cannot_borrow_same_seed_from_unrelated_batch(tmp_path: Path):
     make_project(tmp_path)
-    generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeAceClient)
+    generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeAceClient, engine="ace-step")
     FakeAceClient.fail_seeds = {2}
-    failed = generate_candidates(tmp_path, seeds=[2], client_factory=FakeAceClient)
+    failed = generate_candidates(tmp_path, seeds=[2], client_factory=FakeAceClient, engine="ace-step")
     FakeAceClient.fail_seeds.clear()
-    unrelated = generate_candidates(tmp_path, seeds=[2], client_factory=FakeAceClient)
-    resumed = resume_latest_batch(tmp_path, job_id=failed["batchJobId"], client_factory=FakeAceClient)
+    unrelated = generate_candidates(tmp_path, seeds=[2], client_factory=FakeAceClient, engine="ace-step")
+    resumed = resume_latest_batch(tmp_path, job_id=failed["batchJobId"], client_factory=FakeAceClient, engine="ace-step")
     assert resumed["reusedCandidateIds"] == []
     assert resumed["candidateIds"] != unrelated["candidateIds"]
     assert FakeAceClient.submitted == [1, 2, 2, 2, 2]
@@ -60,7 +60,7 @@ def test_resume_cannot_borrow_same_seed_from_unrelated_batch(tmp_path: Path):
 @pytest.mark.parametrize("damage", ["missing", "size", "hash", "unsafe-symlink", "absolute-path", "traversal", "symlink-loop"])
 def test_resume_regenerates_only_damaged_outputs(tmp_path: Path, damage: str):
     make_project(tmp_path)
-    first = generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeAceClient)
+    first = generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeAceClient, engine="ace-step")
     store = ProjectStore(tmp_path)
     artifact = store.load()["artifacts"][0]
     audio = store.resolve_artifact(artifact)
@@ -89,7 +89,7 @@ def test_resume_regenerates_only_damaged_outputs(tmp_path: Path, damage: str):
     if damage in {"unsafe-symlink", "absolute-path", "traversal", "symlink-loop"}:
         assert rows[0]["path"] == ""
     assert store.manifest_path.read_bytes() == before
-    result = resume_latest_batch(tmp_path, client_factory=FakeAceClient)
+    result = resume_latest_batch(tmp_path, client_factory=FakeAceClient, engine="ace-step")
     assert result["reusedCandidateIds"] == first["candidateIds"][1:]
     assert FakeAceClient.submitted == [1, 2, 1]
     assert len(store.load()["candidates"]) == 3
@@ -98,7 +98,7 @@ def test_resume_regenerates_only_damaged_outputs(tmp_path: Path, damage: str):
 @pytest.mark.parametrize("seed", [-1, 2**32, 1.5, True, "1"])
 def test_invalid_seeds_fail_before_any_input_job_or_engine_mutation(tmp_path: Path, seed):
     make_project(tmp_path)
-    result = generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient)
+    result = generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient, engine="ace-step")
     store = ProjectStore(tmp_path)
     before = store.manifest_path.read_bytes()
     submitted = list(FakeAceClient.submitted)
@@ -108,17 +108,17 @@ def test_invalid_seeds_fail_before_any_input_job_or_engine_mutation(tmp_path: Pa
 
     with pytest.raises(ValueError, match="seed must be an integer between"):
         generate_candidates(tmp_path, seeds=[2, seed], style_prompt="must not persist", lyrics="must not persist",
-                            client_factory=forbidden_client)
+                            client_factory=forbidden_client, engine="ace-step")
     with pytest.raises(ValueError, match="seed must be an integer between"):
         repaint_candidate(tmp_path, start_seconds=1, end_seconds=2, seed=seed,
-                          candidate_id=result["candidateIds"][0], client_factory=forbidden_client)
+                          candidate_id=result["candidateIds"][0], client_factory=forbidden_client, engine="ace-step")
     assert store.manifest_path.read_bytes() == before
     assert FakeAceClient.submitted == submitted
 
 
 def test_seed_range_boundaries_are_frozen_and_submitted(tmp_path: Path):
     make_project(tmp_path)
-    generate_candidates(tmp_path, seeds=[0, 2**32 - 1], client_factory=FakeAceClient)
+    generate_candidates(tmp_path, seeds=[0, 2**32 - 1], client_factory=FakeAceClient, engine="ace-step")
     assert FakeAceClient.submitted == [0, 2**32 - 1]
     assert [item["parameters"]["seed"] for item in ProjectStore(tmp_path).load()["requests"]] == [0, 2**32 - 1]
 
@@ -127,7 +127,7 @@ def test_seed_range_boundaries_are_frozen_and_submitted(tmp_path: Path):
 def test_legacy_negative_seed_cannot_be_resumed_as_deterministic(tmp_path: Path, snapshot: str):
     make_project(tmp_path)
     FakeAceClient.fail_seeds = {1}
-    generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient)
+    generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient, engine="ace-step")
     store = ProjectStore(tmp_path)
     with store.transaction() as project:
         batch = project["jobs"][0]
@@ -139,7 +139,7 @@ def test_legacy_negative_seed_cannot_be_resumed_as_deterministic(tmp_path: Path,
             project["requests"][0]["parameters"]["seed"] = -1
     before = store.manifest_path.read_bytes()
     with pytest.raises(ValueError, match="seed must be an integer between"):
-        resume_latest_batch(tmp_path, client_factory=FakeAceClient)
+        resume_latest_batch(tmp_path, client_factory=FakeAceClient, engine="ace-step")
     assert store.manifest_path.read_bytes() == before
     row = project_status(store, store.load())["jobs"][0]
     assert not row["canResume"] and "seed" in row["resumeBlockedReason"]
@@ -147,14 +147,14 @@ def test_legacy_negative_seed_cannot_be_resumed_as_deterministic(tmp_path: Path,
 
 def test_complete_resume_needs_no_engine_and_keeps_human_review(tmp_path: Path):
     make_project(tmp_path)
-    first = generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient)
+    first = generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient, engine="ace-step")
 
     class Offline(FakeAceClient):
         def health(self):
             raise RuntimeError("offline")
 
-    resumed = resume_latest_batch(tmp_path, client_factory=Offline)
-    again = resume_latest_batch(tmp_path, client_factory=Offline)
+    resumed = resume_latest_batch(tmp_path, client_factory=Offline, engine="ace-step")
+    again = resume_latest_batch(tmp_path, client_factory=Offline, engine="ace-step")
     assert resumed["newCandidateIds"] == again["newCandidateIds"] == []
     assert resumed["candidateIds"] == again["candidateIds"] == first["candidateIds"]
     assert len(ProjectStore(tmp_path).load()["candidates"]) == 1
@@ -163,13 +163,13 @@ def test_complete_resume_needs_no_engine_and_keeps_human_review(tmp_path: Path):
 def test_legacy_batch_uses_saved_child_request(tmp_path: Path):
     make_project(tmp_path)
     FakeAceClient.fail_seeds = {2}
-    generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeAceClient)
+    generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeAceClient, engine="ace-step")
     store = ProjectStore(tmp_path)
     with store.transaction() as project:
         project["jobs"][0]["parameters"].pop("frozenPayloads")
         project["inputs"]["stylePrompt"] = "changed"
     FakeAceClient.fail_seeds.clear()
-    resumed = resume_latest_batch(tmp_path, client_factory=FakeAceClient)
+    resumed = resume_latest_batch(tmp_path, client_factory=FakeAceClient, engine="ace-step")
     assert len(resumed["reusedCandidateIds"]) == 1
     assert store.load()["requests"][-1]["parameters"]["prompt"] == "Korean pop"
 
@@ -181,7 +181,7 @@ def test_unknown_legacy_inputs_fail_without_mutating_history(tmp_path: Path):
         store.append_job(project, kind="candidate-batch", parameters={"seeds": [1]})
     before = store.manifest_path.read_bytes()
     with pytest.raises(ValueError, match="original batch inputs"):
-        resume_latest_batch(tmp_path, client_factory=FakeAceClient)
+        resume_latest_batch(tmp_path, client_factory=FakeAceClient, engine="ace-step")
     assert store.manifest_path.read_bytes() == before
     view = project_status(store, store.load())["jobs"][0]
     assert not view["canResume"] and view["resumeBlockedReason"]
@@ -189,7 +189,7 @@ def test_unknown_legacy_inputs_fail_without_mutating_history(tmp_path: Path):
 
 def test_review_and_input_changes_during_inference_are_durable(tmp_path: Path):
     make_project(tmp_path)
-    first = generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient)
+    first = generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient, engine="ace-step")
     candidate_id = first["candidateIds"][0]
 
     class ListeningClient(FakeAceClient):
@@ -203,7 +203,7 @@ def test_review_and_input_changes_during_inference_are_durable(tmp_path: Path):
             revise_inputs(tmp_path, style_prompt="next song style", duration_seconds=45)
             return super().wait(task_id, **kwargs)
 
-    generate_candidates(tmp_path, seeds=[2, 3], client_factory=ListeningClient)
+    generate_candidates(tmp_path, seeds=[2, 3], client_factory=ListeningClient, engine="ace-step")
     project = ProjectStore(tmp_path).load()
     review = project["candidates"][0]["humanReview"]
     assert review["status"] == "approved" and review["rating"] == 4
@@ -228,7 +228,7 @@ class BlockingClient(FakeAceClient):
             Path(sys.argv[1], "waiting").touch()
             signal.pause()
         return super().wait(task_id, **kwargs)
-generate_candidates(sys.argv[1], seeds=[1, 2, 3], client_factory=BlockingClient)
+generate_candidates(sys.argv[1], seeds=[1, 2, 3], client_factory=BlockingClient, engine="ace-step")
 '''
     child = subprocess.Popen([sys.executable, "-c", script, str(tmp_path), str(Path(__file__).parent)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
@@ -240,7 +240,7 @@ generate_candidates(sys.argv[1], seeds=[1, 2, 3], client_factory=BlockingClient)
         store = ProjectStore(tmp_path)
         assert store.generation_active()
         with pytest.raises(RuntimeError, match="already running"):
-            generate_candidates(tmp_path, seeds=[9], client_factory=FakeAceClient)
+            generate_candidates(tmp_path, seeds=[9], client_factory=FakeAceClient, engine="ace-step")
         with pytest.raises(RuntimeError, match="already running"):
             recover_project(tmp_path)
         before = store.load()
@@ -251,13 +251,14 @@ generate_candidates(sys.argv[1], seeds=[1, 2, 3], client_factory=BlockingClient)
         assert not store.generation_active()
         status = project_status(store, store.load())
         assert status["jobs"][0]["status"] == "interrupted"
-        assert status["jobs"][0]["canResume"]
+        assert not status["jobs"][0]["canResume"]
+        assert "ACE" in status["jobs"][0]["resumeBlockedReason"]
         assert store.load()["jobs"][0]["status"] == "running"  # status is read-only
         assert library(None, [tmp_path])[0]["runningJobs"] == 0
         recovered = recover_project(tmp_path)
         assert len(recovered["interruptedJobIds"]) == 2
         revise_inputs(tmp_path, style_prompt="new default", lyrics="new lyrics")
-        resumed = resume_latest_batch(tmp_path, client_factory=FakeAceClient)
+        resumed = resume_latest_batch(tmp_path, client_factory=FakeAceClient, engine="ace-step")
         assert len(resumed["reusedCandidateIds"]) == 1
         assert len(resumed["newCandidateIds"]) == 2
         assert FakeAceClient.submitted == [2, 3]
@@ -273,10 +274,10 @@ generate_candidates(sys.argv[1], seeds=[1, 2, 3], client_factory=BlockingClient)
 
 def test_repaint_uses_parent_inputs_and_actual_duration(tmp_path: Path):
     make_project(tmp_path)
-    first = generate_candidates(tmp_path, seeds=[1], bpm=88, client_factory=FakeAceClient)
+    first = generate_candidates(tmp_path, seeds=[1], bpm=88, client_factory=FakeAceClient, engine="ace-step")
     revise_inputs(tmp_path, style_prompt="jazz", lyrics="other song", duration_seconds=120, bpm=180)
     repaint_candidate(tmp_path, candidate_id=first["candidateIds"][0], start_seconds=1, end_seconds=3,
-                      seed=2, lyrics="수정한 가사", client_factory=FakeAceClient)
+                      seed=2, lyrics="수정한 가사", client_factory=FakeAceClient, engine="ace-step")
     project = ProjectStore(tmp_path).load()
     payload = project["requests"][-1]["parameters"]
     assert payload["lyrics"] == "수정한 가사"
@@ -289,14 +290,14 @@ def test_repaint_uses_parent_inputs_and_actual_duration(tmp_path: Path):
 
 def test_regeneration_of_old_version_starts_from_its_inputs_and_keeps_feedback_on_resume(tmp_path: Path):
     make_project(tmp_path)
-    parent = generate_candidates(tmp_path, seeds=[1], bpm=88, client_factory=FakeAceClient)["candidateIds"][0]
+    parent = generate_candidates(tmp_path, seeds=[1], bpm=88, client_factory=FakeAceClient, engine="ace-step")["candidateIds"][0]
     revise_inputs(tmp_path, style_prompt="other", lyrics="other lyrics", duration_seconds=60, bpm=150)
     FakeAceClient.fail_seeds = {2}
     generate_candidates(tmp_path, seeds=[2], source_candidate_id=parent,
                         style_prompt="Korean pop, softer drums", feedback={"text": "드럼을 줄여 주세요", "candidateId": parent},
-                        client_factory=FakeAceClient)
+                        client_factory=FakeAceClient, engine="ace-step")
     FakeAceClient.fail_seeds.clear()
-    resumed = resume_latest_batch(tmp_path, client_factory=FakeAceClient)
+    resumed = resume_latest_batch(tmp_path, client_factory=FakeAceClient, engine="ace-step")
     store = ProjectStore(tmp_path)
     project = store.load()
     payload = project["requests"][-1]["parameters"]
@@ -317,18 +318,18 @@ def test_cancel_preserves_completed_refs(tmp_path: Path):
             return super().wait(task_id, **kwargs)
 
     with pytest.raises(KeyboardInterrupt):
-        generate_candidates(tmp_path, seeds=[1, 2, 3], client_factory=Interrupt)
+        generate_candidates(tmp_path, seeds=[1, 2, 3], client_factory=Interrupt, engine="ace-step")
     project = ProjectStore(tmp_path).load()
     assert project["jobs"][0]["status"] == "cancelled"
     assert project["jobs"][0]["resultRefs"] == [project["candidates"][0]["candidateId"]]
-    resumed = resume_latest_batch(tmp_path, client_factory=FakeAceClient)
+    resumed = resume_latest_batch(tmp_path, client_factory=FakeAceClient, engine="ace-step")
     assert len(resumed["reusedCandidateIds"]) == 1
 
 
 def test_export_never_overwrites_manifest_source_or_previous_file(tmp_path: Path):
     root = tmp_path / "song"
     make_project(root)
-    first = generate_candidates(root, seeds=[1], client_factory=FakeAceClient)
+    first = generate_candidates(root, seeds=[1], client_factory=FakeAceClient, engine="ace-step")
     select_candidate(root, first["candidateIds"][0])
     store = ProjectStore(root)
     source = store.resolve_artifact(store.load()["artifacts"][0])
@@ -346,7 +347,7 @@ def test_export_never_overwrites_manifest_source_or_previous_file(tmp_path: Path
 
 def test_undo_refuses_to_select_damaged_audio(tmp_path: Path):
     make_project(tmp_path)
-    result = generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeAceClient)
+    result = generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeAceClient, engine="ace-step")
     for candidate in result["candidateIds"]:
         select_candidate(tmp_path, candidate)
     store = ProjectStore(tmp_path)
@@ -365,5 +366,5 @@ def test_nonfinite_inputs_never_enter_manifest(tmp_path: Path, value: float):
     with pytest.raises(ValueError):
         revise_inputs(tmp_path, duration_seconds=value)
     with pytest.raises(ValueError):
-        repaint_candidate(tmp_path, start_seconds=0, end_seconds=value, seed=1, client_factory=FakeAceClient)
+        repaint_candidate(tmp_path, start_seconds=0, end_seconds=value, seed=1, client_factory=FakeAceClient, engine="ace-step")
     assert store.manifest_path.read_bytes() == before

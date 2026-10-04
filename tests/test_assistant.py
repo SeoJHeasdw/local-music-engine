@@ -24,7 +24,7 @@ def request(feedback: str, **overrides) -> PlanRequest:
         "duration_seconds": 120.0,
     }
     values.update(overrides)
-    return PlanRequest(**values)
+    return PlanRequest(**values, engine="ace-step")
 
 
 def test_selected_range_becomes_repaint_with_caption_change() -> None:

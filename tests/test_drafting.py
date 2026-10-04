@@ -31,9 +31,20 @@ def test_korean_description_becomes_english_tags_for_the_engine() -> None:
     assert "male vocal" not in tags
 
 
+def test_draft_retains_emotional_melody_and_singing_rap_intent() -> None:
+    from local_music_engine.drafting import rules_draft
+    tags = keyword_tags("감성 힙합, 싱잉랩과 기억에 남는 멜로디")
+    assert tags[0] == "hip hop"
+    assert {"emotional", "melodic", "melodic rap"} <= set(tags)
+    result = rules_draft("감성 힙합, 싱잉랩과 기억에 남는 멜로디", instrumental=False,
+                         duration_seconds=30, vocal_language="en")
+    assert all(tag in result["stylePrompt"] for tag in tags)
+    assert result["source"] == "rules" and result["lyrics"]
+
+
 def test_romanized_engine_lyrics_are_dropped_and_reported() -> None:
     FakeSampleClient.queries = []
-    result = engine_draft("잔잔한 발라드", instrumental=False, base_url="http://127.0.0.1:1", client_factory=FakeSampleClient)
+    result = engine_draft("잔잔한 발라드", instrumental=False, base_url="http://127.0.0.1:1", client_factory=FakeSampleClient, engine="ace-step")
     assert FakeSampleClient.queries == ["Korean ballad, calm"]
     assert result["lyrics"] == ""
     assert any("한글" in note for note in result["notes"])
@@ -59,14 +70,14 @@ def test_llm_draft_must_be_hangul() -> None:
 
 def test_unreachable_llm_falls_back_to_engine_draft() -> None:
     config = LlmConfig(base_url="http://127.0.0.1:9", model="none", timeout_seconds=1)
-    result = draft_song("잔잔한 발라드", instrumental=False, duration_seconds=60, base_url="http://127.0.0.1:1", llm=config, client_factory=FakeSampleClient)
+    result = draft_song("잔잔한 발라드", instrumental=False, duration_seconds=60, base_url="http://127.0.0.1:1", llm=config, client_factory=FakeSampleClient, engine="ace-step")
     assert result["source"] == "engine"
     assert "LLM" in result["notes"][0]
 
 
 def test_rules_only_append_to_prose_captions() -> None:
     prose = "A calm piano ballad with restrained drums, a soft female vocal and a warm, intimate mix."
-    plan = rule_plan(PlanRequest(feedback="드럼이 너무 세요", caption=prose, lyrics="가사", duration_seconds=60))
+    plan = rule_plan(PlanRequest(feedback="드럼이 너무 세요", caption=prose, lyrics="가사", duration_seconds=60, engine="ace-step"))
     assert plan["stylePrompt"].startswith("A calm piano ballad with restrained drums")
     assert plan["stylePrompt"].endswith("light drums")
     assert all(change["op"] == "add" for change in plan["changes"])
@@ -102,7 +113,7 @@ def test_failed_fallback_keeps_the_llm_reason() -> None:
 
     config = LlmConfig(base_url="http://127.0.0.1:9", model="none", timeout_seconds=1)
     try:
-        draft_song("잔잔한 발라드", instrumental=False, duration_seconds=60, base_url="http://127.0.0.1:1", llm=config, client_factory=OfflineEngine)
+        draft_song("잔잔한 발라드", instrumental=False, duration_seconds=60, base_url="http://127.0.0.1:1", llm=config, client_factory=OfflineEngine, engine="ace-step")
     except Exception as error:
         assert "LLM draft failed" in str(error) and "engine is off" in str(error)
     else:

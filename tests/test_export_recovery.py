@@ -20,7 +20,7 @@ def selected_project(tmp_path: Path):
     make_project(root)
     FakeAceClient.fail_seeds = set()
     FakeAceClient.submitted = []
-    candidate = workflow.generate_candidates(root, seeds=[1], client_factory=FakeAceClient)["candidateIds"][0]
+    candidate = workflow.generate_candidates(root, seeds=[1], client_factory=FakeAceClient, engine="ace-step")["candidateIds"][0]
     workflow.select_candidate(root, candidate)
     return ProjectStore(root)
 

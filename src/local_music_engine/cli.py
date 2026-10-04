@@ -17,6 +17,8 @@ from . import assistant
 from .drafting import draft_song
 from .auto_quality import quality_policy
 from .jobs import recover_project
+from .production_rules import catalog as production_catalog, normalize_selection
+from .song_planning import prepare_song_plan, validate_song_plan_input
 from .storage import ProjectStore
 from .views import candidate_rows, library, project_status
 from .workflow import (
@@ -25,6 +27,7 @@ from .workflow import (
     DEFAULT_LM_MODEL,
     DEFAULT_LM_TEMPERATURE,
     REPAINT_STRENGTHS,
+    cover_candidates,
     export_selected,
     generate_candidates,
     repaint_candidate,
@@ -34,6 +37,7 @@ from .workflow import (
     select_candidate,
     undo_selection,
 )
+from .music3 import CAPABILITIES, ENGINE, MAX_DURATION_SECONDS, MODEL
 
 
 def _print(value: Any) -> None:
@@ -62,6 +66,20 @@ def _parse_feedback(value: str) -> dict[str, Any]:
     return feedback
 
 
+def _parse_song_plan(value: str) -> dict[str, Any]:
+    try:
+        return validate_song_plan_input(json.loads(value))
+    except (ValueError, TypeError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def _parse_production_rules(value: str) -> dict[str, Any]:
+    try:
+        return normalize_selection(json.loads(value))
+    except (json.JSONDecodeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
 def _text_arg(inline: str | None, file: Path | None) -> str | None:
     if file is not None:
         return file.read_text(encoding="utf-8")
@@ -86,6 +104,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="music-engine")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    song_plan = subparsers.add_parser("song-plan", help="preview advisory section and lyric phrasing plans without inference")
+    song_plan.add_argument("--input-json", type=_parse_song_plan, required=True)
+
     init = subparsers.add_parser("init", help="create a project")
     init.add_argument("path", type=Path)
     init.add_argument("--title", required=True)
@@ -98,15 +119,20 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--bpm", type=int)
     init.add_argument("--key")
     init.add_argument("--time-signature")
+    init.add_argument("--production-rules-json", type=_parse_production_rules)
+    rules = subparsers.add_parser("production-rules", help="list selectable production presets and guidance")
+    rules.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
+    subparsers.add_parser("capabilities", help="show the default engine's supported operations")
 
     generate = subparsers.add_parser("generate", help="start a new candidate batch")
     generate.add_argument("path", type=Path)
+    generate.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
     generate.add_argument("--seeds", type=_parse_seeds, required=True)
     generate.add_argument("--base-url", default=DEFAULT_BASE_URL)
     generate.add_argument("--model", default=DEFAULT_DIT_MODEL)
     generate.add_argument("--lm-model", default=DEFAULT_LM_MODEL)
     generate.add_argument("--lm-temperature", type=float, default=DEFAULT_LM_TEMPERATURE,
-                          help="sampling temperature of the LM that plans melody and phrasing")
+                          help="legacy ACE planner sampling temperature; unused by Music 3")
     generate.add_argument("--quality", choices=["auto", "audio", "off"], default="auto",
                           help="automatic checks and bounded regeneration; audio skips local lyric STT")
     generate.add_argument("--quality-attempts", type=int, choices=range(1, 5), default=4,
@@ -121,6 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     resume = subparsers.add_parser("resume", help="explicitly resume the latest candidate batch")
     resume.add_argument("path", type=Path)
+    resume.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
     resume.add_argument("--job-id", help="resume this batch instead of the latest one")
     resume.add_argument("--base-url")
     resume.add_argument("--poll-seconds", type=float, default=1.0)
@@ -167,9 +194,11 @@ def build_parser() -> argparse.ArgumentParser:
     revise.add_argument("--bpm", type=int, help="0 clears the stored bpm")
     revise.add_argument("--key", help="empty string clears the stored key")
     revise.add_argument("--time-signature", help="empty string clears the stored meter")
+    revise.add_argument("--production-rules-json", type=_parse_production_rules)
 
     repaint = subparsers.add_parser("repaint", help="create a non-destructive repaint candidate")
     repaint.add_argument("path", type=Path)
+    repaint.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
     repaint.add_argument("--start", type=float, required=True)
     repaint.add_argument("--end", type=float, required=True)
     repaint.add_argument("--seed", type=int, required=True)
@@ -189,8 +218,24 @@ def build_parser() -> argparse.ArgumentParser:
     repaint.add_argument("--quality", choices=["auto", "audio", "off"], default="auto",
                          help="check and finish the edited audio once; never automatically repaint again")
 
+    cover = subparsers.add_parser("cover", help="create new versions based on a verified candidate audio")
+    cover.add_argument("path", type=Path)
+    cover.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
+    cover.add_argument("--candidate-id", required=True)
+    cover.add_argument("--seeds", type=_parse_seeds, required=True)
+    cover.add_argument("--strength", type=float, default=0.7)
+    cover.add_argument("--style")
+    cover.add_argument("--lyrics")
+    cover.add_argument("--model")
+    cover.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    cover.add_argument("--poll-seconds", type=float, default=1.0)
+    cover.add_argument("--timeout-seconds", type=float, default=1800.0)
+    cover.add_argument("--quality", choices=["auto", "audio", "off"], default="auto")
+    cover.add_argument("--feedback-json", type=_parse_feedback)
+
     plan = subparsers.add_parser("plan", help="turn listening feedback into a proposed change")
     plan.add_argument("path", type=Path)
+    plan.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
     plan.add_argument("candidate_id")
     plan.add_argument("--feedback", required=True)
     plan.add_argument("--start", type=float)
@@ -201,9 +246,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     draft = subparsers.add_parser("draft", help="draft caption, lyrics and title from a description")
     draft.add_argument("--query", required=True)
+    draft.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
     draft.add_argument("--instrumental", action="store_true")
     draft.add_argument("--duration", type=float, default=120.0)
     draft.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    draft.add_argument("--production-rules-json", type=_parse_production_rules)
+    draft.add_argument("--vocal-language", choices=["ko", "en"], default="ko")
     _add_assistant_args(draft)
 
     helper = subparsers.add_parser("assistant", help="inspect the feedback assistant")
@@ -222,6 +270,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _plan(args: argparse.Namespace) -> dict[str, Any]:
+    if args.engine == ENGINE and (args.start is not None or args.end is not None):
+        raise ValueError("Music 3 does not support range repaint; request a whole-song regeneration")
     store = ProjectStore(args.path)
     project = store.load()
     rows = {row["candidateId"]: row for row in candidate_rows(store, project)}
@@ -234,9 +284,13 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
         {"startSeconds": args.start, "endSeconds": args.end} if args.start is not None else None
     )
     inputs = project["inputs"]
+    caption = candidate.get("baseStylePrompt", candidate.get("stylePrompt", inputs["stylePrompt"]))
+    if not caption:
+        preset = (candidate.get("productionRules") or {}).get("preset")
+        caption = preset["caption"] if preset else candidate.get("stylePrompt", "")
     request = assistant.PlanRequest(
         feedback=args.feedback,
-        caption=candidate.get("stylePrompt") or inputs["stylePrompt"],
+        caption=caption,
         lyrics=candidate["lyrics"],
         duration_seconds=float(candidate.get("durationSeconds") or inputs["targetDurationSeconds"]),
         edit_range=edit_range,
@@ -244,17 +298,33 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
         versions=args.versions,
         bpm=candidate.get("bpm"),
         key_scale=candidate.get("keyScale"),
+        engine=args.engine,
     )
     plan = assistant.plan_revision(request, _llm_config(args))
+    if args.engine == ENGINE:
+        plan.update(action="regenerate", range=None)
+        plan["summary"] = f"의견을 반영해 새 곡 {args.versions}개를 만들어요."
+        plan.setdefault("notes", []).append("Music 3에서는 가사와 스타일을 바탕으로 곡 전체를 새로 만들어요.")
+    plan["baseStylePrompt"] = candidate.get("baseStylePrompt", request.caption)
     plan["candidateId"] = args.candidate_id
     return plan
 
 
 def run(args: argparse.Namespace) -> Any:
+    if args.command == "song-plan":
+        controls = args.input_json
+        return prepare_song_plan(controls["lyrics"], duration_seconds=controls["durationSeconds"],
+                                 bpm=controls["bpm"], time_signature=controls["timeSignature"],
+                                 preset_id=controls["presetId"], instrumental=controls["instrumental"],
+                                 development=controls["development"], breathing=controls["breathing"])
+    if args.command == "production-rules":
+        return production_catalog(engine=args.engine)
+    if args.command == "capabilities":
+        return {"engine": ENGINE, "model": MODEL, "capabilities": dict(CAPABILITIES), "maxDurationSeconds": MAX_DURATION_SECONDS}
     if args.command == "init":
         lyrics = _text_arg(args.lyrics, args.lyrics_file)
-        if not math.isfinite(args.duration) or args.duration < 10 or args.duration > 600:
-            raise ValueError("duration must be between 10 and 600 seconds")
+        if not math.isfinite(args.duration) or args.duration < 10 or args.duration > MAX_DURATION_SECONDS:
+            raise ValueError("duration must be between 10 and 300 seconds")
         store = ProjectStore.initialize(
             args.path,
             title=args.title,
@@ -262,15 +332,11 @@ def run(args: argparse.Namespace) -> Any:
             style_prompt=args.style,
             target_duration_seconds=args.duration,
             structure=args.structure,
+            bpm=args.bpm,
+            key_scale=args.key,
+            time_signature=args.time_signature,
+            production_rules=args.production_rules_json,
         )
-        if args.bpm is not None or args.key or args.time_signature:
-            revise_inputs(
-                store.root,
-                bpm=args.bpm,
-                key_scale=args.key,
-                time_signature=args.time_signature,
-                reason="initial-metas",
-            )
         project = store.load()
         return {"projectId": project["projectId"], "path": str(store.root)}
     if args.command == "generate":
@@ -289,7 +355,14 @@ def run(args: argparse.Namespace) -> Any:
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
             quality=quality_policy(args.quality, max_attempts=args.quality_attempts),
+            engine=args.engine,
         )
+    if args.command == "cover":
+        return cover_candidates(args.path, candidate_id=args.candidate_id, seeds=args.seeds,
+                                strength=args.strength, style_prompt=args.style, lyrics=args.lyrics,
+                                base_url=args.base_url, model=args.model, feedback=args.feedback_json,
+                                poll_seconds=args.poll_seconds, timeout_seconds=args.timeout_seconds,
+                                quality=quality_policy(args.quality, max_attempts=1), engine=args.engine)
     if args.command == "resume":
         return resume_latest_batch(
             args.path,
@@ -297,6 +370,7 @@ def run(args: argparse.Namespace) -> Any:
             base_url=args.base_url,
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
+            engine=args.engine,
         )
     if args.command == "recover":
         return recover_project(args.path)
@@ -336,6 +410,7 @@ def run(args: argparse.Namespace) -> Any:
             bpm=args.bpm,
             key_scale=args.key,
             time_signature=args.time_signature,
+            production_rules=args.production_rules_json,
             reason="manual",
         )
         return {"changed": revision is not None, "revision": revision}
@@ -353,6 +428,7 @@ def run(args: argparse.Namespace) -> Any:
             candidate_id=args.candidate_id,
             base_url=args.base_url,
             model=args.model,
+            engine=args.engine,
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
             quality=quality_policy(args.quality, max_attempts=1),
@@ -366,6 +442,8 @@ def run(args: argparse.Namespace) -> Any:
             duration_seconds=args.duration,
             base_url=args.base_url,
             llm=_llm_config(args),
+            production_rules=args.production_rules_json,
+            vocal_language=args.vocal_language, engine=args.engine,
         )
     if args.command == "assistant":
         if args.action == "rules":

@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from .models import validate_job_transition
+from .production_rules import draft_guidance, guided_prompt, normalize_selection, normalize_time_signature
+from .lyrics import is_instrumental_lyrics
 
 SCHEMA_VERSION = 1
 PROJECT_FILENAME = "project.json"
@@ -90,14 +92,23 @@ class ProjectStore:
         style_prompt: str,
         target_duration_seconds: float,
         structure: str | None = None,
+        bpm: int | None = None,
+        key_scale: str | None = None,
+        time_signature: str | int | None = None,
+        production_rules: dict[str, Any] | None = None,
     ) -> "ProjectStore":
         store = cls(root)
         if not math.isfinite(target_duration_seconds) or not 10 <= target_duration_seconds <= 600:
             raise ValueError("duration must be between 10 and 600 seconds")
-        if not style_prompt.strip():
-            raise ValueError("style prompt must not be empty")
+        selection = normalize_selection(production_rules) if production_rules is not None else None
+        guidance = draft_guidance(selection, duration_seconds=target_duration_seconds, instrumental=is_instrumental_lyrics(lyrics))
+        if not style_prompt.strip() and (guidance is None or not guided_prompt("", guidance)):
+            raise ValueError("style prompt must not be empty without production guidance")
         if not lyrics.strip():
             raise ValueError("lyrics must not be empty; use [Instrumental] for no vocals")
+        if bpm is not None and (type(bpm) is not int or bpm != 0 and not 30 <= bpm <= 300):
+            raise ValueError("bpm must be between 30 and 300")
+        meter = normalize_time_signature(time_signature)
         store.root.mkdir(parents=True, exist_ok=True)
         created_at = utc_now()
         project = {
@@ -121,6 +132,11 @@ class ProjectStore:
             "jobs": [],
             "revisions": [],
         }
+        if selection is not None:
+            project["inputs"]["productionRules"] = selection
+        for key, value in (("bpm", bpm or None), ("keyScale", key_scale.strip() if key_scale else None), ("timeSignature", meter)):
+            if value is not None:
+                project["inputs"][key] = value
         with store.locked():
             if store.manifest_path.exists():
                 raise FileExistsError(f"project already exists: {store.manifest_path}")

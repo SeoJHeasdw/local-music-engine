@@ -7,9 +7,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .jobs import ACTIVE_STATUSES, RECOVERABLE_KINDS, frozen_batch_payloads
+from .music3 import CAPABILITIES, ENGINE, MAX_DURATION_SECONDS
+from .lyrics import is_instrumental_lyrics
 from .storage import PROJECT_FILENAME, ProjectStore
 
-TOP_LEVEL_JOB_KINDS = {"candidate-batch", "repaint-candidate", "export"}
+TOP_LEVEL_JOB_KINDS = {"candidate-batch", "cover-batch", "repaint-candidate", "export"}
 
 
 def _artifact_path(store: ProjectStore, artifact: dict[str, Any]) -> Path | None:
@@ -67,10 +69,20 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
                     if finding_id in findings
                 ],
                 "stylePrompt": parameters.get("prompt"),
+                "baseStylePrompt": parameters.get("productionRules", {}).get("baseStylePrompt", parameters.get("sourceStylePrompt", parameters.get("prompt"))),
+                "productionRules": parameters.get("productionRules"),
+                "songPlan": parameters.get("songPlan"),
+                "lyricsOriginal": parameters.get("songPlan", {}).get("lyricsOriginal", parameters.get("sourceLyricsOriginal", parameters.get("lyrics"))),
+                "coverStrength": parameters.get("audio_cover_strength") if parameters.get("coverSource") else None,
+                "coverSource": parameters.get("coverSource"),
                 "lyrics": parameters.get("lyrics"),
                 "model": parameters.get("model"),
+                "engine": parameters.get("engine", "ace-step"),
+                "requestedDurationSeconds": parameters.get("audio_duration"),
+                "actualDurationSeconds": artifact.get("audio", {}).get("durationSeconds"),
                 "bpm": parameters.get("bpm"),
                 "keyScale": parameters.get("key_scale"),
+                "timeSignature": parameters.get("time_signature"),
                 "repaintStrength": parameters.get("repaint_strength"),
                 "instruction": parameters.get("instruction"),
                 "feedbackId": feedback_id,
@@ -99,13 +111,17 @@ def _job_view(project: dict[str, Any], job: dict[str, Any], generation_active: b
         "finishedAt": job.get("finishedAt"),
         "feedbackId": parameters.get("feedbackId"),
         "resultRefs": job.get("resultRefs", []),
+        "unsubmittedSeeds": job.get("unsubmittedSeeds", []),
+        "stopReason": job.get("stopReason"),
     }
-    if job["kind"] == "candidate-batch":
+    if job["kind"] in {"candidate-batch", "cover-batch"}:
         resumed_by = next((item["jobId"] for item in reversed(project["jobs"])
                            if item["parameters"].get("resumeOfJobId") == job["jobId"]), None)
         blocked = None
         try:
-            frozen_batch_payloads(project, job)
+            frozen = frozen_batch_payloads(project, job)
+            if any(item.get("engine") != ENGINE for item in frozen):
+                blocked = "과거 ACE 작업은 Music 3에서 이어 만들 수 없어요. 가사와 스타일로 새 곡을 만들어 주세요."
         except ValueError as error:
             blocked = str(error)
         view.update(
@@ -168,6 +184,9 @@ def project_status(store: ProjectStore, project: dict[str, Any]) -> dict[str, An
     generation_active = store.generation_active()
     export_active = store.export_active()
     return {
+        "engine": ENGINE,
+        "capabilities": dict(CAPABILITIES),
+        "maxDurationSeconds": MAX_DURATION_SECONDS,
         "projectId": project["projectId"],
         "title": project["title"],
         "path": str(store.root),
@@ -181,6 +200,7 @@ def project_status(store: ProjectStore, project: dict[str, Any]) -> dict[str, An
             "bpm": inputs.get("bpm"),
             "keyScale": inputs.get("keyScale"),
             "timeSignature": inputs.get("timeSignature"),
+            "productionRules": inputs.get("productionRules"),
         },
         "selectedCandidateId": project.get("selectedCandidateId"),
         "recommendedCandidateId": project.get("recommendedCandidateId"),
@@ -224,7 +244,7 @@ def _summary(path: Path) -> dict[str, Any]:
             "updatedAt": project.get("updatedAt"),
             "stylePrompt": inputs.get("stylePrompt", ""),
             "durationSeconds": inputs.get("targetDurationSeconds"),
-            "instrumental": inputs.get("lyricsNormalized", "").strip() == "[Instrumental]",
+            "instrumental": is_instrumental_lyrics(inputs.get("lyricsNormalized", "")),
             "versionCount": sum(1 for item in candidates if not item.get("quality") or item["quality"].get("preferred")),
             "automaticAttemptCount": sum(1 for item in candidates if item.get("quality") and not item["quality"].get("preferred")),
             "editCount": sum(1 for item in candidates if item.get("parentCandidateId") and (not item.get("quality") or item["quality"].get("preferred"))

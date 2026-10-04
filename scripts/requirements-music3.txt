@@ -1,0 +1,10 @@
+# The implementation is installed from the commit pinned by bootstrap_music3.sh.
+# Pin its direct inference dependencies separately from the application and ACE.
+mlx==0.31.2
+numpy==2.4.4
+scipy==1.17.1
+transformers==5.14.0
+huggingface-hub==1.8.0
+miniaudio==1.61
+sounddevice==0.5.5
+tqdm==4.67.3

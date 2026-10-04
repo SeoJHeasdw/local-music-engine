@@ -13,12 +13,12 @@ def test_repaint_checks_once_keeps_range_and_preserves_human_selection(tmp_path)
     FakeAceClient.fail_seeds = set()
     store = ProjectStore.initialize(tmp_path / "song", title="편집", lyrics=LYRICS,
                                     style_prompt="Korean acoustic pop", target_duration_seconds=10)
-    parent = generate_candidates(store.root, seeds=[1], client_factory=FakeAceClient)["candidateIds"][0]
+    parent = generate_candidates(store.root, seeds=[1], client_factory=FakeAceClient, engine="ace-step")["candidateIds"][0]
     select_candidate(store.root, parent)
     review_candidate(store.root, parent, status="approved")
     backend = Reports(["바다는 차갑고 어둠은 깊게 번진다"])
     result = repaint_candidate(store.root, start_seconds=2, end_seconds=5, seed=8,
-        client_factory=FakeAceClient, quality=quality_policy(max_attempts=1), quality_backend=backend)
+        client_factory=FakeAceClient, quality=quality_policy(max_attempts=1), quality_backend=backend, engine="ace-step")
     project = store.load()
     raw, finished = project["candidates"][-2:]
     assert FakeAceClient.submitted == [1, 8] and backend.calls == 1
@@ -41,9 +41,9 @@ def test_repaint_inspector_failure_retains_usable_edited_audio_without_retry(tmp
     FakeAceClient.fail_seeds = set()
     store = ProjectStore.initialize(tmp_path / "song", title="편집", lyrics=LYRICS,
                                     style_prompt="Korean acoustic pop", target_duration_seconds=10)
-    parent = generate_candidates(store.root, seeds=[1], client_factory=FakeAceClient)["candidateIds"][0]
+    parent = generate_candidates(store.root, seeds=[1], client_factory=FakeAceClient, engine="ace-step")["candidateIds"][0]
     result = repaint_candidate(store.root, candidate_id=parent, start_seconds=2, end_seconds=5, seed=8,
-        client_factory=FakeAceClient, quality=quality_policy(max_attempts=1), quality_backend=Reports(error=True))
+        client_factory=FakeAceClient, quality=quality_policy(max_attempts=1), quality_backend=Reports(error=True), engine="ace-step")
     winner = store.find_by_id(store.load(), "candidates", "candidateId", result["candidateId"])
     assert FakeAceClient.submitted == [1, 8]
     assert winner["quality"]["status"] == "unknown" and winner["quality"]["retryReasons"] == []

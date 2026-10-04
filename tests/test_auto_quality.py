@@ -48,7 +48,7 @@ def song(tmp_path):
 
 def generate(store, *, backend=None, seeds=(1,), **kwargs):
     return generate_candidates(store.root, seeds=seeds, client_factory=FakeAceClient,
-                               quality=quality_policy(), quality_backend=backend or Reports(), **kwargs)
+                               quality=quality_policy(), quality_backend=backend or Reports(), **kwargs, engine="ace-step")
 
 
 def test_one_click_keeps_raw_audio_and_creates_separate_unreviewed_recommendation(song, tmp_path):
@@ -114,7 +114,7 @@ def test_finished_resume_needs_no_engine_or_inspector_even_if_raw_backup_is_miss
         def analyze(self, *args, **kwargs):
             raise AssertionError("a finished resume must not repeat the inspector")
 
-    again = resume_latest_batch(song.root, client_factory=Offline, quality_backend=NoInspector())
+    again = resume_latest_batch(song.root, client_factory=Offline, quality_backend=NoInspector(), engine="ace-step")
     assert again["reusedCandidateIds"] == first["candidateIds"]
     assert again["newCandidateIds"] == []
     assert len(FakeAceClient.submitted) == 1
@@ -125,7 +125,7 @@ def test_cancelled_inspection_resumes_verified_audio_with_its_original_inputs(so
         generate(song, backend=Reports(interrupt=True))
     original = song.load()["requests"][0]["parameters"]
     revise_inputs(song.root, lyrics="다음 곡 가사", style_prompt="jazz", duration_seconds=60)
-    result = resume_latest_batch(song.root, client_factory=FakeAceClient, quality_backend=Reports())
+    result = resume_latest_batch(song.root, client_factory=FakeAceClient, quality_backend=Reports(), engine="ace-step")
     assert len(FakeAceClient.submitted) == 1
     assert len(result["newCandidateIds"]) == 1
     project = song.load()
@@ -139,11 +139,11 @@ def test_failed_submissions_are_counted_across_all_resume_attempts(song):
         def wait(self, *args, **kwargs):
             raise RuntimeError("remote task finished with failure")
 
-    first = generate_candidates(song.root, seeds=[1], client_factory=Failed, quality=quality_policy(), quality_backend=Reports())
+    first = generate_candidates(song.root, seeds=[1], client_factory=Failed, quality=quality_policy(), quality_backend=Reports(), engine="ace-step")
     assert first["status"] == "failed"
     assert len(FakeAceClient.submitted) == 4
     for _ in range(3):
-        result = resume_latest_batch(song.root, client_factory=Failed, quality_backend=Reports())
+        result = resume_latest_batch(song.root, client_factory=Failed, quality_backend=Reports(), engine="ace-step")
         assert result["status"] == "failed"
     assert len(FakeAceClient.submitted) == 4
 
@@ -153,7 +153,7 @@ def test_timeout_does_not_automatically_submit_more_remote_work(song):
         def wait(self, *args, **kwargs):
             raise TimeoutError("remote task might still be computing")
 
-    result = generate_candidates(song.root, seeds=[1, 2], client_factory=TimedOut, quality=quality_policy(), quality_backend=Reports())
+    result = generate_candidates(song.root, seeds=[1, 2], client_factory=TimedOut, quality=quality_policy(), quality_backend=Reports(), engine="ace-step")
     assert result["status"] == "failed"
     assert len(FakeAceClient.submitted) == 1
 
@@ -165,7 +165,7 @@ def test_a_failed_requested_version_does_not_hide_successful_versions(song):
                 raise RuntimeError("remote task finished with failure")
             return super().wait(*args, **kwargs)
 
-    result = generate_candidates(song.root, seeds=[1, 2], client_factory=SecondFails, quality=quality_policy(), quality_backend=Reports())
+    result = generate_candidates(song.root, seeds=[1, 2], client_factory=SecondFails, quality=quality_policy(), quality_backend=Reports(), engine="ace-step")
     assert result["status"] == "partial"
     assert len(result["candidateIds"]) == 1
     assert len(result["failures"]) == 1
@@ -226,7 +226,7 @@ def test_attempt_count_includes_failed_generations_before_a_good_version(song):
                 raise RuntimeError("remote task finished with failure")
             return super().wait(*args, **kwargs)
 
-    result = generate_candidates(song.root, seeds=[1], client_factory=TwoFailures, quality=quality_policy(), quality_backend=Reports())
+    result = generate_candidates(song.root, seeds=[1], client_factory=TwoFailures, quality=quality_policy(), quality_backend=Reports(), engine="ace-step")
     assert result["status"] == "succeeded" and result["failures"] == []
     chosen = song.find_by_id(song.load(), "candidates", "candidateId", result["candidateIds"][0])
     assert chosen["quality"]["attempt"] == chosen["quality"]["attemptsUsed"] == 3
@@ -284,7 +284,7 @@ def test_invalid_quality_snapshot_fails_before_mutating_resume_history(song):
         batch["parameters"]["qualityPlan"][0].append(deepcopy(batch["parameters"]["qualityPlan"][0][0]))
     before = song.manifest_path.read_bytes()
     with pytest.raises(ValueError):
-        resume_latest_batch(song.root, client_factory=FakeAceClient, quality_backend=Reports())
+        resume_latest_batch(song.root, client_factory=FakeAceClient, quality_backend=Reports(), engine="ace-step")
     assert song.manifest_path.read_bytes() == before
 
 
@@ -321,7 +321,7 @@ class RecordedClient(FakeAceClient):
         return task
 ProjectStore.save = pause_at_success
 generate_candidates(root, seeds=[1], client_factory=RecordedClient,
-                    quality=quality_policy(), quality_backend=Reports())
+                    quality=quality_policy(), quality_backend=Reports(), engine="ace-step")
 '''
     child = subprocess.Popen([
         sys.executable, "-c", script, str(store.root), str(Path(__file__).parent),
@@ -380,7 +380,7 @@ def test_sigkill_after_finished_wav_publication_recovers_and_resumes_raw_without
     assert not Path(owned["path"]).exists() and not Path(owned["temporaryPath"]).exists()
     assert song.verify_artifact(source_artifact) == (True, "ok")
     result = resume_latest_batch(song.root, client_factory=NoAdditionalInference,
-                                quality_backend=NoAdditionalInspection())
+                                quality_backend=NoAdditionalInspection(), engine="ace-step")
     project = song.load()
     finished = song.find_by_id(project, "candidates", "candidateId", result["candidateIds"][0])
     assert finished["parentCandidateId"] == raw["candidateId"]
@@ -405,7 +405,7 @@ def test_sigkill_after_finished_success_commit_preserves_output_cleans_anchor_an
     assert Path(owned["path"]).is_file() and not Path(owned["temporaryPath"]).exists()
     assert song.verify_artifact(finished_artifact) == (True, "ok")
     result = resume_latest_batch(song.root, client_factory=NoAdditionalInference,
-                                quality_backend=NoAdditionalInspection())
+                                quality_backend=NoAdditionalInspection(), engine="ace-step")
     project = song.load()
     assert result["candidateIds"] == result["reusedCandidateIds"] == [finished["candidateId"]]
     assert result["newCandidateIds"] == []

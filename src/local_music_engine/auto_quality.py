@@ -17,6 +17,8 @@ from .lyric_quality import assess_lyric_suitability, evaluate_lyric_transcript
 from .qc import artifact_and_findings
 from .quality_backend import AudioOnlyBackend, LocalQualityBackend
 from .storage import ProjectStore, fingerprint, new_id, utc_now
+from .song_planning import prepare_song_plan
+from .lyrics import is_instrumental_lyrics
 
 QUALITY_VERSION = "music-quality-v1"
 
@@ -34,8 +36,16 @@ def quality_policy(mode: str = "auto", *, max_attempts: int = 4) -> dict[str, An
 
 def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
     prepared = deepcopy(payload)
-    original = payload["lyrics"]
-    normalized = unicodedata.normalize("NFC", original.replace("\r\n", "\n").replace("\r", "\n"))
+    original = payload.get("songPlan", {}).get("lyricsOriginal", payload.get("sourceLyricsOriginal", payload["lyrics"]))
+    if payload.get("task_type") == "cover":
+        prepared["qualityPreparation"] = {"version": QUALITY_VERSION, "lyricsOriginal": original,
+            "changes": [], "requestedDurationSeconds": payload["audio_duration"],
+            "effectiveDurationSeconds": payload["audio_duration"],
+            "preflight": assess_lyric_suitability(original, payload["audio_duration"], bpm=payload.get("bpm"))}
+        return prepared
+    # Song planning has already preserved the lexical content while changing line breaks/tags.
+    model_lyrics = payload["lyrics"]
+    normalized = unicodedata.normalize("NFC", model_lyrics.replace("\r\n", "\n").replace("\r", "\n"))
     changes = []
     lines = []
     for line in normalized.splitlines():
@@ -55,9 +65,9 @@ def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             lines.append(line)
     normalized = "\n".join(lines)
-    if normalized != original and not changes:
+    if normalized != model_lyrics and not changes:
         changes.append("unicode_and_newlines_normalized")
-    instrumental = normalized.strip() == "[Instrumental]"
+    instrumental = is_instrumental_lyrics(normalized)
     caption = payload["prompt"]
     loop_or_cut = bool(re.search(r"\b(loop|loopable|seamless|hard cut|abrupt ending)\b|반복용|루프|갑자기.*끝", caption, re.I))
     if not instrumental and not loop_or_cut and len(normalized) <= 4084 and not re.search(r"\[(outro|ending|end)\b", normalized, re.I):
@@ -72,14 +82,29 @@ def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
         # Preserve explicit rap/loop/cut intent. The original target
         # remains in project inputs; every effective duration is frozen in the request.
         minimum = math.ceil(preflight["estimatedSungSyllables"] / (6 * 0.75) / 5) * 5
-        effective = min(600.0, max(float(payload["audio_duration"]), float(minimum)))
+        effective = min(300.0 if payload.get("engine") == "minimax-music3" else 600.0, max(float(payload["audio_duration"]), float(minimum)))
         if effective > payload["audio_duration"]:
             prepared["audio_duration"] = effective
             changes.append("duration_extended_for_dense_lyrics")
+            if payload.get("songPlan"):
+                controls = payload["songPlan"]["options"]
+                song_plan = prepare_song_plan(original, duration_seconds=effective,
+                    bpm=payload.get("bpm"), time_signature=payload.get("time_signature"),
+                    preset_id=controls["presetId"], instrumental=controls["instrumental"],
+                    development=controls["development"], breathing=controls["breathing"])
+                prepared["songPlan"] = song_plan
+                prepared["productionRules"]["songPlan"] = deepcopy(song_plan)
+                prepared["lyrics"] = song_plan["lyricsPrepared"]
+                if "outro_structure_tag_added" in changes:
+                    prepared["lyrics"] += "\n\n[Outro]"
+                changes.append("song_plan_updated_for_effective_duration")
     prepared["qualityPreparation"] = {"version": QUALITY_VERSION, "lyricsOriginal": original,
                                        "changes": list(dict.fromkeys(changes)),
                                        "requestedDurationSeconds": payload["audio_duration"],
                                        "effectiveDurationSeconds": prepared["audio_duration"], "preflight": preflight}
+    if prepared.get("engine") == "minimax-music3":
+        from .music3 import translate_payload
+        prepared = translate_payload(prepared)
     return prepared
 
 
@@ -463,7 +488,7 @@ def run_quality_batch(store: ProjectStore, *, batch_id: str, client: Any, poll_s
                         failure(original_seed, error, stage="generation")
                         # A timeout may leave remote inference running. Do not add more work automatically.
                         if isinstance(error, TimeoutError) or any(term in str(error) for term in
-                            ("API unavailable", "API HTTP", "unhealthy ACE", "not the requested")):
+                            ("API unavailable", "API HTTP", "unhealthy ACE", "unhealthy Music 3", "Music 3 server", "not the requested")):
                             stop_submissions = True
                             break
                         continue

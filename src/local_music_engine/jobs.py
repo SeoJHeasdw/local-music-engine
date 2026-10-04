@@ -10,7 +10,7 @@ from typing import Any
 from .storage import ProjectStore, fingerprint, sha256_file
 
 ACTIVE_STATUSES = {"queued", "running", "cancelling"}
-GENERATION_KINDS = {"candidate-batch", "generate-candidate", "repaint-candidate", "quality-check", "audio-finish"}
+GENERATION_KINDS = {"candidate-batch", "cover-batch", "generate-candidate", "repaint-candidate", "quality-check", "audio-finish"}
 RECOVERABLE_KINDS = GENERATION_KINDS | {"export"}
 
 
@@ -117,11 +117,11 @@ def recover_project(project_root: str) -> dict[str, Any]:
 def resume_source(project: dict[str, Any], job_id: str | None = None) -> dict[str, Any]:
     if job_id is not None:
         job = ProjectStore.find_by_id(project, "jobs", "jobId", job_id)
-        if job["kind"] != "candidate-batch":
+        if job["kind"] not in {"candidate-batch", "cover-batch"}:
             raise ValueError("only a candidate batch can be resumed")
         return job
     for job in reversed(project["jobs"]):
-        if job["kind"] == "candidate-batch":
+        if job["kind"] in {"candidate-batch", "cover-batch"}:
             return job
     raise ValueError("no candidate batch exists to resume")
 

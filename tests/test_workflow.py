@@ -89,14 +89,14 @@ def test_partial_failure_and_explicit_resume(tmp_path: Path) -> None:
     FakeAceClient.fail_seeds = {2}
     first = generate_candidates(
         root, seeds=[1, 2], client_factory=FakeAceClient, poll_seconds=0.01
-    )
+    , engine="ace-step")
     assert first["status"] == "partial"
     assert len(first["candidateIds"]) == 1
 
     FakeAceClient.fail_seeds = set()
     resumed = resume_latest_batch(
         root, client_factory=FakeAceClient, poll_seconds=0.01
-    )
+    , engine="ace-step")
     assert resumed["status"] == "succeeded"
     assert resumed["reusedCandidateIds"] == first["candidateIds"]
     assert FakeAceClient.submitted == [1, 2, 2]
@@ -108,8 +108,8 @@ def test_new_batch_does_not_implicitly_reuse(tmp_path: Path) -> None:
     make_project(root)
     FakeAceClient.submitted = []
     FakeAceClient.fail_seeds = set()
-    generate_candidates(root, seeds=[7], client_factory=FakeAceClient)
-    generate_candidates(root, seeds=[7], client_factory=FakeAceClient)
+    generate_candidates(root, seeds=[7], client_factory=FakeAceClient, engine="ace-step")
+    generate_candidates(root, seeds=[7], client_factory=FakeAceClient, engine="ace-step")
     assert FakeAceClient.submitted == [7, 7]
     assert len(ProjectStore(root).load()["candidates"]) == 2
 
@@ -118,7 +118,7 @@ def test_review_select_undo_and_export_preserve_source(tmp_path: Path) -> None:
     root = tmp_path / "song"
     make_project(root)
     FakeAceClient.fail_seeds = set()
-    result = generate_candidates(root, seeds=[9], client_factory=FakeAceClient)
+    result = generate_candidates(root, seeds=[9], client_factory=FakeAceClient, engine="ace-step")
     candidate_id = result["candidateIds"][0]
     review = review_candidate(
         root, candidate_id, status="approved", rating=5, note="청취 완료"
@@ -144,7 +144,7 @@ def test_feedback_regeneration_revises_inputs_and_links_feedback(tmp_path: Path)
     root = tmp_path / "song"
     make_project(root)
     FakeAceClient.fail_seeds = set()
-    first = generate_candidates(root, seeds=[1], client_factory=FakeAceClient)
+    first = generate_candidates(root, seeds=[1], client_factory=FakeAceClient, engine="ace-step")
     source_id = first["candidateIds"][0]
     feedback = {"text": "드럼이 너무 세요", "candidateId": source_id, "plan": {"action": "regenerate"}}
     second = generate_candidates(
@@ -153,7 +153,7 @@ def test_feedback_regeneration_revises_inputs_and_links_feedback(tmp_path: Path)
         style_prompt="Korean pop, light drums",
         feedback=feedback,
         client_factory=FakeAceClient,
-    )
+     engine="ace-step")
 
     store = ProjectStore(root)
     project = store.load()
@@ -175,7 +175,7 @@ def test_repaint_uses_caption_and_strength_not_free_instruction(tmp_path: Path) 
     root = tmp_path / "song"
     make_project(root)
     FakeAceClient.fail_seeds = set()
-    parent = generate_candidates(root, seeds=[3], client_factory=FakeAceClient)["candidateIds"][0]
+    parent = generate_candidates(root, seeds=[3], client_factory=FakeAceClient, engine="ace-step")["candidateIds"][0]
     select_candidate(root, parent)
     result = repaint_candidate(
         root,
@@ -186,7 +186,7 @@ def test_repaint_uses_caption_and_strength_not_free_instruction(tmp_path: Path) 
         strength="light",
         feedback={"text": "발음", "candidateId": parent, "range": {"startSeconds": 2, "endSeconds": 4}},
         client_factory=FakeAceClient,
-    )
+     engine="ace-step")
     project = ProjectStore(root).load()
     request = project["requests"][-1]["parameters"]
     assert request["prompt"] == "Korean pop, clear Korean diction"
@@ -206,7 +206,7 @@ def test_cancelled_batch_does_not_leave_running_jobs(tmp_path: Path) -> None:
             raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        generate_candidates(root, seeds=[5, 6], client_factory=InterruptingClient)
+        generate_candidates(root, seeds=[5, 6], client_factory=InterruptingClient, engine="ace-step")
     jobs = ProjectStore(root).load()["jobs"]
     assert {job["status"] for job in jobs} == {"cancelled"}
 
@@ -250,7 +250,7 @@ def test_generation_refuses_a_model_the_server_did_not_load(tmp_path: Path) -> N
     RecordingAceClient.payloads = []
     RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-0.6B")
     with pytest.raises(Exception, match="acestep-5Hz-lm-4B"):
-        generate_candidates(tmp_path, seeds=[1], lm_model="acestep-5Hz-lm-4B", client_factory=RecordingAceClient)
+        generate_candidates(tmp_path, seeds=[1], lm_model="acestep-5Hz-lm-4B", client_factory=RecordingAceClient, engine="ace-step")
     project = ProjectStore(tmp_path).load()
     assert RecordingAceClient.payloads == [] and project["candidates"] == [] and project["requests"] == []
     assert project["jobs"][0]["status"] == "failed"
@@ -260,12 +260,12 @@ def test_sampling_follows_the_dit_and_language_follows_the_lyrics(tmp_path: Path
     make_project(tmp_path)
     RecordingAceClient.payloads = []
     RecordingAceClient.loaded = ("acestep-v15-sft", "acestep-5Hz-lm-4B")
-    generate_candidates(tmp_path, seeds=[1], model="acestep-v15-sft", client_factory=RecordingAceClient)
+    generate_candidates(tmp_path, seeds=[1], model="acestep-v15-sft", client_factory=RecordingAceClient, engine="ace-step")
     RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
     generate_candidates(tmp_path, seeds=[2], lyrics="[Verse]\nShine on me\n[Chorus]\nForever in your glow",
-                        client_factory=RecordingAceClient)
+                        client_factory=RecordingAceClient, engine="ace-step")
     generate_candidates(tmp_path, seeds=[3], lyrics="[Verse]\n창밖에 번진 햇살\n[Chorus]\nShine on me, 내 곁에",
-                        client_factory=RecordingAceClient)
+                        client_factory=RecordingAceClient, engine="ace-step")
     sft, english, bilingual = RecordingAceClient.payloads
     assert (sft["inference_steps"], sft["guidance_scale"]) == (50, 7.0)
     assert english["inference_steps"] == 8 and "guidance_scale" not in english
@@ -276,11 +276,11 @@ def test_lm_temperature_is_frozen_for_text2music_only(tmp_path: Path) -> None:
     make_project(tmp_path)
     RecordingAceClient.payloads = []
     RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
-    result = generate_candidates(tmp_path, seeds=[1], lm_temperature=0.5, client_factory=RecordingAceClient)
+    result = generate_candidates(tmp_path, seeds=[1], lm_temperature=0.5, client_factory=RecordingAceClient, engine="ace-step")
     repaint_candidate(tmp_path, start_seconds=1, end_seconds=2, seed=5,
-                      candidate_id=result["candidateIds"][0], client_factory=RecordingAceClient)
+                      candidate_id=result["candidateIds"][0], client_factory=RecordingAceClient, engine="ace-step")
     generated, repainted = RecordingAceClient.payloads
     assert generated["lm_temperature"] == 0.5
     assert "lm_temperature" not in repainted and repainted["thinking"] is False
     with pytest.raises(ValueError):
-        generate_candidates(tmp_path, seeds=[2], lm_temperature=0, client_factory=RecordingAceClient)
+        generate_candidates(tmp_path, seeds=[2], lm_temperature=0, client_factory=RecordingAceClient, engine="ace-step")

@@ -12,6 +12,28 @@ from .qc import artifact_and_findings
 from .storage import ProjectStore, new_id, utc_now
 
 
+def cover_source(store: ProjectStore, parameters: dict[str, Any]) -> dict[str, Any]:
+    """Resolve only a frozen, verified artifact from this project's own candidates."""
+
+    reference = parameters.get("coverSource")
+    if reference is None:
+        return {}
+    if parameters.get("task_type") != "cover" or not isinstance(reference, dict):
+        raise ValueError("invalid cover source")
+    project = store.load()
+    candidate = store.find_by_id(project, "candidates", "candidateId", reference["candidateId"])
+    if candidate.get("status") != "ready" or candidate["artifactId"] != reference["artifactId"]:
+        raise ValueError("cover source candidate changed")
+    artifact = store.find_by_id(project, "artifacts", "artifactId", reference["artifactId"])
+    valid, reason = store.verify_artifact(artifact)
+    if not valid:
+        raise ValueError(reason)
+    if artifact["sha256"] != reference["sha256"] or artifact["bytes"] != reference["bytes"]:
+        raise ValueError("cover source does not match the frozen request")
+    return {"source": store.resolve_artifact(artifact), "parent_candidate_id": candidate["candidateId"],
+            "context_range": {"startSeconds": 0.0, "endSeconds": reference["durationSeconds"]}}
+
+
 def execute_candidate(
     store: ProjectStore,
     client: AceStepClient,
@@ -43,6 +65,11 @@ def execute_candidate(
                 batch.update(stage=f"seed {seed}: {job['stage']}", progress=(index + value) / total)
 
     try:
+        if request["parameters"].get("coverSource") is not None:
+            reference = cover_source(store, request["parameters"])
+            source = reference["source"]
+            parent_candidate_id = reference["parent_candidate_id"]
+            context_range = reference["context_range"]
         if source is None:
             task_id = client.submit(api_payload)
         else:
@@ -57,9 +84,10 @@ def execute_candidate(
         )
         file_path = str(result.get("file") or "")
         if not file_path:
-            raise RuntimeError("ACE task succeeded without an audio file")
+            raise RuntimeError("music task succeeded without an audio file")
         progress({"stage": "downloading", "progress": 0.97})
-        directory = "repaints" if parent_candidate_id else "candidates"
+        directory = ("covers" if request["parameters"].get("task_type") == "cover"
+                     else "repaints" if parent_candidate_id else "candidates")
         destination = store.root / "artifacts" / directory / f"{job_id}-seed-{seed}.wav"
         # Resolve before writing as well as after: a symlinked artifact directory must
         # not turn the engine into a writer outside the project.
@@ -82,6 +110,8 @@ def execute_candidate(
             "parentCandidateId": parent_candidate_id,
             "editRange": deepcopy(edit_range),
             "contextRange": deepcopy(context_range),
+            "requestedDurationSeconds": float(request["parameters"]["audio_duration"]),
+            "actualDurationSeconds": artifact["audio"]["durationSeconds"],
             "humanReview": {"status": "unreviewed", "rating": None, "notes": [], "updatedAt": None},
             "createdAt": utc_now(),
         }
@@ -95,7 +125,7 @@ def execute_candidate(
             job["resultRefs"] = [candidate["candidateId"], artifact["artifactId"]]
             job["remoteResult"] = {
                 key: result.get(key)
-                for key in ("generation_info", "seed_value", "lm_model", "dit_model", "metas")
+                for key in ("generation_info", "seed_value", "lm_model", "dit_model", "metas", "engine", "model", "actual_duration", "eos_reached", "realInference")
             }
             store.transition_job(job, "succeeded", stage="verified", progress=1.0)
             if batch_id:
