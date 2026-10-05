@@ -1,6 +1,23 @@
 # 결정 기록
 
-최신 확인일: 2026-10-05. 아래 과거 선택 기록은 당시의 결정으로 보존한다.
+최신 확인일: 2026-10-06. 아래 과거 선택 기록은 당시의 결정으로 보존한다.
+
+## 2026-10-06 공식 정밀도와 caption v4
+
+| 대상 | 고정 판본 | 출처·조건 | 선택 |
+| --- | --- | --- | --- |
+| Music 3 가중치 | HF `mlx-community/MiniMax-Music3-bf16` revision `83a5f2d365673689df5c8f36e21e108751fd92ea`, 6개 shard SHA-256 고정(`MODEL_SHARDS`) | MiniMax-Music3 Community License | 기본 엔진. 기존 MXFP8 판본을 대체 |
+| 정밀도 기준 | SGLang-Omni commit `531ac8a2ac7ededc9f8e3616c170e4705109eacc`의 `sglang_omni/models/minimax_music3` | Apache-2.0 | AR(global·local LM) bfloat16, condition encoder·DiT·vocoder float32 |
+| caption 형식 | MiniMax-AI/MiniMax-Music3 commit `945655064d59b98004dd70002e7eb5c8c6e11373`의 `skills/music-caption-rewriter` | 저장소에 별도 라이선스 표기 없음 | 템플릿 문장은 복사하지 않고 13개 항목 형식만 따른다 |
+| 음악성 보조 지표(실험) | `audiobox_aesthetics` | CC-BY 4.0, Meta | scratch 환경에서만 사용. 프로젝트 의존성·자동 판정에 넣지 않음 |
+
+기준 서버와 우리 MLX 이식판의 프롬프트 조립·무조건부 입력·CFG(AR 1.5, top-k 50, DiT 1.7)·온도 1.0·30 step은
+같았고 정밀도만 달랐다. MXFP8 판본은 8B 구조 모델과 DiT까지 8비트로 계산했다. CFG는 조건부·무조건부
+logit 차이를 키우므로 양자화 오차도 함께 커진다. 공식 정밀도로 만든 감성 힙합 60초를 사용자가 처음으로
+"이제야 노래 같다"고 평가했다(caption·길이도 함께 바뀌어 단일 원인은 아니다). 전체 BF16+FP32를 한꺼번에
+올리면 36GB Mac의 25.5GB 한도를 넘어, 곡마다 구조 단계와 음색 단계를 차례로 적재한다. MXFP8 대비 60초
+생성은 약 8.5분에서 약 10분이 됐다. 같은 날 만든 MXFP8 + BF16 depth·DiT 부분 교체(overlay)는 이 결정으로
+대체해 코드에서 제거했다. 기존 `.runtime/models/minimax-music3-mxfp8`와 overlay 파일은 삭제하지 않았다.
 
 ## 2026-10-05 기본 엔진 전환
 

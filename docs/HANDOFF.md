@@ -1,6 +1,106 @@
 # 현재 상태와 다음 작업
 
-업데이트: 2026-10-05
+업데이트: 2026-10-06
+
+## 2026-10-06 공식 정밀도 전환과 "노래로 들린다"
+
+사용자는 Music 3를 계속 다듬기로 했다. 공식 예시곡(`assets/minimax_ttm.wav`)은 "앞 20초가 늘어진다,
+25초부터 멜로디가 나온다, 템포가 느리고 촌스럽다"고 평가했다. 선호 장르는 감성 힙합·시티팝이며
+(mood play·BE'O 계열의 멜로디), 늘어지는 도입을 싫어한다. Music 3는 긴 도입을 두고 곡을 짜므로
+30초 상한 요청은 대부분 도입부만 남는다. 공개 caption 예시 1,000개는 발라드 27%, Mandopop/C-pop 20%,
+K-pop 2%여서 장르를 강하게 지정하지 않으면 발라드 쪽으로 기운다.
+
+기준 서버 SGLang-Omni(commit `531ac8a2…`)와 대조한 결과 프롬프트·CFG·샘플링은 같고 정밀도만 달랐다
+(공식: AR bfloat16, condition encoder·DiT·vocoder float32). `mlx-community/MiniMax-Music3-bf16`(28.5GB,
+shard SHA-256 고정)을 받아 곡마다 구조 단계(18.5GB)와 음색 단계(10.1GB)를 차례로 적재하는 엔진으로
+교체했다(peak 19.4–19.6GB, 60초 598–623초). 같은 날 넣은 MXFP8 + BF16 overlay 경로는 제거했다.
+
+| 60초 곡(공식 정밀도) | 목소리 시작 | 반주−보컬(dB) | 보컬 단독 구간 | 가사·후렴 | 사용자 판정 |
+| --- | --- | --- | --- | --- | --- |
+| 감성힙합-1(층 쌓기 caption, 90 BPM) | 0.25초 | −8.7 | 33.8% | 100·100% | "이제야 노래 같다", 목소리 먼저라 멜로디가 늦고 촌스럽다 |
+| 감성힙합-2(악기 훅 시작, 96 BPM, 드라이 믹스) | 4.0초 | +1.9 | 2.9% | 100·100% | 음악 같다, 그러나 90년대 감성힙합처럼 old |
+| 시티팝-1(악기 훅 시작, 118 BPM) | 3.0초 | −1.2 | 3.8% | 89·100% | 음악 같다, 그러나 90년대 시티팝처럼 old |
+
+효과가 있던 caption 원칙: `[Intro]` + 첫 박부터 풀 비트 위 2마디 악기 훅, 반주는 모든 구간에서 연속,
+보컬은 비트 안에, 리듬은 촘촘하게(두 배 하이햇), "intimate / stripped back / spacious / layer by layer"
+금지. caption은 `.runtime/caption-v4-20261005/tools/caption_*60_v2.txt`, 음원은
+`exports/music3-official-precision-20261006/`에 있다. 앱 프리셋(`production_rules.py`)에는 아직 이
+원칙을 반영하지 않았다. 다음 과제는 (1) 현대적 사운드("old" 해소: 장르 어휘·악기·믹스·창법 실험),
+(2) 프리셋을 감성 힙합·시티팝 v2 원칙으로 교체하고 비우는 규칙(악기 수 줄이기·호흡 나누기 등)을 정리,
+(3) 사용자가 레퍼런스 음원을 주면 템포·균형·도입 길이를 로컬 측정해 목표값으로 쓰는 것이다.
+
+## 2026-10-06 사용자 청취: Music 3 전부 불합격
+
+사용자가 `exports/caption-ab-listening-20261006/`의 v3·v4·v4+BF16 9곡을 모두 불합격으로 평가했다.
+"반주가 중간중간 계속 비고, 목소리가 악기를 대체하며, 기승전결이 없다. 공짜라도 안 듣겠다." 기준 곡은
+처음부터 목소리가 모든 음을 채우고 피아노가 한 단계씩 쌓이며, 12초 무렵부터 화성·멜로디가 끊기지 않는다.
+
+UMXHQ로 보컬/반주를 나눠 후반부(15–30초) 보컬이 나오는 동안의 `반주 − 보컬` 중앙값을 쟀다. 기준 ACE
++2.1 dB, 좋아한 다른 ACE +4.0 dB, Music 3 9곡 −3.6 ~ −18.8 dB, MiniMax 공식 예시(`assets/minimax_ttm.wav`)
+−3.2 dB였다. 반주가 15 dB 이상 떨어지는 비율, onset 자기상관 펄스 선명도, 가사 일치, Audiobox CE는 이
+판정을 구분하지 못했다. v3·v4 제작 규칙과 프리셋의 "intimate / stripped back / spacious / room for the
+vocal / breaths between lines" 같은 문장이 반주를 비우는 방향으로 작용했다. 이를 모두 빼고 처음부터 목소리
++피아노, 층을 쌓는 연속 반주를 서술한 caption(`tools/dense_caption.txt`)으로 BF16 3회를 다시 만들었다.
+균형은 −12.5 / −18.8 / −0.2 dB로 한 곡만 기준에 가까웠다(`dense/`, 청취 사본 `dense-full-bed/`).
+Music 3는 공식 예시까지 보컬을 앞에 두는 경향이 있고 프롬프트만으로는 일관되게 바꾸지 못했다.
+
+## 2026-10-06 caption v4: Music 3 학습 형식으로 전환
+
+사용자가 다시 `en-202610071-enhanced-eight.wav`(ACE turbo, 30초)를 최소 기준으로 요청했다. 원인을
+찾던 중 MiniMax 공식 저장소의 `skills/music-caption-rewriter/templates` 1,000개가 모두 같은 형식임을
+확인했다. 괄호 없는 `Global Metadata / Vocal Details / Arrangement` 제목과 13개 고정 항목을 쓰고,
+`Basic Attributes: bpm is 85. key is Ab, and scale is minor. Hip-Hop / Melodic Rap.`처럼 메타를 적는다
+(upstream `clean_caption`의 `<|bpm 85|>` → `bpm is 85` 변환과 일치). 기존 v3는 `[Global Metadata]`
+괄호 제목, `Tempo: 84.0 BPM.`, `Duration: 30 seconds.`, "sing the supplied lyrics in order" 같은
+명령문을 보내 학습 분포 밖이었다. 조성 표기도 예시는 C·C#·D·Eb·E·F·F#·G·Ab·A·Bb·B만 쓴다.
+
+- `music3.py`: caption v4(`PROMPT_VERSION = 4`). 프리셋 `music3Schema`/`music3InstrumentalSchema`가
+  13개 항목을 서술형으로 채우고, 규칙 `music3Fields`(짧은 곡·연주곡 변형 포함)는 해당 항목에 문장을
+  더한다. 직접 쓴 스타일은 `Basic Attributes`의 곡 정체성이 되고, 이미 같은 3제목 형식으로 쓴 스타일은
+  항목별로 우선한다(메타는 동결된 요청 값). 보컬 성별은 직접 쓴 스타일에서만 `Singer A (Male)` 등으로
+  읽고, 없으면 성별을 지어내지 않는다. 템플릿 문장은 복사하지 않았다(저장소에 라이선스 표기가 없어
+  형식만 따른다). 이전 snapshot의 `music3Caption`·ACE caption은 규칙별 기본 항목에 그대로 넣는다.
+- `auto_quality.prepare_payload`: loop/cut/rap 의도는 사람이 쓴 스타일에서만 읽는다. v4 프리셋 문장
+  ("chord loop")이 `[Outro]` 태그 추가를 꺼 버리던 회귀를 막았다.
+
+실측(같은 영어 8줄·84 BPM·A minor·30초, seed 202610071–3, 조건당 1회, 재사용 없음): MXFP8 생성
+6회, 회당 237–263초, Metal peak 18.52GB. 음악성 보조 지표로 Meta Audiobox Aesthetics(CC-BY 4.0,
+scratch venv에서만 사용, 프로젝트 의존성 아님)의 CE(content enjoyment)를 쟀다. 기존 청취 평가 7곡에서
+CE는 기준 곡 7.89, "진짜 노래 같다" ACE 7.72, native60 7.61, "너무 old" 7.52, "도입 처참" 6.99,
+"확 낮아짐" 6.30이었다. 사용자가 "깨진다"고 한 ACE 곡(7.78)은 구분하지 못했다. 음량을 4.5 dB 바꿔도
+CE는 ±0.05 이내였다.
+
+| 조건 | CE s1 / s2 / s3 (평균) | PQ 평균 | 가사 순서 일치 | 후렴 일치 |
+| --- | --- | --- | --- | --- |
+| 기준 ACE | 7.89 | 8.39 | 100% | 100% |
+| v4 + BF16 음향 단계 | 7.63 / 7.71 / 7.09 (7.48) | 8.22 | 89 / 62 / 54% | 78 / 22 / 6% |
+| v4 (MXFP8) | 7.52 / 7.18 / 7.20 (7.30) | 8.20 | 86 / 51 / 35% | 72 / 0 / 0% |
+| v3 (MXFP8) | 6.67 / 7.21 / 6.85 (6.91) | 8.06 | 14 / 100 / 62% | 0 / 100 / 22% |
+
+v4는 CE 평균과 최저값을 올렸지만 기준 곡에는 미달이고, MXFP8끼리의 가사 일치는 seed마다 크게 갈려
+우열이 없다. 이전 세션이 CPU 검증만 해 둔 BF16 depth decoder·DiT overlay를 처음 실제로 적재해 같은
+v4 caption·seed로 생성했다(회당 212–231초, Metal peak 21.42GB). 가사 일치가 3/3 seed, CE가 2/3 seed에서
+올랐다. 같은 seed라도 depth 샘플이 달라져 곡이 갈라지므로 쌍 비교가 아니라 조건 비교다. 이에 따라
+`scripts/music3_render_overlay.py`(빌드·검증·적재, 최종 SHA-256 고정)를 저장소에 넣고 서버 기본값
+`MUSIC_ENGINE_MUSIC3_PRECISION=auto`로 BF16 음향 단계를 쓰게 했다. 원격에서 다시 계획한 헤더 SHA-256과
+크기가 기존 빌드와 같아 새 설치에서도 같은 가중치를 만든다. health·결과 metas·앱 설정 화면에 실제
+profile을 표시한다. 기존 기본 checkpoint와 다른 판본을 섞어 쓰지 않는다.
+30초 요청은 Music 3에 최대 frame 상한일 뿐이어서 긴 곡을 계획하다 잘리는 구조적 불리함이 있다.
+Music 3 원음은 −17.4~−18.3 LUFS(기준 −13.6), true peak −1~−3.4 dBFS라 기준 음량에 맞추려면 limiter가
+필요하다. 청취용 사본은 `exports/caption-ab-listening-20261006/`에 음량을 낮추는 방향으로만 맞추고
+seed별로 세 조건을 무작위 A/B/C로 섞었다(`key.json`). 사람의 음악 판정은 아직 없다.
+앱과 같은 경로의 실제 검증으로 `scripts/compare_music3_quality.py --recipes native`를 기본 정밀도(auto →
+BF16 음향 단계) 서버에서 실행했다. 요청에 caption v4·`mxfp8-global-lm+bf16-render`·`real-inference`가
+기록되고 `[Outro]`가 붙었으며 214초, 가사 순서 86%·후렴 72%, 사람 평가 `unreviewed`였다. 기준 곡은
+`projects/caption-v4-bf16-benchmark-20261006`에 재생용으로 들어 있어 작업실에서 같은 위치를 비교할 수 있다.
+이 곡의 CE는 6.86으로 같은 seed의 프리셋 단독 caption(7.63)보다 낮았다. 이 레시피는 규칙 10개를 모두 켜
+프리셋과 비슷한 문장이 겹친다. 한 번의 관찰이라 원인을 확정하지 않았다. 같은 설정 안에서도 CE가
+6.9–7.7로 흩어지므로, 평균 개선만으로 최소 수준을 보장할 수 없다. 다음 후보는 여러 후보를 만들고
+기준 미달을 거르는 품질 하한(사용자 청취로 지표를 검증한 뒤)이다.
+기록: `.runtime/caption-v4-20261005/`(`ref30/`, `bf16/`, `pipeline-native/report.json`, 분석·점수 JSON,
+`tools/` 실험 스크립트).
+
+최종 검사: Python **458개**, 앱 **98개**, 문법·타입·앱 빌드 통과.
 
 ## 2026-10-05 Music 3 음악성 개선과 기준 곡 비교
 

@@ -3,7 +3,7 @@
 ## 2026-10-05 Music 3 전환
 
 기본 생성은 `Music3Client` → 인증된 `127.0.0.1:18002` task API → 고정 판본의
-`mlx-audio`와 `mlx-community/MiniMax-Music3-mxfp8`로 실행한다. 프로젝트 `.venv`와 추론용
+`mlx-audio`와 `mlx-community/MiniMax-Music3-bf16`으로 실행한다(구조 BF16 → 음색 FP32 단계별 적재). 프로젝트 `.venv`와 추론용
 `.runtime/minimax-music3/.venv`, 검사 `.runtime/quality/.venv`는 분리한다.
 
 Electron main은 `scripts/start_music3_api.sh`의 프로세스 그룹을 소유하고, 모델 적재 전·후의
@@ -18,8 +18,9 @@ renderer에는 키·임의 파일 경로·명령 실행 능력을 주지 않는�
 제작 규칙과 songPlan은 Global Metadata / Vocal Details / Arrangement로 매핑한다. 표현 지시는
 caption에 옮기고 태그와 실제 가사는 독립 줄로 나눠 모델의 가사 유실을 막는다. 원문·단어 순서와
 과거 요청은 보존하고 실제 준비본·변경 사항은 새 요청에 기록한다. Music 3에는 ACE 전용 LM·
-thinking·CFG 설정을 전달하지 않는다. caption v3는 프리셋·규칙의 Music 3용 음악 설명을 요청에
-동결하며, 이전 snapshot에 이 설명이 없으면 그 snapshot의 기존 설명을 사용한다. 시간·마디·
+thinking·CFG 설정을 전달하지 않는다. caption v4는 모델 학습 형식의 13개 항목으로 렌더링한다.
+프리셋의 `music3Schema`와 규칙의 `music3Fields`를 요청에 동결하며, 이전 snapshot에 이 항목이 없으면
+그 snapshot의 기존 문장(`music3Caption` 또는 ACE caption)을 규칙별 기본 항목에 넣는다. 시간·마디·
 음절 수 추정은 계획에 보존하되 모델에는 실제 가사 구간의 역할·선율·표현을 안내한다.
 상한은 300초이며 EOS에 따른 실제 길이를 기록하고
 무음 padding으로 길이를 맞추지 않는다.

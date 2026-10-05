@@ -6,6 +6,17 @@ The memory-bounded autoregressive loop and acoustic chunk execution in
 specifically `mlx_audio/music/models/minimax_music3/ar.py` and
 `mlx_audio/music/models/minimax_music3/minimax_music3.py`.
 
+The staged precision (AR in bfloat16, acoustic stage in float32) follows the
+reference [SGLang-Omni](https://github.com/sgl-project/sglang-omni) MiniMax Music 3
+pipeline (Apache-2.0); no SGLang-Omni code is copied. Weights are the
+[mlx-community/MiniMax-Music3-bf16](https://huggingface.co/mlx-community/MiniMax-Music3-bf16)
+conversion at revision `83a5f2d365673689df5c8f36e21e108751fd92ea`, governed by the
+MiniMax-Music3 Community License.
+
+The caption field layout follows the published
+[music-caption-rewriter](https://github.com/MiniMax-AI/MiniMax-Music3/tree/main/skills/music-caption-rewriter)
+schema. No template text is copied into this repository.
+
 The upstream source license is reproduced below. Model weights are downloaded
 separately and remain governed by the MiniMax-Music3 Community License; the source
 license does not grant additional rights to those weights.

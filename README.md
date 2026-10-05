@@ -1,7 +1,7 @@
 # local-music-engine
 
 Apple Silicon Mac에서 곡을 만들고, 들어 보고, 가사와 편곡을 다듬는 로컬 제작 엔진과 데스크톱 앱이다.
-기본 생성 엔진은 **MiniMax Music 3 · native MLX · MXFP8**이다. 설명에서 제목·스타일·가사
+기본 생성 엔진은 **MiniMax Music 3 · native MLX · 공식 정밀도(BF16 구조 + FP32 음색)**이다. 설명에서 제목·스타일·가사
 초안을 준비하고, 감성 힙합·신나는 팝 제작 규칙을 골라 새 곡을 만든다. 한국어와 영어 가사를
 지원한다. 발음과 음악적 완성도는 생성한 음원을 직접 들어 확인한다.
 
@@ -17,7 +17,7 @@ Apple Silicon Mac에서 곡을 만들고, 들어 보고, 가사와 편곡을 다
 
 ```bash
 chmod +x scripts/*.sh app.sh
-./scripts/bootstrap_music3.sh  # 독립 Python 3.12 환경과 고정 판본의 약 13GB Music 3 모델 준비
+./scripts/bootstrap_music3.sh  # 독립 Python 3.12 환경과 고정 판본의 약 28.5GB Music 3 BF16 모델 준비(SHA-256 검증)
 ./app.sh                      # 프로젝트 Python·Electron 환경 준비, 앱 빌드 및 실행
 ```
 
@@ -26,9 +26,13 @@ chmod +x scripts/*.sh app.sh
 음원·가사·프로젝트·모델·로그는 Git에 넣지 않는다. 생성과 품질 검사에서 음원·가사를 외부 API에
 업로드하지 않는다. 최초 모델 다운로드에는 인터넷이 필요하다.
 
-모델은 `mlx-community/MiniMax-Music3-mxfp8`의 고정 revision을 쓴다. 커뮤니티 MLX 구현으로
-8B 구조 모델과 음향 합성 구성요소를 함께 실행한다. 8B 모델 규모와 MXFP8 가중치 정밀도는
-서로 다른 개념이며, 모델 파일 크기는 실행 중 최대 메모리와 같지 않다.
+모델은 `mlx-community/MiniMax-Music3-bf16`의 고정 revision을 쓴다. 정밀도는 MiniMax의 기준 서버
+(SGLang-Omni)와 같다. 곡 구조를 만드는 8B global LM·0.6B local LM은 BF16, 음색을 만드는 condition
+encoder·DiT·vocoder는 FP32로 계산한다. 두 단계를 함께 올리면 36GB Mac의 한도를 넘으므로 곡마다 구조
+단계(약 18.5GB)를 올려 생성하고 내린 뒤 음색 단계(약 10GB)를 올려 렌더링한다. 쉬는 동안에는 모델을
+메모리에 두지 않는다. 60초 곡은 약 10분(구조 약 3분 + 음색 약 7분), 생성 peak은 약 19.4GB였다.
+`MUSIC_ENGINE_MUSIC3_ACOUSTIC_DTYPE=bfloat16`은 음색 단계를 BF16으로 계산하는 빠른 모드다. 실제 정밀도는
+health·설정 화면·결과 metadata에 남는다.
 [판본과 라이선스](docs/DECISIONS.md), [전환과 실측](docs/HANDOFF.md)을 참고한다.
 
 앱은 `scripts/start_music3_api.sh`로 `127.0.0.1:18002` 서버를 켜고, 자기가 켠 서버만 종료한다.
@@ -76,12 +80,18 @@ WAV 다운로드만 제공하며, 브라우저 Origin·임의 파일 경로·명
 싱잉랩 구절에서 노래하는 후렴으로, 신나는 팝은 밝은 선율과 탄력 있는 프레이징으로 안내한다.
 선율 규칙은 도입에서 후렴의 주제를 예고하고, 후렴의 리듬·선율 동기와 응답 구절을 반복하도록 안내한다.
 
-Music 3에는 안내를 **Global Metadata / Vocal Details / Arrangement**의 구조화된 음악 설명으로
-보낸다. 구간의 표현 지시는 편곡 설명에 옮기고 가사에는 `[Verse]`, `[Chorus]` 같은 단순한 태그를
-쓴다. ACE 전용 LM·샘플링 옵션은 전달하지 않는다.
-현재 caption v3는 숫자 시간표 대신 실제 가사 구간의 음악적 역할을 전달한다. 추정 시간·마디·
-음절 수는 기록과 미리보기에 남긴다. 지시의 효과는 후보별로 확인하며 음악성을 보증하지 않는다.
-[Music 3 입력 계약](https://huggingface.co/MiniMaxAI/MiniMax-Music3)을 따른다.
+Music 3에는 안내를 모델 학습 형식의 구조화된 음악 설명(caption v4)으로 보낸다. MiniMax가 공개한
+[caption 예시 1,000개](https://github.com/MiniMax-AI/MiniMax-Music3/tree/main/skills/music-caption-rewriter)는
+모두 괄호 없는 `Global Metadata / Vocal Details / Arrangement` 제목과 고정된 13개 항목
+(`Basic Attributes: bpm is 84. key is A, and scale is minor. Hip-Hop / Melodic Rap.`,
+`Vocal Gender & Timbre: Singer A (Male). …`, `Primary:`, `Groove & Foundation Progression:` 등)을 쓴다.
+프리셋은 이 항목을 서술형으로 채우고, 규칙은 해당 항목에 문장을 더한다. 직접 쓴 스타일은 곡의 정체성으로
+`Basic Attributes`에 들어가며, 이미 같은 형식으로 쓴 스타일은 항목별로 그대로 쓴다. 보컬 성별은 직접
+쓴 스타일에서만 읽는다. 조성은 예시와 같은 표기(Bb·Eb·Ab·F#·C#)로 맞춘다. `Duration:`·
+"가사를 순서대로 부르라" 같은 명령문은 보내지 않는다. 구간 표현 지시는 편곡 항목에 옮기고 가사에는
+`[Verse]`, `[Chorus]` 같은 단순한 태그를 쓴다. ACE 전용 LM·샘플링 옵션은 전달하지 않는다.
+추정 시간·마디·음절 수는 기록과 미리보기에 남긴다. 지시의 효과는 후보별로 확인하며 음악성을
+보증하지 않는다. [Music 3 입력 계약](https://huggingface.co/MiniMaxAI/MiniMax-Music3)을 따른다.
 
 AI 도우미가 없으면 로컬 규칙으로 수정 가능한 초안을 제공한다. 초안을 위해 ACE 모델을 올리거나
 Music 3에 없는 작사 API를 호출하지 않는다. 자유로운 작사는 선택한 로컬 도우미를 쓸 수 있다.
