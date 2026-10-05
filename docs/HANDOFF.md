@@ -22,6 +22,23 @@ padding하고 27.3–180초를 새로 만든 뒤 원곡 0–29.3초를 보존하
 메모리 한도 안에서 다시 시도한다. 과거 XL은 적재 peak 때문에 이 Mac에서 켜지지 않았다.
 사용하지 않는 `.runtime/models/minimax-music3-mxfp8`(13GB)와 BF16 overlay(5.7GB)는 사용자 요청으로 삭제했다.
 
+### 다음 세션 계획: ACE XL 비교(사용자 결정)
+
+사용자는 멜로디·완성도 개선을 위해 ACE XL을 쓰기로 했고, **xl-turbo와 xl-sft를 둘 다 받아 비교**한다.
+다운로드는 하지 않았으며 다음 세션에서 처음부터 시작한다.
+
+- 모델: `ACE-Step/acestep-v15-xl-turbo`(확인 시 revision `d4a0b288b83ebb7e25a8c0b32c573c22e134e8ee`,
+  4 shard 약 20GB, MIT, 8 step·CFG 없음)와 `ACE-Step/acestep-v15-xl-sft`(50 step·CFG). 공식 표에서 둘 다
+  품질 Very High, 다양성 Medium이다. 멜로디·구조는 두 경우 모두 기존 4B 5Hz LM이 계획한다.
+- 메모리: 과거 XL 실패 원인은 FP32 PyTorch DiT와 MLX 사본, 4B LM이 함께 적재되는 순간 peak(47GB)다.
+  DiT를 MLX로 변환하고 PyTorch 사본을 버린 뒤 LM을 올리는 순서로 바꾸고, 필요하면 MLX DiT를 BF16으로
+  둬 상주 약 19GB를 목표로 한다. `scripts/ace_api_server.py`의 해제 시점을 앞당기는 것부터 본다.
+- 주의: 이 런타임에서 `acestep-v15-sft`·`acestep-v15-xl-sft`는 CFG·LM 유무와 관계없이 보컬이 없는
+  곡을 냈다(보컬/반주 −18~−53 dB, 2026-09-24 기록). 한국어 음질 문제와는 별개다. xl-sft는 이 원인부터 찾는다.
+- 비교: 기준 곡과 같은 영어 8줄·84 BPM·A minor·seed 202610071·같은 제작 규칙으로 turbo / xl-turbo /
+  xl-sft 30초를 만들고 음량을 맞춰 블라인드로 들려준다. 좋으면 XL로 3분 연장을 다시 만들고 40초 부근
+  끊김을 확인한다.
+
 ## 2026-10-06 공식 정밀도 전환과 "노래로 들린다"
 
 사용자는 Music 3를 계속 다듬기로 했다. 공식 예시곡(`assets/minimax_ttm.wav`)은 "앞 20초가 늘어진다,
