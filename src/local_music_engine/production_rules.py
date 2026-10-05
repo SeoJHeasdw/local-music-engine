@@ -93,8 +93,8 @@ RULES: tuple[dict[str, Any], ...] = (
         "description": "짧은 선율의 반복과 후렴의 상승·해소를 안내해 기억에 남는 멜로디를 유도해요.",
         "caption": "recognizable melodic hook, recurring sung motif, chorus lift and melodic resolution",
         "instrumentalCaption": "recognizable melodic theme, recurring motif, melodic lift and resolution",
-        "music3Caption": "A memorable short sung motif; the chorus melody rises then settles into a satisfying resolution, returning with the same contour at each written chorus.",
-        "music3InstrumentalCaption": "A memorable short instrumental motif, developed through a clear rising-and-falling contour and satisfying melodic resolution.",
+        "music3Caption": "A distinctive short instrumental pickup previews the sung hook and establishes the groove. Across each written chorus, repeat a short melodic-and-rhythmic motif, answered by a gentle falling phrase; the final line resolves warmly.",
+        "music3InstrumentalCaption": "A distinctive short opening theme establishes the groove. Return to its melodic-and-rhythmic motif in the fuller reprise, answered by a gentle falling phrase; the final phrase resolves warmly.",
     },
     {
         "id": "expressive-performance", "label": "보컬 감정 살리기",

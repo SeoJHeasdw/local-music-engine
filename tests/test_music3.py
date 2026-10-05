@@ -93,7 +93,7 @@ def test_music3_maps_every_rule_to_correct_caption_section_and_plain_lyrics(tmp_
     assert "Spacious drums, bass and one main chord instrument" in arrangement
     for rule in frozen["music3ProductionGuidance"]["rules"]:
         assert rule["caption"] in frozen["prompt"] and rule["native"] is True
-    assert "emotionally connected lead" in vocals and "memorable short sung motif" in arrangement
+    assert "emotionally connected lead" in vocals and "pickup previews the sung hook" in arrangement
     assert frozen["sourceLyricsOriginal"] == lyrics
     assert frozen["lyrics"].splitlines() == lyrics.splitlines()
     assert "Verse: restrained" in arrangement and "Chorus: fuller" in arrangement
@@ -455,7 +455,7 @@ def test_music3_native_melody_and_performance_controls_are_independent_and_froze
                                    target_duration_seconds=30, production_rules=selection)
     frozen = _frozen_generation_payload(store.load(), seed=1, model=MODEL, lm_model="unused")
     assert frozen["sourceLyricsOriginal"] == frozen["lyrics"] == raw
-    assert "rises then settles" in frozen["prompt"] and "intentional dynamics" in frozen["prompt"]
+    assert "pickup previews the sung hook" in frozen["prompt"] and "intentional dynamics" in frozen["prompt"]
     original = deepcopy(frozen)
     replacement = deepcopy(production_rules.RULES)
     for rule in replacement:
@@ -503,8 +503,37 @@ def test_music3_instrumental_hook_has_no_sung_or_emotional_vocal_direction(tmp_p
     frozen = _frozen_generation_payload(store.load(), seed=1, model=MODEL, lm_model="unused")
     assert frozen["lyrics"] == "[Instrumental]"
     assert frozen["productionRules"]["skippedRuleIds"] == ["expressive-performance"]
-    assert "instrumental motif" in frozen["prompt"]
+    assert "opening theme establishes the groove" in frozen["prompt"]
+    assert "Return to its melodic-and-rhythmic motif" in frozen["prompt"]
     assert "sung motif" not in frozen["prompt"] and "emotionally connected lead" not in frozen["prompt"]
+
+
+@pytest.mark.parametrize("chorus_lines", [2, 4])
+def test_music3_intro_hook_guide_preserves_short_and_full_chorus_words(tmp_path, chorus_lines):
+    from local_music_engine import production_rules
+    from local_music_engine.music3 import translate_payload
+    chorus = ["Stay until the morning", "Let the cold wind go", "Step into the daylight", "We can take it slow"]
+    raw = "[Verse]\nCity lights are fading\nYour voice stays with me\n\n[Chorus]\n" + "\n".join(chorus[:chorus_lines])
+    selection = {"version": 1, "presetId": None, "ruleIds": ["melodic-hook"]}
+    store = ProjectStore.initialize(tmp_path, title="Intro hook", lyrics=raw,
+                                   style_prompt="emotional hip hop", target_duration_seconds=60,
+                                   production_rules=selection)
+    frozen = _frozen_generation_payload(store.load(), seed=1, model=MODEL, lm_model="unused")
+    caption = frozen["music3ProductionGuidance"]["rules"][0]["caption"]
+    assert "pickup previews the sung hook" in caption and "short melodic-and-rhythmic motif" in caption
+    assert "final line resolves warmly" in caption
+    assert "one and three" not in caption and "four" not in caption
+    assert frozen["lyrics"] == frozen["sourceLyricsOriginal"] == raw
+    assert store.load()["inputs"]["lyricsOriginal"] == raw
+    # Earlier native snapshots remain distinct and retain their own hook direction.
+    old = deepcopy(frozen)
+    old_caption = "A memorable short sung motif; the chorus melody rises then settles into a satisfying resolution, returning with the same contour at each written chorus."
+    old["productionRules"]["rules"][0]["music3Caption"] = old_caption
+    before = deepcopy(old)
+    prepared = translate_payload(old)
+    assert old == before and old_caption in prepared["prompt"]
+    assert "pickup previews the sung hook" not in prepared["prompt"]
+    assert prepared["lyrics"] == raw
 
 
 def test_music3_six_default_rules_also_receive_frozen_preset_musical_direction(tmp_path, monkeypatch):

@@ -1,4 +1,4 @@
-"""Opt-in real generation + local quality checks; start ACE separately first.
+"""Opt-in real Music 3 generation + local quality checks; start Music 3 separately first.
 
 uv run python scripts/smoke_auto_quality.py --output-dir .runtime/auto-smoke-001
 Creates a fresh project only. No fake client, human approval or external audio API.
@@ -11,7 +11,7 @@ import json
 import time
 from pathlib import Path
 
-from local_music_engine.ace_adapter import AceStepClient
+from local_music_engine.music3_adapter import Music3Client
 from local_music_engine.auto_quality import quality_policy
 from local_music_engine.storage import ProjectStore, atomic_write_json
 from local_music_engine.workflow import export_selected, generate_candidates, resume_latest_batch
@@ -20,11 +20,11 @@ from local_music_engine.workflow import export_selected, generate_candidates, re
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--base-url", default="http://127.0.0.1:18001")
-    parser.add_argument("--duration", type=int, default=30, choices=range(10, 601))
+    parser.add_argument("--base-url", default="http://127.0.0.1:18002")
+    parser.add_argument("--duration", type=int, default=30, choices=range(10, 301))
     parser.add_argument("--seed", type=int, default=64031)
     args = parser.parse_args()
-    health = AceStepClient(args.base_url).health()
+    health = Music3Client(args.base_url).health()
     output = args.output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=False)
     root = output / "song"

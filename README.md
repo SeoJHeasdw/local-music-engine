@@ -1,180 +1,147 @@
 # local-music-engine
 
-Apple Silicon Mac에서 한국어 곡을 만들고, 들어 보고, 말로 고치는 로컬 제작 엔진과 데스크톱 앱이다.
-음악 용어를 몰라도 된다. "비 오는 밤 혼자 걷는 잔잔한 발라드"처럼 설명하면 초안이 채워지고,
-"후렴 가사가 웅얼거려요"처럼 들은 그대로 적으면 도우미가 엔진이 알아듣는 스타일 태그·구간·
-변화 정도로 바꿔 보여 준다. 실행 전에 무엇이 바뀌는지 태그 단위로 확인하고 고칠 수 있다.
+Apple Silicon Mac에서 곡을 만들고, 들어 보고, 가사와 편곡을 다듬는 로컬 제작 엔진과 데스크톱 앱이다.
+기본 생성 엔진은 **MiniMax Music 3 · native MLX · MXFP8**이다. 설명에서 제목·스타일·가사
+초안을 준비하고, 감성 힙합·신나는 팝 제작 규칙을 골라 새 곡을 만든다. 한국어와 영어 가사를
+지원한다. 발음과 음악적 완성도는 생성한 음원을 직접 들어 확인한다.
 
-원본 버전은 덮어쓰지 않는다. 구간 수정은 새 수정본이 되고, 원본과 같은 위치를 번갈아 들을 수
-있다. 요청 원문, 실행한 수정안, 결과 버전, 사람 평가가 모두 `project.json`에 남는다. 자동 검사
-통과는 발음이나 음악성 승인을 뜻하지 않는다.
-
-생성 중에도 평가·메모가 즉시 저장된다. 앱이나 CLI가 강제로 종료되면 중단 상태를 구분하고,
-작업실의 **이어서 만들기**에서 처음 요청한 가사·스타일·길이로 복구한다. 그 뒤 곡 설정을
-바꿨어도 진행 중이던 작업의 입력은 달라지지 않는다. 자동 검사의 무음·최대 음량 경고는 시간
-구간을 표시하며, 버튼으로 그 부분을 반복해 들을 수 있다.
-
-엔진은 ACE-Step 1.5(native MLX)이며 M4 Max에서 전체 생성과 구간 repaint를 실제 검증했다.
-**만들기**를 누르면 가사 준비, 음원 검사, 로컬 받아쓰기 비교, 필요한 재시도와 추천까지
-진행한다. 버전마다 첫 생성과 재시도를 합쳐 최대 4회이며, 검사 자체가 불확실하면 그 이유로
-다시 만들지 않는다. 가사가 아주 많으면 원문을 담도록 실제 생성 길이를 늘릴 수 있다.
-원래 목표 길이와 적용한 길이는 함께 기록한다. 랩·루프 의도가 명시된 요청은 이 길이 조정에서
-제외한다. [자동 품질 관리의 동작과 한계](docs/AUTO-QUALITY.md)를 참고한다.
+원본과 모든 버전을 보존한다. 요청·생성·자동 검사·사람 평가·최종본 선택의 정본은
+`project.json`이다. 자동 검사 통과와 사람 청취 승인은 별도이며, 새 음원은 `unreviewed`다.
+기존 ACE로 만든 곡도 재생·비교·평가·선택·내보낼 수 있다.
 
 ## 준비
 
-- Apple Silicon Mac, [uv](https://docs.astral.sh/uv/), Node.js, Git,
-  [FFmpeg](https://ffmpeg.org/) — 로컬 받아쓰기와 true peak·음량 측정에 사용
-- 선택: [Ollama](https://ollama.com)와 한국어를 잘 쓰는 모델(예: `qwen3.6:27b`). 켜면 한글 가사
-  초안과 자유 문장 피드백 해석을 맡는다.
+- Apple Silicon Mac, [uv](https://docs.astral.sh/uv/), Node.js, Git
+- [FFmpeg](https://ffmpeg.org/): 로컬 받아쓰기, true peak·음량 측정
+- 선택: Ollama 또는 OpenAI 호환 loopback LLM. 자유로운 가사 초안과 피드백 해석에 사용
 
 ```bash
 chmod +x scripts/*.sh app.sh
-./scripts/bootstrap_ace.sh   # ACE 런타임을 .runtime/에 설치. 첫 서버 시작 때 모델 약 17GB를 받는다
-./app.sh                     # 엔진 Python·Electron 환경을 준비하고 앱을 연다
+./scripts/bootstrap_music3.sh  # 독립 Python 3.12 환경과 고정 판본의 약 13GB Music 3 모델 준비
+./app.sh                      # 프로젝트 Python·Electron 환경 준비, 앱 빌드 및 실행
 ```
 
-가사가 있는 곡의 첫 자동 검사 때 별도의 `.runtime/quality/.venv`를 준비하고, MLX Whisper와
-UMXHQ 보컬 모델 가중치 약 **1.65GB**를 받는다(패키지 설치 용량은 별도). 음원과 가사는
-이 과정에서도 업로드하지 않는다. 미리 준비하려면 `./scripts/bootstrap_quality.sh`를 실행한다.
-설치나 받아쓰기가 실패하면 음원을 보존하고 **일부 자동 확인 어려움**으로 표시한다.
-연주곡은 받아쓰기 모델을 올리지 않고 음원만 검사한다.
+환경은 루트 `.venv`, Music 3의 `.runtime/minimax-music3/.venv`, 품질 검사의
+`.runtime/quality/.venv`로 분리한다. 과거 ACE 환경과 모델은 삭제하지 않는다.
+음원·가사·프로젝트·모델·로그는 Git에 넣지 않는다. 생성과 품질 검사에서 음원·가사를 외부 API에
+업로드하지 않는다. 최초 모델 다운로드에는 인터넷이 필요하다.
 
-앱이 ACE 서버를 직접 켜고(`127.0.0.1:18001`에만 바인딩), 앱을 닫으면 앱이 켠 서버만 끈다.
-서버는 켤 때 DiT·LM 하나씩만 올린다. 앱은 설정의 모델로 켜고, 터미널에서는
-`MUSIC_ENGINE_ACE_DIT_MODEL`·`MUSIC_ENGINE_ACE_LM_MODEL`로 고른다. 켜진 모델과 요청 모델이 다르면
-엔진이 생성을 거부한다. 기본값은 `acestep-v15-turbo` + `acestep-5Hz-lm-4B`(약 22GB)다.
+모델은 `mlx-community/MiniMax-Music3-mxfp8`의 고정 revision을 쓴다. 커뮤니티 MLX 구현으로
+8B 구조 모델과 음향 합성 구성요소를 함께 실행한다. 8B 모델 규모와 MXFP8 가중치 정밀도는
+서로 다른 개념이며, 모델 파일 크기는 실행 중 최대 메모리와 같지 않다.
+[판본과 라이선스](docs/DECISIONS.md), [전환과 실측](docs/HANDOFF.md)을 참고한다.
 
-음악 엔진과 로컬 AI 도우미(예: Ollama `qwen3.6:27b`, 약 17GB)는 36GB Mac에 함께 올라가지 않는다.
-앱은 도우미를 부를 때 자기가 켠 엔진을 잠시 끄고, 답을 받으면 다시 켠다(약 40초). 엔진을 켜기
-전에는 메모리에 남은 도우미 모델을 내린다. 곡을 만드는 중에는 도우미를 부르지 않으며, 앱 밖에서
-켠 엔진이 떠 있으면 도우미 대신 그 엔진을 끄라고 안내한다. CLI로 `draft`·`plan --assistant ollama`를
-쓸 때는 직접 엔진을 끈 뒤 부른다.
-이미 터미널에서 켠 서버가 있으면 그대로 쓴다.
+앱은 `scripts/start_music3_api.sh`로 `127.0.0.1:18002` 서버를 켜고, 자기가 켠 서버만 종료한다.
+이미 켜 둔 같은 Music 3 서버는 외부 소유로 사용한다. 다른 엔진이나 모델이 응답하면 준비된
+서버로 인정하지 않는다. 한 번에 한 곡을 계산하며 기본 실행에는 ACE·PyTorch가 필요하지 않다.
 
-앱이 켜는 ACE 서버는 인증을 요구하며 생성·진행 조회·초안·음원 다운로드만 제공한다.
-인증 키는 `.runtime/ace-api-key`에 이 사용자만 읽을 수 있는 파일로 저장하고 앱 main과 CLI가
-공유한다. 브라우저에서 ACE에 직접 요청하는 경로와 학습·데이터셋·모델 관리 API는 닫혀 있다.
-기존에 켜 둔 서버에는 새 정책이 적용되지 않으므로 서버를 다시 켠다. 별도로 관리하는 인증 서버는
-앱과 CLI 실행 환경의 `MUSIC_ENGINE_ACE_API_KEY`(또는 `ACESTEP_API_KEY`)로 연결한다.
+큰 로컬 AI 도우미를 부를 때 앱은 자기가 켠 음악 엔진을 잠시 끄고, 답을 받으면 다시 켠다.
+외부에서 켠 서버는 임의로 종료하지 않는다. 곡을 만드는 중에는 도우미를 호출하지 않는다.
+CLI에서 큰 도우미를 부를 때는 엔진을 직접 끈다.
+
+인증 키는 `.runtime/music3-api-key`의 사용자 전용 파일(0600)로 main·CLI·서버가 공유한다.
+별도 키는 `MUSIC_ENGINE_MUSIC3_API_KEY`, 키 파일은 `MUSIC_ENGINE_MUSIC3_API_KEY_FILE`로 지정한다.
+renderer에는 키를 전달하지 않는다. 서버는 인증된 health·생성·진행 조회와 opaque ID의 완료
+WAV 다운로드만 제공하며, 브라우저 Origin·임의 파일 경로·명령·모델 관리 API는 거부한다.
 
 ## 앱
 
 | 화면 | 하는 일 |
 | --- | --- |
-| 내 곡 | 곡 목록, 버전·수정·좋아요 수, Finder에서 곡 폴더 열기, 다른 폴더의 곡 열기 |
-| 새 곡 만들기 | 설명 → 초안(제목·스타일·가사) → 스타일 칩으로 다듬기 → 만들기 → 자동 검사·필요한 재시도·추천 |
-| 작업실 | 추천본과 자동 생성 이력, 버전 계보, 파형 재생·구간 선택, 원본↔정리본·수정본 비교, 고치기·평가·검사, 최종본, WAV 내보내기 |
-| 설정 | 음악 엔진 켜기/끄기·기록, AI 도우미(규칙/Ollama/OpenAI 호환), 저장 위치, 기본값 |
+| 내 곡 | 기존·새 곡 목록, 다른 곡 폴더 열기, 버전·사람 평가 확인 |
+| 새 곡 만들기 | 설명과 언어 → 가사·스타일 초안 → 제작 규칙·전개 계획 → 전체 곡 생성 |
+| 작업실 | 파형·구간 반복·버전 비교, 가사·편곡을 바탕으로 새 전체 버전, 검사·평가·최종본·WAV 내보내기 |
+| 설정 | Music 3 상태·시작·종료·기록, AI 도우미, 저장 위치와 생성 기본값 |
 
-작업실 단축키: `Space` 재생, `←/→` 5초(Shift 1초), `↑/↓` 버전 이동, `C` 원본↔수정본,
-`L` 구간 반복, `F` 요청 입력, `Esc` 선택 해제. `⌘1–4` 화면 이동, `⌘N` 새 곡, `⌘,` 설정.
+기존 설정은 최초 실행 때 Music 3로 옮기고 원본을 백업한다. 저장 위치·AI 도우미·내보내기
+위치와 기존 곡 데이터는 보존한다. 요청 길이 상한은 **300초**다. 길이는 상한 요청이며 모델이
+끝 토큰을 먼저 내면 실제 음원이 더 짧아질 수 있다. 실제 길이는 artifact에 기록하고 무음을
+덧붙여 성공한 것처럼 표시하지 않는다.
 
-용어: **버전**은 같은 설정으로 만든 전체 곡 하나, **수정본**은 한 버전의 구간만 다시 만든 것,
-**최종본**은 WAV로 내보낼 버전이다(언제든 바꿀 수 있다).
+현재 공개 구현은 텍스트·가사로 **전체 곡 생성**을 지원한다. 음원 참조 커버·음색 복사·선택
+구간 repaint는 지원하지 않는다. 특정 버전을 바탕으로 새로 만들면 그 버전의 **가사·스타일·
+제작 규칙**을 사용한다. 기존 파형을 모델에 전달하지 않는다. 지원하지 않는 편집을 전체 생성으로
+몰래 바꾸지 않는다. 기존 ACE 요청도 Music 3 요청으로 재해석하지 않는다.
 
-자동 추천은 직접 고른 최종본과 별도로 남는다. 이미 고른 최종본과 사람 평가는 바꾸지 않는다.
-새 작업이 끝나면 추천본을 들어 볼 수 있고, 원본과 다른 시도는 **자동 생성 이력**에서 확인한다.
-가사 일치와 음원 측정 결과는 **검사**에 표시된다. 추천본의 재생본 정리는 원본을 보존한 새
-파일이며, 소리를 키우거나 곡의 쉼을 잘라내지 않는다.
+## 제작 규칙과 곡 계획
+
+감성 힙합은 84 BPM·A minor·4/4, 신나는 팝은 120 BPM·C Major·4/4를 제안한다. 직접 입력한
+음악 정보가 우선한다. 이 값은 제작 안내이며 실제 음원의 엄격한 보장이 아니다.
+
+박자 유지, 코드 반복, 단출한 악기 구성, 또렷한 보컬, 깨끗한 음색, 단순한 구성의 여섯 규칙을
+개별 선택할 수 있다. **구간별 전개 만들기**와 **가사 호흡 나누기**는 추가 옵션이다. 구간의 상대
+강약과 호흡을 안내하며, 긴 줄은 기존 띄어쓰기·문장부호에서만 나눠 단어와 순서를 보존한다.
+원문·준비본·계획·변경 내용은 따로 저장한다. 연주곡에는 보컬·호흡 규칙을 적용하지 않는다.
+**기억에 남는 선율**과 **보컬 감정 살리기**도 선택할 수 있다. 감성 힙합 프리셋은 편안한
+싱잉랩 구절에서 노래하는 후렴으로, 신나는 팝은 밝은 선율과 탄력 있는 프레이징으로 안내한다.
+선율 규칙은 도입에서 후렴의 주제를 예고하고, 후렴의 리듬·선율 동기와 응답 구절을 반복하도록 안내한다.
+
+Music 3에는 안내를 **Global Metadata / Vocal Details / Arrangement**의 구조화된 음악 설명으로
+보낸다. 구간의 표현 지시는 편곡 설명에 옮기고 가사에는 `[Verse]`, `[Chorus]` 같은 단순한 태그를
+쓴다. ACE 전용 LM·샘플링 옵션은 전달하지 않는다.
+현재 caption v3는 숫자 시간표 대신 실제 가사 구간의 음악적 역할을 전달한다. 추정 시간·마디·
+음절 수는 기록과 미리보기에 남긴다. 지시의 효과는 후보별로 확인하며 음악성을 보증하지 않는다.
+[Music 3 입력 계약](https://huggingface.co/MiniMaxAI/MiniMax-Music3)을 따른다.
+
+AI 도우미가 없으면 로컬 규칙으로 수정 가능한 초안을 제공한다. 초안을 위해 ACE 모델을 올리거나
+Music 3에 없는 작사 API를 호출하지 않는다. 자유로운 작사는 선택한 로컬 도우미를 쓸 수 있다.
 
 ## CLI
 
-앱의 모든 동작은 같은 CLI를 부른다. 명령마다 JSON 한 개를 출력한다.
+앱과 CLI는 같은 저장·생성·검사 흐름을 쓴다. 명령마다 JSON 한 개를 출력한다.
 
 ```bash
-uv run music-engine draft --query "비 오는 밤 혼자 걷는 잔잔한 발라드, 여자 목소리" --duration 90 \
-  --assistant ollama --assistant-model qwen3.6:27b
+uv run music-engine production-rules
+uv run music-engine draft --query "늦은 밤 감성 힙합" --duration 30 --vocal-language en
 uv run music-engine init projects/my-song --title "내 노래" --lyrics-file lyrics.txt \
-  --style "Korean ballad, calm, female vocal, piano" --duration 120
-uv run music-engine generate projects/my-song --seeds 101,102
-uv run music-engine status projects/my-song        # 버전 계보·사용한 스타일·피드백·작업
-uv run music-engine library --dir projects         # 곡 목록 (음원 해시 없이)
+  --style "emotional hip hop, warm piano, clear male melodic rap" --duration 60
+uv run music-engine generate projects/my-song --seeds 101
+uv run music-engine status projects/my-song
+uv run music-engine library --dir projects
 ```
 
-`generate`의 기본은 `--quality auto --quality-attempts 4`다. 위의 두 버전 요청은 버전마다
-최대 4회, 합쳐 최대 8회까지 생성할 수 있다. 뚜렷한 문제가 없으면 각 버전은 첫 생성에서
-끝난다. 가사 받아쓰기 없이 음원만 검사하려면 `--quality audio`, 기존 생성·무결성 검사만
-사용하려면 `--quality off`를 지정한다.
+`init`·`revise`·`draft`의 `--production-rules-json`으로 화면과 같은 규칙을 전달한다.
+기본 생성은 Music 3와 `--quality auto --quality-attempts 4`다. 버전마다 첫 생성·재시도를 합쳐
+최대 네 번이며 검사 불확실성만으로 다시 만들지 않는다. 모든 시도의 입력과 예산을 첫 batch에
+고정하고, 명시적인 재개도 예산을 늘리지 않는다. 자동 추천은 사람의 최종본 선택과 분리한다.
+[자동 품질 흐름과 한계](docs/AUTO-QUALITY.md)를 참고한다.
 
 ```bash
 uv run music-engine generate projects/my-song --seeds 101 --quality-attempts 2
 uv run music-engine generate projects/my-song --seeds 102 --quality audio
-```
-
-들은 뒤 사람의 판단은 따로 기록한다.
-
-```bash
-uv run music-engine review projects/my-song <candidate-id> --status approved --rating 4 --note "후렴 좋음"
+uv run music-engine generate projects/my-song --source-candidate-id <candidate-id> \
+  --seeds 103 --style "fuller chorus, clear lead vocal"
+uv run music-engine revise projects/my-song --title "새 제목" --duration 120
+uv run music-engine resume projects/my-song --job-id <batch-job-id>
+uv run music-engine recover projects/my-song
+uv run music-engine review projects/my-song <candidate-id> --status listened --note "후렴 좋음"
 uv run music-engine select projects/my-song <candidate-id>
 uv run music-engine undo-selection projects/my-song
-```
-
-고치기는 수정안을 먼저 보고 실행한다. 수정안은 아무것도 바꾸지 않는다.
-
-```bash
-uv run music-engine plan projects/my-song <candidate-id> \
-  --feedback "후렴 가사가 웅얼거려요" --start 30 --end 42 --strength medium
-# 수정안의 stylePrompt로 그 구간만 다시 만든다. 부모 버전은 그대로 남는다
-uv run music-engine repaint projects/my-song --candidate-id <candidate-id> \
-  --start 30 --end 42 --seed 201 --style "<수정안 stylePrompt>" --strength medium \
-  --feedback-json '{"text": "후렴 가사가 웅얼거려요", "candidateId": "<candidate-id>"}'
-# 곡 전체를 바꾸는 수정안이면 스타일을 고친 뒤 새 버전을 만든다
-uv run music-engine generate projects/my-song --seeds 301,302 --style "<수정안 stylePrompt>"
-```
-
-`--instruction`은 ACE의 작업 템플릿을 덮어쓰므로 요청 전달에 쓰지 않는다. 요청은 `--style`과
-`--strength`(light·medium·strong)로 전한다.
-
-`repaint`도 기본 `--quality auto`로 생성된 수정 음원 전체를 한 번 검사하고 정리본을 만든다.
-구간·가사·길이를 추가로 준비하거나 자동으로 다시 repaint하지 않는다. 확인할 부분은 경고로
-남기며 원곡·수정 원본·정리본과 사람의 최종본 선택을 보존한다.
-
-```bash
-uv run music-engine revise projects/my-song --title "새 제목" --duration 150   # 다음 버전부터 적용
 uv run music-engine export projects/my-song --output ~/Music/my-song.wav
-uv run music-engine inspect projects/my-song
-uv run music-engine resume projects/my-song   # 멈춘 생성만, 검증된 버전은 재사용
-uv run music-engine resume projects/my-song --job-id <batch-job-id>  # 특정 작업을 이어 만들기
-uv run music-engine recover projects/my-song  # 실행 프로세스가 없는 작업을 interrupted로 기록
 ```
 
-`resume`은 같은 작업의 재개 계보에 속한 완료 파일만 크기·SHA-256을 검사해 재사용한다.
-시드는 `0`부터 `4294967295`까지의 정수만 허용한다. ACE가 무작위 값으로 바꾸는 음수 시드는
-거부하며, 과거 음수 시드 작업은 재개 대신 새 생성이 필요하다.
-시도마다 새 batch가 남으며 현재 프로젝트 입력을 과거 값으로 되돌리지 않는다. 원래 입력을
-확인할 수 없는 아주 초기 프로젝트는 새 생성을 요청해야 한다.
-`generate --source-candidate-id <candidate-id>`는 특정 버전의 가사·길이·음악 설정을 바탕으로
-새 버전을 만든다. `repaint --lyrics`는 이번 수정본에만 적용한다.
+`--source-candidate-id`는 그 버전의 입력으로 새 전체 곡을 만든다. 새 생성은 과거 결과를
+묵시적으로 재사용하지 않는다. `resume`만 같은 계보·요청 fingerprint·파일 존재·크기·SHA-256이
+모두 일치하는 완료 결과를 재사용한다. export는 프로젝트 밖의 새 파일 이름만 허용한다.
 
-WAV를 외부로 내보낼 때는 곡 폴더 밖의 새 파일 이름을 고른다. 기존 파일, 원본 음원,
-`project.json`을 덮어쓰는 경로는 거부한다.
-내보내기 중단도 작업 기록으로 복구한다. 완료 기록 전에 남은 파일은 해당 작업이 만든 파일인지
-확인해 정리하고 같은 이름으로 다시 내보낼 수 있다. 사용자가 바꾼 파일과 완료된 내보내기는
-보존한다.
-이 수정 이전의 중단된 내보내기는 파일 소유권 기록이 없으므로 상태만 복구하고 남은 파일은
-보존한다. 같은 이름을 다시 쓸 수 없으면 새 파일 이름을 고른다.
+과거 ACE 환경은 명시적인 `--engine ace-step`에서만 사용한다. 과거 요청·음원·이력을 보존하기
+위한 호환 경로다. 과거 실측 실행기는 `scripts/smoke_real_engine.py`와
+`scripts/compare_production.py`로 남는다.
 
-## 에이전트로 다루기
+## 데이터와 검사
 
-코딩 에이전트는 사람과 같은 루프를 CLI로 돈다: `status`로 버전과 사용한 스타일을 읽고, 사람이
-남긴 평가·메모를 근거로 `plan`을 만들고, `repaint`/`generate`에 `--feedback-json`을 붙여 실행한
-뒤, 결과를 사람에게 들어 보라고 넘긴다. 에이전트는 음악성을 판정하지 않는다. `review`의
-`approved`/`rejected`는 사람이 들은 뒤에만 기록한다.
+- `project.json`은 같은 디렉터리의 임시 파일을 fsync한 뒤 원자적으로 교체한다.
+- 완료 artifact는 파일 존재·크기·SHA-256과 실제 sample 메타데이터로 검증한다.
+- 새 생성·후처리·export는 새 artifact다. 원본과 과거 revision을 덮지 않는다.
+- 새 후보는 자동 검사 결과와 관계없이 사람 청취 `unreviewed`다.
+- renderer는 main이 확인한 곡·버전 ID만 쓰며 임의 파일 접근·명령 실행 API를 받지 않는다.
+- 엔진과 도우미는 loopback만 허용하고 환경 프록시·HTTP 리다이렉트를 따르지 않는다.
+- 기존 `local-tts-engine`의 환경·모델·개인 음성을 사용하거나 변경하지 않는다.
 
-## 데이터 경계
-
-- `projects/`, `artifacts/`, `exports/`, `.runtime/`, 모델과 음원은 Git에서 제외된다.
-- artifact는 프로젝트 상대 경로·byte 수·SHA-256·실제 sample 메타데이터로 검증한다.
-- repaint/export/입력 변경은 과거 파일과 기록을 덮지 않고 새 artifact와 revision으로 남는다.
-- renderer는 파일 경로나 명령 실행 API를 받지 않는다. 곡·버전은 main이 목록으로 준 id로만 가리킨다.
-- 곡 변경 요청은 화면의 곡 id를 명시한다. 늦게 끝난 곡 열기·도우미 응답은 새로 연 곡이나
-  직접 바꾼 입력을 덮지 않는다.
-- AI 도우미와 엔진 주소는 이 Mac 안의 loopback 주소만 허용한다. 가사가 외부로 나가지 않는다.
-  Python의 환경 프록시를 사용하지 않으며 HTTP 리다이렉트를 따라가지 않는다.
-- 기존 `local-tts-engine`의 환경·모델·개인 음성은 사용하거나 변경하지 않는다.
-
-## 검사
+첫 보컬 검사에서 품질 환경에 MLX Whisper·UMXHQ 가중치 약 1.65GB를 준비한다. 미리 준비하려면
+`scripts/bootstrap_quality.sh`를 실행한다. 분석 실패 시 음원을 보존하고 불확실성을 표시한다.
+연주곡은 받아쓰기 모델을 올리지 않는다. PCM·음량·가사 비교는 기술적 결함을 찾는 도구이며
+선율의 매력이나 음악성을 자동 승인하지 않는다.
 
 ```bash
 uv sync --python 3.12.12 --group dev
@@ -185,22 +152,33 @@ npm run test:app
 npm run build:app
 ```
 
-실제 추론 검사는 ACE 서버를 따로 켠 뒤 실행한다. 아래 명령은 새 폴더에 실제 음원을 만들며
-생성 중 저장, 원래 입력 유지, 검증 후 재사용, repaint, export를 검사한다.
+실제 추론은 모델 없는 계약·회귀 검사와 따로 실행한다. 서버를 켜고 새 출력 폴더를 지정한다.
+아래 검사는 영어 30초·한국어 30초·새 2절이 있는 영어 60초를 각각 한 번 생성하고, 자동 검사·
+export·검증된 명시적 재개·원문 보존·사람 미청취 상태를 확인한다.
 
 ```bash
-./scripts/start_ace_api.sh
-# 다른 터미널에서 (아직 없는 출력 폴더를 지정)
-uv run python scripts/smoke_real_engine.py --output-dir .runtime/smoke-001
+./scripts/start_music3_api.sh
+# 다른 터미널에서
+uv run python scripts/smoke_music3.py --output-dir .runtime/music3-smoke-new
+```
+
+좋다고 평가한 기존 후보를 기준으로 비교하려면 아래 실행기를 사용한다. 기준 파일의 존재·크기·
+SHA-256을 확인해 새 프로젝트에 **재생용으로 명시적으로 복사**하고, 같은 가사·요청 길이·BPM·
+조성·seed로 두 Music 3 후보를 각각 한 번 새로 생성한다. 원본 파형은 모델에 보내지 않는다.
+작업실의 비교 목록에서 같은 위치를 번갈아 듣고 평가할 수 있다. 보고서의 음악 기준 판정은
+직접 듣기 전까지 `pending_human_listening`이며 자동 가사 검사 결과로 승인하지 않는다.
+
+```bash
+uv run python scripts/compare_music3_quality.py \
+  --baseline-project projects/reference-song --baseline-candidate candidate_id \
+  --project-dir projects/music3-comparison-new --output-dir .runtime/music3-comparison-new
 ```
 
 ## 문서
 
-- [구현 계획](PLAN.md)
 - [아키텍처와 데이터 계약](docs/ARCHITECTURE.md)
 - [품질 검사와 청취 계약](docs/QUALITY.md)
-- [자동 품질 관리·재시도·로컬 모델과 실제 검증](docs/AUTO-QUALITY.md)
+- [자동 품질 관리·재시도·실제 검증](docs/AUTO-QUALITY.md)
 - [모델·라이선스 결정](docs/DECISIONS.md)
-- [P0 Apple Silicon 실측](docs/P0-VALIDATION.md)
-- [현재 상태와 다음 작업](docs/HANDOFF.md)
-- [Astra 개선과 실제 검증 기록](docs/VALIDATION-ASTRA.md)
+- [현재 상태와 전환 기록](docs/HANDOFF.md)
+- [초기 설계 계획](PLAN.md), [과거 ACE 실측](docs/P0-VALIDATION.md)

@@ -34,7 +34,8 @@ Unicode와 개행을 정리하고, 100자를 넘는 긴 줄은 기존 단어·�
 가사 밀도는 한글 음절 수와 영어의 대략적인 음절 수, 전체 길이 중 보컬에 사용할 것으로
 가정한 75%를 바탕으로 추정한다. 보컬 시간당 초당 4음절 초과는 검토, 6음절 초과는 높은
 밀도로 기록한다. 높은 밀도이고 랩·빠른 발화·루프·hard cut 의도가 명시되지 않았다면
-초당 6음절 추정에 맞춰 5초 단위로 길이를 늘린다. 엔진 상한은 600초다. 원래 목표 길이는
+초당 6음절 추정에 맞춰 5초 단위로 길이를 늘린다. 기본 Music 3 상한은 300초이며 명시적인
+legacy ACE 경로만 600초다. EOS에 따른 실제 길이를 기록하고 padding하지 않는다. 원래 목표 길이는
 프로젝트 입력에 남고, 적용한 길이와 준비 내용은 요청에 고정된다. 화면에도 길이 변경을 표시한다.
 
 이 수치는 이 앱의 보수적인 계획용 추정치이며 음악의 보편적인 발성 한계가 아니다. TTS처럼
@@ -124,7 +125,8 @@ uv run music-engine generate projects/my-song --seeds 102 --quality audio
 ```
 
 가사가 있는 곡의 첫 자동 검사 때 bootstrap을 자동 실행한다. Apple Silicon macOS와 FFmpeg,
-uv가 필요하다. Python **3.12.12**의 `.runtime/quality/.venv`는 루트 `.venv`와 ACE의
+uv가 필요하다. Python **3.12.12**의 `.runtime/quality/.venv`는 루트 `.venv`, Music 3의
+`.runtime/minimax-music3/.venv`, 과거 ACE의
 `.runtime/ace-step-1.5/.venv`와 분리된다. 버전과 해시를 고정한 패키지 목록은
 `requirements-quality.txt`와 `scripts/quality-requirements.txt`다.
 

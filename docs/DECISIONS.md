@@ -1,6 +1,30 @@
 # 결정 기록
 
-확인일: 2026-09-22
+최신 확인일: 2026-10-05. 아래 과거 선택 기록은 당시의 결정으로 보존한다.
+
+## 2026-10-05 기본 엔진 전환
+
+사용자가 MiniMax Music 3로 완전한 전환을 요청했다. 기본 생성·앱 실행·초안과 설정은 Music 3로
+옮기며, 과거 ACE 요청·음원과 환경은 삭제하지 않는다. 과거 코드 경로는 명시적인 legacy 선택에서만 쓴다.
+
+| 대상 | 고정 판본 | 출처·조건 | 선택 |
+| --- | --- | --- | --- |
+| MLX 실행 구현 | `mlx-audio` commit `784b29e2691a93ca7483147d86f61859dfaa6296`, package 0.4.8 | [MLX 구현](https://github.com/Blaizzy/mlx-audio/tree/784b29e2691a93ca7483147d86f61859dfaa6296), 커뮤니티 포트 | 독립 Python 3.12.12 환경, PyTorch 없이 native MLX |
+| Music 3 MXFP8 가중치 | HF revision `d00a12c3c7f80eb66379dd02dd0f30ed0ce2d96e` | [변환 모델](https://huggingface.co/mlx-community/MiniMax-Music3-mxfp8), MiniMax-Music3 Community License | 약 13GB, 가사 전달을 중시하는 양자화 판본 |
+| MLX | 0.31.2 | [MLX](https://github.com/ml-explore/mlx), MIT | Apple M4 Max 36GiB에서 실제 실행 확인 대상 |
+| 로컬 task 서버 | 프로젝트 `scripts/music3_api_server.py` | loopback·Bearer 인증, JSON 생성·opaque 완료 음원 다운로드만 제공 | 모델과 생성 worker를 하나씩 소유 |
+
+MiniMax의 공개 Music 3 가중치는 Apache/MIT로 일괄 취급하지 않는다. [원 라이선스](https://huggingface.co/MiniMaxAI/MiniMax-Music3/blob/main/LICENSE)의
+상업 제품·서비스 UI 표기, 일정 매출 이상의 별도 허가, 공개 콘텐츠의 AI 생성 고지 등의 조건을
+따른다. 프로젝트 코드는 MIT이며, 코드·모델·생성 결과물의 조건은 서로 구분한다.
+가중치와 생성 음원은 Git이나 코드 배포물에 포함하지 않는다.
+
+현재 채택한 MLX 구현은 text2music이다. 음원 참조·커버·구간 repaint는 지원하지 않는다.
+기존 제작 규칙과 곡 계획은 구조화 caption으로 옮기고, 원문·과거 요청·실제 전송본을 구분한다.
+300초는 앱의 요청 상한이며 실제 EOS에 따라 더 짧게 끝날 수 있다. 가중치 크기와 실행 peak
+메모리를 혼동하지 않으며 실제 추론 결과는 [HANDOFF](HANDOFF.md)에 별도 기록한다.
+
+## 2026-09-22 초기 ACE 선택 기록
 
 ## 채택
 

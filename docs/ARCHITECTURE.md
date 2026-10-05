@@ -1,5 +1,46 @@
 # 아키텍처와 데이터 계약
 
+## 2026-10-05 Music 3 전환
+
+기본 생성은 `Music3Client` → 인증된 `127.0.0.1:18002` task API → 고정 판본의
+`mlx-audio`와 `mlx-community/MiniMax-Music3-mxfp8`로 실행한다. 프로젝트 `.venv`와 추론용
+`.runtime/minimax-music3/.venv`, 검사 `.runtime/quality/.venv`는 분리한다.
+
+Electron main은 `scripts/start_music3_api.sh`의 프로세스 그룹을 소유하고, 모델 적재 전·후의
+health를 구분한다. 같은 Music 3 엔진·모델·생성 능력이 확인돼야 준비 상태로 표시한다. 외부
+소유 서버는 임의로 종료하지 않는다. 인증 키는 `.runtime/music3-api-key`의 0600 파일로 공유한다.
+renderer에는 키·임의 파일 경로·명령 실행 능력을 주지 않는다.
+
+서버는 인증된 health·생성·조회·opaque 완료 artifact 다운로드만 제공한다. 모델 적재와 계산은
+하나의 MLX worker에서 실행한다. 실제 모델과 런타임 revision은 요청 adapterInfo·원격 결과에
+남긴다. mock 계약 검사와 실제 모델 추론은 구분한다.
+
+제작 규칙과 songPlan은 Global Metadata / Vocal Details / Arrangement로 매핑한다. 표현 지시는
+caption에 옮기고 태그와 실제 가사는 독립 줄로 나눠 모델의 가사 유실을 막는다. 원문·단어 순서와
+과거 요청은 보존하고 실제 준비본·변경 사항은 새 요청에 기록한다. Music 3에는 ACE 전용 LM·
+thinking·CFG 설정을 전달하지 않는다. caption v3는 프리셋·규칙의 Music 3용 음악 설명을 요청에
+동결하며, 이전 snapshot에 이 설명이 없으면 그 snapshot의 기존 설명을 사용한다. 시간·마디·
+음절 수 추정은 계획에 보존하되 모델에는 실제 가사 구간의 역할·선율·표현을 안내한다.
+상한은 300초이며 EOS에 따른 실제 길이를 기록하고
+무음 padding으로 길이를 맞추지 않는다.
+
+현재 공개 구현은 text2music만 지원한다. cover·repaint·파형 참조는 새 CLI와 앱에서 차단한다.
+기존 후보를 바탕으로 만들기는 가사·스타일·규칙으로 새 전체 곡을 생성하는 동작이다.
+과거 engine 없는 ACE 요청도 legacy로 판별하며, 명시적인 `--engine ace-step` 없이 Music 3로
+재해석해서 재개하지 않는다. 기존 음원·평가·선택·export는 계속 사용할 수 있다.
+
+기본 초안은 한국어·영어 규칙 기반의 수정 가능한 예시 가사다. 선택한 로컬 도우미가 있으면
+자유롭게 작사할 수 있다. Music 3에 없는 작사 API를 호출하거나 ACE를 기본 적재하지 않는다.
+
+작업 수명·원자 저장·artifact 검증·자동 검사와 사람 청취 분리 계약은 아래와 같이 유지한다.
+현재 Music 3의 취소는 로컬 CLI 작업을 취소하며 이미 제출한 원격 추론은 계속 계산할 수 있다.
+timeout 이후에는 같은 묶음의 추가 seed 제출을 중단하고 미제출 seed를 별도로 기록한다.
+
+## 과거 ACE 구현과 유지되는 데이터 계약
+
+아래 ACE 서버·구간 수정·내장 초안 설명은 명시적인 legacy 경로의 계약이며,
+앱 기본 실행이나 Music 3 요청에 적용하지 않는다.
+
 ## 현재 구현 범위
 
 ```text

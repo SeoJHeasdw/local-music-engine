@@ -1,5 +1,8 @@
 # Local Music Engine 구현 계획
 
+2026-10-05: 기본 생성 엔진은 MiniMax Music 3 native MLX로 전환했다. 아래는 초기 ACE 설계의
+기록이며 현재 실행·지원 기능은 README와 docs/HANDOFF.md를 따른다.
+
 작성일: 2026-09-22
 상태: P0, P1과 P2 후보 비교 UI, P3 CLI repaint 기반을 구현했다. 상세는 `docs/HANDOFF.md` 참조.
 구현 시작: 2026-09-22

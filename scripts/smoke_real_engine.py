@@ -1,4 +1,4 @@
-"""Opt-in ACE integration check. Start the real server separately before running.
+"""Historical ACE integration check. Start the legacy server separately before running.
 
 uv run python scripts/smoke_real_engine.py --output-dir .runtime/smoke-001
 
@@ -49,7 +49,7 @@ def main() -> None:
     with (output / "generate.json").open("w") as stdout, (output / "generate.stderr.log").open("w") as stderr:
         child = subprocess.Popen([
             sys.executable, "-m", "local_music_engine", "generate", str(root),
-            "--seeds", "63011,63012", "--base-url", base,
+            "--seeds", "63011,63012", "--base-url", base, "--engine", "ace-step",
             "--quality", "off",  # This probe isolates generation/repaint; smoke_auto_quality checks the full chain.
         ], stdout=stdout, stderr=stderr)
         noted = False
@@ -86,14 +86,14 @@ def main() -> None:
     print(f"Generated two {args.duration}s versions; concurrent notes saved.", flush=True)
 
     start = time.monotonic()
-    resumed = resume_latest_batch(root, base_url=base)
+    resumed = resume_latest_batch(root, base_url=base, engine="ace-step")
     timings["verifiedReuseSeconds"] = round(time.monotonic() - start, 3)
     assert resumed["newCandidateIds"] == []
     assert resumed["reusedCandidateIds"] == batch["candidateIds"]
     start = time.monotonic()
     edit = repaint_candidate(root, candidate_id=batch["candidateIds"][0], seed=63013,
                              start_seconds=min(8, args.duration / 5),
-                             end_seconds=min(13, args.duration / 2), strength="light", base_url=base)
+                             end_seconds=min(13, args.duration / 2), strength="light", base_url=base, engine="ace-step")
     timings["repaintSeconds"] = round(time.monotonic() - start, 2)
     project = store.load()
     assert project["requests"][-1]["parameters"]["lyrics"] == lyrics
