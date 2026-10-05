@@ -1,8 +1,13 @@
 """Authenticated loopback-only Music 3 worker, using the pinned native MLX runtime.
 
 Only generation JSON and opaque, completed audio identifiers cross this boundary.
-Model imports and inference run on one worker thread; health remains available
-while the checkpoint loads. This script deliberately has no renderer/file-path API.
+Model imports and inference run on one worker thread. This script deliberately
+has no renderer/file-path API.
+
+Precision follows the reference SGLang-Omni server: the global and local LMs run
+in bfloat16, the condition encoder, DiT and vocoder in float32. Both stages do
+not fit together on a 36 GB Mac, so each song loads the AR stage, generates its
+frame hidden states, releases it, then loads and runs the acoustic stage.
 """
 
 from __future__ import annotations
@@ -33,14 +38,25 @@ from typing import Any, Callable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_ROOT = PROJECT_ROOT / ".runtime" / "minimax-music3"
-MODEL_ROOT = PROJECT_ROOT / ".runtime" / "models" / "minimax-music3-mxfp8"
-MODEL_ID = "mlx-community/MiniMax-Music3-mxfp8"
-MODEL_REVISION = "d00a12c3c7f80eb66379dd02dd0f30ed0ce2d96e"
+MODEL_ROOT = PROJECT_ROOT / ".runtime" / "models" / "minimax-music3-bf16"
+MODEL_ID = "mlx-community/MiniMax-Music3-bf16"
+MODEL_REVISION = "83a5f2d365673689df5c8f36e21e108751fd92ea"
+# SHA-256 of the pinned revision's weight shards (HF LFS); bootstrap verifies them.
+MODEL_SHARDS = {
+    "model-00001-of-00006.safetensors": (5_295_999_536, "4dd1cf1ad7655c464384b04974cac314cb90f6ac0d0c2dd3e43b34981cc7f386"),
+    "model-00002-of-00006.safetensors": (5_301_856_783, "3b915b7e58b5a3ece522b9a7faf8a49ed6713bc4e06665b500c4968cc97dc772"),
+    "model-00003-of-00006.safetensors": (4_932_746_826, "b830d6d901b5d7b1c25f6e7408e85d905938a7feab94dbfa2cf00d6374b68039"),
+    "model-00004-of-00006.safetensors": (5_305_618_097, "f6d5ac9485452af285a61b87d2ec3c1105bdfa300390d1ac94c51fe176b9a3c2"),
+    "model-00005-of-00006.safetensors": (5_354_074_472, "138fc0f93deb3a1b18386b737a9cad44ba5bf299835f622951c3a8c30d1f649e"),
+    "model-00006-of-00006.safetensors": (2_315_753_430, "5e9da4b2442d52f4f26ec39890a0d301210ccce3eebbc06a4da92ae7628951c7"),
+}
+AR_DTYPE = "bfloat16"
+ACOUSTIC_DTYPES = ("float32", "bfloat16")
 UPSTREAM_COMMIT = "784b29e2691a93ca7483147d86f61859dfaa6296"
 MAX_DURATION = 300
 MAX_BODY_BYTES = 262_144
 CAPABILITIES = {"text2music": True, "cover": False, "repaint": False, "referenceAudio": False}
-MEMORY_POLICY = "eager-ar-frames-and-vocoder-chunks-v1"
+MEMORY_POLICY = "staged-ar-then-acoustic-v2"
 CHECKPOINT_CONFIG = {
     "model_type": "minimax_music3", "hidden_size": 4096, "num_hidden_layers": 36,
     "num_codebooks": 8, "audio_code_offset": 151675, "audio_cfg_token_id": 151654,
@@ -73,15 +89,18 @@ def validate_checkpoint_layout(model_root: Path) -> None:
 
     manifest = read_object(model_root / "runtime-manifest.json")
     if (manifest.get("revision") != MODEL_REVISION or manifest.get("upstreamCommit") != UPSTREAM_COMMIT
-            or manifest.get("repository") != MODEL_ID or manifest.get("quantization") != "mxfp8"):
+            or manifest.get("repository") != MODEL_ID or manifest.get("precision") != "bf16"
+            or manifest.get("shards") != {name: {"bytes": size, "sha256": digest} for name, (size, digest) in MODEL_SHARDS.items()}):
         raise RuntimeError("Music 3 model/runtime manifest differs from the pinned bootstrap")
+    for name, (size, _) in MODEL_SHARDS.items():
+        shard = model_root / name
+        if shard.is_symlink() or not shard.is_file() or shard.stat().st_size != size:
+            raise RuntimeError(f"Music 3 weight shard is missing or changed: {name}")
     config = read_object(model_root / "config.json")
     if any(config.get(key) != value for key, value in CHECKPOINT_CONFIG.items()):
         raise RuntimeError("Music 3 checkpoint architecture/audio configuration differs from the pinned model")
-    quantization = config.get("quantization") or config.get("quantization_config")
-    if (not isinstance(quantization, dict) or quantization.get("mode") != "mxfp8"
-            or quantization.get("group_size") != 32 or quantization.get("bits") != 8):
-        raise RuntimeError("Music 3 checkpoint must use the pinned MXFP8 quantization")
+    if config.get("quantization") or config.get("quantization_config") or config.get("torch_dtype") != "bfloat16":
+        raise RuntimeError("Music 3 checkpoint must be the pinned dense BF16 conversion")
     tokenizer = read_object(model_root / "tokenizer" / "tokenizer.json")
     tokenizer_config = read_object(model_root / "tokenizer" / "tokenizer_config.json")
     if tokenizer_config.get("tokenizer_class") != "Qwen2Tokenizer":
@@ -285,32 +304,36 @@ def audio_identity(path: Path) -> dict[str, Any]:
 
 
 class MlxMusic3Engine:
-    """Model-owning object; all methods are called on the single generation worker."""
+    """Owns the checkpoint path; every song loads the AR stage, then the acoustic stage.
+
+    Nothing stays resident between songs, which leaves memory for quality checks
+    and the optional assistant. All methods run on the single generation worker.
+    """
 
     real_inference = True
 
-    def __init__(self, model_root: Path):
+    def __init__(self, model_root: Path, acoustic_dtype: str = "float32"):
+        if acoustic_dtype not in ACOUSTIC_DTYPES:
+            raise ValueError(f"MUSIC_ENGINE_MUSIC3_ACOUSTIC_DTYPE must be one of {', '.join(ACOUSTIC_DTYPES)}")
         validate_checkpoint_layout(model_root)
         import mlx.core as mx
-        from mlx_audio.music import load
 
         self.mx = mx
-        # Keep transient Metal allocations from remaining cached beside the 13 GB
-        # model. The checkpoint is loaded once, with no PyTorch copy or LM server.
+        self.model_root = model_root
+        self.precision = {"profile": f"official-ar-{AR_DTYPE}-acoustic-{acoustic_dtype}",
+                          "ar": AR_DTYPE, "acoustic": acoustic_dtype,
+                          "reference": "SGLang-Omni MiniMax Music 3 (AR bfloat16, DiT/vocoder float32)"}
+        self.acoustic_dtype = {"float32": mx.float32, "bfloat16": mx.bfloat16}[acoustic_dtype]
         mx.set_cache_limit(512 * 1024 * 1024)
-        # MLX's default memory limit is 1.5x the recommended GPU working set,
-        # which is about 45 GB on this 36 GB machine. Leave space for the app,
-        # OS and independent QC process instead of wiring almost all RAM.
+        # MLX's default limit is 1.5x the recommended working set (about 45 GB on
+        # a 36 GB machine). Leave room for the app, OS and the QC process.
         info = mx.device_info()
         memory_limit = min(int(info["memory_size"] * 0.66), int(info["max_recommended_working_set_size"]))
         mx.set_memory_limit(memory_limit)
         mx.set_wired_limit(memory_limit)
         self.memory_limit_bytes = memory_limit
         self.memory_observer: Callable[[dict[str, Any]], None] | None = None
-        self.model = load(model_root, strict=True)
-        self.mx.eval(self.model.parameters())
-        self.mx.clear_cache()
-        self.last_memory = self._memory_snapshot("model loaded")
+        self.last_memory = self._memory_snapshot("idle")
 
     def _memory_snapshot(self, stage: str) -> dict[str, Any]:
         snapshot = {"stage": stage, "activeGb": self.mx.get_active_memory() / 1e9,
@@ -323,98 +346,100 @@ class MlxMusic3Engine:
             self.memory_observer(snapshot)
         return snapshot
 
+    def _release(self) -> None:
+        gc.collect()
+        self.mx.clear_cache()
+
     def generate(self, payload: dict[str, Any], destination: Path, on_stage: Callable[[str, float], None]) -> dict[str, Any]:
         try:
             return self._generate_audio(payload, destination, on_stage)
         finally:
-            # _generate_audio's frame/audio locals have been released before
-            # collecting and clearing cached buffers for a subsequent song.
-            gc.collect()
-            self.mx.clear_cache()
-            self._memory_snapshot("generation released")
+            # Locals holding either stage are gone; return to an empty footprint.
+            self._release()
+            self._memory_snapshot("idle")
 
     def _generate_audio(self, payload: dict[str, Any], destination: Path, on_stage: Callable[[str, float], None]) -> dict[str, Any]:
+        import mlx.nn as nn
         import numpy as np
+        from mlx_audio.music import load
         from mlx_audio.music.models.minimax_music3 import ar
         from mlx_audio.music.models.minimax_music3 import minimax_music3 as upstream
 
-        original_flow = self.model._run_flow
-        flow_was_instance_attribute = "_run_flow" in self.model.__dict__
-        original_frames = upstream.generate_frame_hiddens
+        mx = self.mx
+        mx.reset_peak_memory()
+        started = time.monotonic()
+        on_stage("loading song planner (BF16)", 0.02)
+        model = load(self.model_root, lazy=True, strict=True)
+        mx.eval(model.language_model.parameters(), model.rvq_depth_decoder.parameters())
+        self._memory_snapshot("song planner loaded")
 
         def on_frame(count: int, maximum: int):
             stage = f"planning song and vocals ({count}/{maximum} frames)"
             on_stage(stage, 0.05 + 0.4 * count / maximum)
             self._memory_snapshot(stage)
 
-        def eager_frames(language_model, depth, config, text_ids, max_frames, seed=0):
-            return generate_frames_eager(self.mx, ar, language_model, depth, config, text_ids, max_frames, seed, on_frame)
+        on_stage("planning song and vocals", 0.05)
+        text_ids = model._text_ids(payload["prompt"], payload["lyrics"])
+        max_frames = max(1, int(payload["audio_duration"] * model.config.frame_rate))
+        frames = generate_frames_eager(mx, ar, model.language_model, model.rvq_depth_decoder, model.config,
+                                       text_ids, max_frames, payload["seed"], on_frame)
+        mx.eval(frames)
+        frame_count = int(frames.shape[1])
+        planner_seconds = time.monotonic() - started
+        # Release the 8B planner before the acoustic stage is materialized.
+        model.language_model, model.rvq_depth_decoder = nn.Module(), nn.Module()
+        del text_ids
+        self._release()
+        on_stage("loading audio renderer", 0.47)
+        for component in (model.condition_encoder, model.transformer, model.vocoder):
+            component.set_dtype(self.acoustic_dtype)
+        mx.eval(model.condition_encoder.parameters(), model.transformer.parameters(), model.vocoder.parameters())
+        frames = frames.astype(self.acoustic_dtype)
+        self._memory_snapshot("audio renderer loaded")
 
-        def run_flow(frame_hiddens, num_inference_steps, seed):
-            on_stage("rendering audio", 0.5)
-            mx = self.mx
-            starts = upstream._chunk_starts(frame_hiddens.shape[1])
-            waves = []
-            previous_latent = previous_condition = None
-            mx.random.seed(seed + 7)
-            for index, start in enumerate(starts):
-                end = min(start + upstream.CHUNK_FRAMES, frame_hiddens.shape[1])
-                condition = self.model.condition_encoder(frame_hiddens[:, start:end])
-                mx.eval(condition)
-                noise = mx.random.normal((1, self.model.config.dit_in_channels, condition.shape[1])).astype(condition.dtype)
-                latents, condition = upstream.denoise_chunk(self.model.transformer, noise, condition,
-                    num_inference_steps=num_inference_steps, guidance_scale=upstream.DIT_CFG_SCALE,
-                    previous_latent=previous_latent, previous_condition=previous_condition)
-                carry_start = max(0, latents.shape[-1] - 2 * upstream.OVERLAP_LATENT_LENGTH)
-                carry_end = max(carry_start, latents.shape[-1] - upstream.OVERLAP_LATENT_LENGTH)
-                previous_latent = latents[..., carry_start:carry_end]
-                previous_condition = condition[:, carry_start:carry_end]
-                wave = self.model.vocoder(latents)
-                cropped = upstream._crop_waveform(wave, index, len(starts))
-                mx.eval(cropped, previous_latent, previous_condition)
-                waves.append(cropped)
-                del condition, noise, latents, wave
-                mx.clear_cache()
-                stage = f"rendering audio ({index + 1}/{len(starts)} chunks)"
-                on_stage(stage, 0.5 + 0.4 * (index + 1) / len(starts))
-                self._memory_snapshot(stage)
-            return mx.concatenate(waves, axis=-1)
-
-        self.model._run_flow = run_flow
-        upstream.generate_frame_hiddens = eager_frames
-        self.mx.reset_peak_memory()
-        started = time.monotonic()
-        try:
-            on_stage("planning song and vocals", 0.05)
-            results = list(self.model.generate(text=payload["prompt"], lyrics=payload["lyrics"],
-                duration=payload["audio_duration"], steps=payload["inference_steps"], seed=payload["seed"]))
-            if not results:
-                raise RuntimeError("Music 3 returned no audio")
-            arrays = [np.asarray(result.audio, dtype=np.float32) for result in results]
-            audio = np.concatenate(arrays, axis=0) if len(arrays) > 1 else arrays[0]
-            if audio.ndim != 2 or audio.shape[1] != 2 or not np.isfinite(audio).all():
-                raise RuntimeError("Music 3 returned invalid stereo audio")
-            on_stage("saving audio", 0.95)
-            # Preserve the generated stereo signal. The engine's own generation
-            # clips to [-1, 1]; this conversion adds no normalization or fade.
-            pcm = (np.clip(audio, -1.0, 1.0) * 32767).round().astype("<i2")
-            with destination.open("xb") as handle:
-                with wave.open(handle, "wb") as writer:
-                    writer.setnchannels(2)
-                    writer.setsampwidth(2)
-                    writer.setframerate(44_100)
-                    writer.writeframes(pcm.tobytes())
-                handle.flush()
-                os.fsync(handle.fileno())
-            return {"processingSeconds": time.monotonic() - started,
-                    "peakMemoryGb": self.mx.get_peak_memory() / 1e9,
-                    "audioFrames": sum(int(result.token_count) for result in results)}
-        finally:
-            upstream.generate_frame_hiddens = original_frames
-            if flow_was_instance_attribute:
-                self.model._run_flow = original_flow
-            else:
-                delattr(self.model, "_run_flow")
+        on_stage("rendering audio", 0.5)
+        starts = upstream._chunk_starts(frame_count)
+        waves = []
+        previous_latent = previous_condition = None
+        mx.random.seed(payload["seed"] + 7)
+        for index, start in enumerate(starts):
+            end = min(start + upstream.CHUNK_FRAMES, frame_count)
+            condition = model.condition_encoder(frames[:, start:end])
+            mx.eval(condition)
+            noise = mx.random.normal((1, model.config.dit_in_channels, condition.shape[1])).astype(condition.dtype)
+            latents, condition = upstream.denoise_chunk(model.transformer, noise, condition,
+                num_inference_steps=payload["inference_steps"], guidance_scale=upstream.DIT_CFG_SCALE,
+                previous_latent=previous_latent, previous_condition=previous_condition)
+            carry_start = max(0, latents.shape[-1] - 2 * upstream.OVERLAP_LATENT_LENGTH)
+            carry_end = max(carry_start, latents.shape[-1] - upstream.OVERLAP_LATENT_LENGTH)
+            previous_latent = latents[..., carry_start:carry_end]
+            previous_condition = condition[:, carry_start:carry_end]
+            cropped = upstream._crop_waveform(model.vocoder(latents), index, len(starts))
+            mx.eval(cropped, previous_latent, previous_condition)
+            waves.append(cropped)
+            del condition, noise, latents
+            mx.clear_cache()
+            stage = f"rendering audio ({index + 1}/{len(starts)} chunks)"
+            on_stage(stage, 0.5 + 0.4 * (index + 1) / len(starts))
+            self._memory_snapshot(stage)
+        audio = mx.concatenate(waves, axis=-1)
+        waveform = np.asarray(mx.clip(audio[0].transpose(1, 0).astype(mx.float32), -1.0, 1.0))
+        del model, frames, waves, audio
+        if waveform.ndim != 2 or waveform.shape[1] != 2 or not np.isfinite(waveform).all():
+            raise RuntimeError("Music 3 returned invalid stereo audio")
+        on_stage("saving audio", 0.95)
+        # Preserve the generated stereo signal; the engine already clips to [-1, 1].
+        pcm = (waveform * 32767).round().astype("<i2")
+        with destination.open("xb") as handle:
+            with wave.open(handle, "wb") as writer:
+                writer.setnchannels(2)
+                writer.setsampwidth(2)
+                writer.setframerate(44_100)
+                writer.writeframes(pcm.tobytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+        return {"processingSeconds": time.monotonic() - started, "plannerSeconds": planner_seconds,
+                "peakMemoryGb": mx.get_peak_memory() / 1e9, "audioFrames": frame_count}
 
 
 class Music3State:
@@ -431,6 +456,7 @@ class Music3State:
         self.real_inference = False
         self.loading_error: str | None = None
         self.runtime_version: str | None = None
+        self.precision: dict[str, Any] | None = None
         self.actual_memory: dict[str, Any] | None = None
         self.tasks: dict[str, dict[str, Any]] = {}
         if self.registry_path.is_file():
@@ -456,7 +482,7 @@ class Music3State:
                 "models_initialized": self.ready, "llm_initialized": self.ready,
                 "loaded_model": MODEL_ID, "loaded_lm_model": None, "model_revision": MODEL_REVISION,
                 "runtime_version": self.runtime_version, "runtime_commit": UPSTREAM_COMMIT,
-                "quantization": "mxfp8", "capabilities": CAPABILITIES.copy(), "max_duration_seconds": MAX_DURATION,
+                "precision": self.precision, "capabilities": CAPABILITIES.copy(), "max_duration_seconds": MAX_DURATION,
                 "maxDurationSeconds": MAX_DURATION, "realInference": self.ready and self.real_inference,
                 "inference_backend": "mlx" if self.real_inference else None,
                 "memory_policy": MEMORY_POLICY, "actualMemory": self.actual_memory,
@@ -522,6 +548,7 @@ class Music3State:
             with self.lock:
                 self.runtime_version = runtime_version
                 self.real_inference = getattr(engine, "real_inference", False) is True
+                self.precision = getattr(engine, "precision", None)
                 self.actual_memory = getattr(engine, "last_memory", None)
                 self.ready = True
             if self.real_inference:
@@ -529,7 +556,7 @@ class Music3State:
                     with self.lock:
                         self.actual_memory = snapshot.copy()
                 engine.memory_observer = observe_memory
-            print("Music 3 checkpoint loaded; generation worker is ready", flush=True)
+            print("Music 3 checkpoint verified; generation worker is ready", flush=True)
         except Exception as error:
             with self.lock:
                 self.loading_error = f"{type(error).__name__}: {error}"
@@ -564,7 +591,8 @@ class Music3State:
                 with self.lock:
                     task.update(status=1, stage="completed", progress=1.0, completedAt=time.time(), artifact=identity,
                         metas={"engine": "minimax-music3", "model": MODEL_ID, "modelRevision": MODEL_REVISION,
-                            "runtimeCommit": UPSTREAM_COMMIT, "runtimeVersion": self.runtime_version, "quantization": "mxfp8",
+                            "runtimeCommit": UPSTREAM_COMMIT, "runtimeVersion": self.runtime_version,
+                            "precision": self.precision,
                             "memoryPolicy": MEMORY_POLICY, "actualMemory": self.actual_memory,
                             "requestedDurationSeconds": payload["audio_duration"], "duration": identity["durationSeconds"],
                             "sampleRate": identity["sampleRate"], "channels": identity["channels"],
@@ -689,8 +717,11 @@ def main() -> None:
     options = parser.parse_args()
     if not 1 <= options.port <= 65535:
         parser.error("port must be between 1 and 65535")
+    acoustic_dtype = os.environ.get("MUSIC_ENGINE_MUSIC3_ACOUSTIC_DTYPE", "float32")
+    if acoustic_dtype not in ACOUSTIC_DTYPES:
+        parser.error(f"MUSIC_ENGINE_MUSIC3_ACOUSTIC_DTYPE must be one of {', '.join(ACOUSTIC_DTYPES)}")
     with RuntimeOwner(RUNTIME_ROOT):
-        state = Music3State(RUNTIME_ROOT, MODEL_ROOT)
+        state = Music3State(RUNTIME_ROOT, MODEL_ROOT, lambda root: MlxMusic3Engine(root, acoustic_dtype=acoustic_dtype))
         server = Music3HttpServer((options.host, options.port), state, ensure_api_key())
         state.start()
         print(f"Music 3 API listening on http://{options.host}:{options.port}; loading model", flush=True)

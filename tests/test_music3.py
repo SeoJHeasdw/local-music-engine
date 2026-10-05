@@ -40,6 +40,22 @@ class FakeMusic3Client(FakeAceClient):
         return super().submit(request)
 
 
+def caption_blocks(prompt):
+    """Bare schema headings, never the earlier bracketed form."""
+    assert "[Global Metadata]" not in prompt and "[Vocal Details]" not in prompt and "[Arrangement]" not in prompt
+    assert prompt.startswith("Global Metadata\nBasic Attributes: ")
+    metadata, rest = prompt.split("\nVocal Details\n")
+    if "\nArrangement\n" not in rest:
+        return metadata, rest, ""
+    vocals, arrangement = rest.split("\nArrangement\n")
+    return metadata, vocals, arrangement
+
+
+def field(prompt, label):
+    line = next(line for line in prompt.splitlines() if line.startswith(label + ": "))
+    return line[len(label) + 2:]
+
+
 @pytest.fixture(autouse=True)
 def reset_mock():
     FakeMusic3Client.payloads = []
@@ -86,17 +102,23 @@ def test_music3_maps_every_rule_to_correct_caption_section_and_plain_lyrics(tmp_
     store = ProjectStore.initialize(tmp_path, title="Night", lyrics=lyrics, style_prompt="warm male vocal",
                                    target_duration_seconds=30, production_rules=selection)
     frozen = _frozen_generation_payload(store.load(), seed=1, model=MODEL, lm_model="unused")
-    metadata, rest = frozen["prompt"].split("[Vocal Details]")
-    vocals, arrangement = rest.split("[Arrangement]")
-    assert "Emotional melodic hip hop" in metadata
-    assert "One clear lead vocal" in vocals and "natural breath between lines" in vocals
-    assert "Spacious drums, bass and one main chord instrument" in arrangement
+    metadata, vocals, arrangement = caption_blocks(frozen["prompt"])
+    assert field(frozen["prompt"], "Basic Attributes") == "bpm is 84. key is A, and scale is minor. Hip-Hop / Melodic Rap. Warm male vocal."
+    assert field(frozen["prompt"], "Vocal Gender & Timbre").startswith("Singer A (Male). ")
+    assert "single clear lead vocal" in field(frozen["prompt"], "Vocal Style")
+    assert "natural breaths between lines" in field(frozen["prompt"], "Vocal Style")
+    assert "drums, bass and one main chord instrument" in field(frozen["prompt"], "Secondary")
+    assert "Instrument Lifecycle Description (Primary/Secondary Layering):" in arrangement
     for rule in frozen["music3ProductionGuidance"]["rules"]:
-        assert rule["caption"] in frozen["prompt"] and rule["native"] is True
-    assert "emotionally connected lead" in vocals and "pickup previews the sung hook" in arrangement
+        assert rule["native"] is True and rule["fields"]
+        for text in rule["fields"].values():
+            assert text in frozen["prompt"]
+    assert "emotionally connected" in vocals and "pickup previews the sung hook" in arrangement
+    assert "Duration:" not in frozen["prompt"] and "sing the supplied lyrics" not in frozen["prompt"]
     assert frozen["sourceLyricsOriginal"] == lyrics
     assert frozen["lyrics"].splitlines() == lyrics.splitlines()
-    assert "Verse: restrained" in arrangement and "Chorus: fuller" in arrangement
+    assert "Verse: restrained" in field(frozen["prompt"], "Groove & Foundation Progression")
+    assert "Chorus: fuller" in arrangement
     assert "[Verse - restrained]" not in frozen["lyrics"]
     assert "thinking" not in frozen and "lm_model_path" not in _api_payload(frozen)
     assert store.load()["inputs"]["lyricsOriginal"] == lyrics
@@ -122,8 +144,9 @@ def test_manual_instrumental_case_keeps_words_and_skips_vocal_production(tmp_pat
     assert set(prepared["productionRules"]["skippedRuleIds"]) == {
         "clear-vocal", "phrase-breathing", "expressive-performance",
     }
-    assert "Instrumental; no vocals." in prepared["prompt"]
-    assert "fully sung chorus" not in prepared["prompt"]
+    assert field(prepared["prompt"], "Vocal Gender & Timbre").startswith("Instrumental; there is no vocal. ")
+    assert "lyrics are sung" not in prepared["prompt"]
+    assert "fully sung" not in prepared["prompt"]
     assert "lead vocal" not in prepared["prompt"]
     assert "short sung motif" not in prepared["prompt"]
     assert library(tmp_path)[0]["instrumental"] is True
@@ -151,8 +174,8 @@ def test_quality_preparation_keeps_music3_caption_and_duration_limit(tmp_path):
     frozen = _frozen_generation_payload(store.load(), seed=1, model=MODEL, lm_model="unused")
     prepared = prepare_payload(frozen)
     assert prepared["audio_duration"] <= MAX_DURATION_SECONDS
-    assert f"Duration: {prepared['audio_duration']:g} seconds." in prepared["prompt"]
-    assert prepared["prompt"].count("[Global Metadata]") == 1
+    assert "Duration:" not in prepared["prompt"]
+    assert prepared["prompt"].count("Global Metadata\n") == 1 and caption_blocks(prepared["prompt"])
     assert prepared["qualityPreparation"]["requestedDurationSeconds"] == 30
 
 
@@ -383,9 +406,9 @@ def test_music3_selected_development_maps_actual_advisory_schedule(duration, ins
     original = deepcopy(project)
     frozen = _frozen_generation_payload(project, seed=1, model=MODEL, lm_model="unused")
     schedule = frozen["music3ArrangementSchedule"]
-    assert frozen["music3PromptVersion"] == 3
+    assert frozen["music3PromptVersion"] == 4
     assert schedule["advisory"] is True and len(schedule["caption"]) <= 1000
-    assert schedule["caption"] in frozen["prompt"].split("[Arrangement]")[1]
+    assert schedule["caption"] in field(frozen["prompt"], "Global Emotional Progression")
     assert schedule["sections"][0]["startSeconds"] == 0
     assert schedule["sections"][-1]["endSeconds"] == duration
     counts = {}
@@ -397,9 +420,9 @@ def test_music3_selected_development_maps_actual_advisory_schedule(duration, ins
     assert project == original and frozen["sourceLyricsOriginal"] == raw
     if instrumental:
         assert frozen["lyrics"] == "[Instrumental]"
-        assert "no vocals" in schedule["caption"] and "written verse" not in schedule["caption"]
+        assert "reprise" in schedule["caption"] and "verse" not in schedule["caption"]
     else:
-        assert "supplied lyric sections in order" in schedule["caption"]
+        assert "written sections in order" in schedule["caption"]
         assert schedule["lyricSections"] == ["Verse", "Chorus", "Verse", "Chorus"]
         assert "Brief intro, restrained verses, gradual build" not in frozen["prompt"]
     if duration == 60 and not instrumental:
@@ -422,7 +445,7 @@ def test_music3_schedule_is_removed_when_development_is_not_selected_even_with_s
     prepared = translate_payload(frozen)
     assert "music3ArrangementSchedule" not in prepared and "Advisory timing" not in prepared["prompt"]
     assert "Brief intro, restrained verses, gradual build" not in prepared["prompt"]
-    assert "natural breath between lines" in prepared["prompt"]
+    assert "natural breaths between lines" in prepared["prompt"]
     assert frozen == before
 
 
@@ -440,7 +463,7 @@ def test_music3_old_generic_caption_and_new_schedule_mapping_are_explicitly_dist
     before = deepcopy(old)
     new = translate_payload(old)
     assert old == before and old["music3PromptVersion"] == 1
-    assert new["music3PromptVersion"] == 3 and "supplied lyric sections in order" in new["prompt"]
+    assert new["music3PromptVersion"] == 4 and "written sections in order" in new["prompt"]
     assert "Brief intro, restrained verses, gradual build" not in new["prompt"]
     assert new["lyrics"] == old["lyrics"] and new["sourceLyricsOriginal"] == raw
 
@@ -490,7 +513,7 @@ def test_old_frozen_music3_rules_keep_their_original_caption_without_catalog_upg
     before = deepcopy(old)
     new = translate_payload(old)
     assert old == before
-    assert "steady tempo, repeating drum groove, kick and bass locked" in new["prompt"]
+    assert "Steady tempo, repeating drum groove, kick and bass locked." in field(new["prompt"], "Groove & Foundation Progression")
     assert new["music3ProductionGuidance"]["rules"][0]["native"] is False
 
 
@@ -503,9 +526,9 @@ def test_music3_instrumental_hook_has_no_sung_or_emotional_vocal_direction(tmp_p
     frozen = _frozen_generation_payload(store.load(), seed=1, model=MODEL, lm_model="unused")
     assert frozen["lyrics"] == "[Instrumental]"
     assert frozen["productionRules"]["skippedRuleIds"] == ["expressive-performance"]
-    assert "opening theme establishes the groove" in frozen["prompt"]
-    assert "Return to its melodic-and-rhythmic motif" in frozen["prompt"]
-    assert "sung motif" not in frozen["prompt"] and "emotionally connected lead" not in frozen["prompt"]
+    assert "opening theme establishes the groove" in field(frozen["prompt"], "Primary")
+    assert "returns in the fuller reprise" in frozen["prompt"]
+    assert "sung" not in frozen["prompt"] and "emotionally connected" not in frozen["prompt"]
 
 
 @pytest.mark.parametrize("chorus_lines", [2, 4])
@@ -519,7 +542,7 @@ def test_music3_intro_hook_guide_preserves_short_and_full_chorus_words(tmp_path,
                                    style_prompt="emotional hip hop", target_duration_seconds=60,
                                    production_rules=selection)
     frozen = _frozen_generation_payload(store.load(), seed=1, model=MODEL, lm_model="unused")
-    caption = frozen["music3ProductionGuidance"]["rules"][0]["caption"]
+    caption = " ".join(frozen["music3ProductionGuidance"]["rules"][0]["fields"].values())
     assert "pickup previews the sung hook" in caption and "short melodic-and-rhythmic motif" in caption
     assert "final line resolves warmly" in caption
     assert "one and three" not in caption and "four" not in caption
@@ -528,6 +551,7 @@ def test_music3_intro_hook_guide_preserves_short_and_full_chorus_words(tmp_path,
     # Earlier native snapshots remain distinct and retain their own hook direction.
     old = deepcopy(frozen)
     old_caption = "A memorable short sung motif; the chorus melody rises then settles into a satisfying resolution, returning with the same contour at each written chorus."
+    del old["productionRules"]["rules"][0]["music3Fields"]
     old["productionRules"]["rules"][0]["music3Caption"] = old_caption
     before = deepcopy(old)
     prepared = translate_payload(old)
@@ -546,11 +570,12 @@ def test_music3_six_default_rules_also_receive_frozen_preset_musical_direction(t
                                    production_rules=selection)
     frozen = _frozen_generation_payload(store.load(), seed=1, model=MODEL, lm_model="unused")
     native = frozen["music3ProductionGuidance"]["preset"]
-    assert native == {"id": preset["id"], "caption": preset["music3Caption"], "native": True}
-    assert "melodic-rap verses" in frozen["prompt"] and "fully sung chorus" in frozen["prompt"]
-    assert "quiet hope" in frozen["prompt"] and len(frozen["productionRules"]["appliedRuleIds"]) == 6
+    assert native == {"id": preset["id"], "fields": preset["music3Schema"], "native": True}
+    assert "melodic rap-sing flow" in frozen["prompt"] and "fully sung, memorable melody" in frozen["prompt"]
+    assert "quiet sense of hope" in frozen["prompt"] and len(frozen["productionRules"]["appliedRuleIds"]) == 6
+    assert field(frozen["prompt"], "Basic Attributes").startswith("bpm is 84. key is A, and scale is minor. Hip-Hop / Melodic Rap.")
     replacement = deepcopy(production_rules.PRESETS)
-    replacement[0]["music3Caption"] = "Unrelated future style"
+    replacement[0]["music3Schema"] = {"genre": "Unrelated future style"}
     monkeypatch.setattr(production_rules, "PRESETS", replacement)
     assert translate_payload(frozen) == frozen
     old = deepcopy(frozen)
@@ -559,4 +584,82 @@ def test_music3_six_default_rules_also_receive_frozen_preset_musical_direction(t
             del old["productionRules"]["preset"][key]
     upgraded = translate_payload(old)
     assert upgraded["music3ProductionGuidance"]["preset"]["native"] is False
-    assert preset["caption"] in upgraded["prompt"] and "Unrelated future" not in upgraded["prompt"]
+    assert preset["caption"].casefold() in field(upgraded["prompt"], "Basic Attributes").casefold()
+    assert "Unrelated future" not in upgraded["prompt"]
+
+
+@pytest.mark.parametrize(("key_scale", "expected"), [
+    ("A minor", "key is A, and scale is minor"), ("C Major", "key is C, and scale is major"),
+    ("Db minor", "key is C#, and scale is minor"), ("G# min", "key is Ab, and scale is minor"),
+    ("A♯ major", "key is Bb, and scale is major"), ("F#m", "key is F#, and scale is minor"),
+    ("E", "key is E"), ("modal mixture", "key is modal mixture"),
+])
+def test_music3_basic_attributes_use_the_trained_key_spelling(key_scale, expected):
+    from local_music_engine.music3 import basic_attributes, key_attributes
+    assert key_attributes(key_scale) == expected
+    assert basic_attributes(84.0, key_scale) == f"bpm is 84. {expected}."
+    assert basic_attributes(None, None) == ""
+
+
+@pytest.mark.parametrize(("style", "identity"), [
+    ("dreamy pop, soft female vocal", "Singer A (Female). The vocalist has "),
+    ("남성 보컬의 감성 힙합", "Singer A (Male). The vocalist has "),
+    ("male and female duet ballad", "Singer A (Male) and Singer B (Female). The vocalists share "),
+    ("lo-fi chill hop", "A single lead vocalist delivers the performance with "),
+])
+def test_music3_vocal_identity_comes_only_from_the_persons_style(tmp_path, style, identity):
+    store = ProjectStore.initialize(tmp_path, title="Voice", lyrics="[Verse]\nStay with me\n[Chorus]\nHold on",
+                                   style_prompt=style, target_duration_seconds=60)
+    frozen = _frozen_generation_payload(store.load(), seed=1, model=MODEL, lm_model="unused")
+    assert field(frozen["prompt"], "Vocal Gender & Timbre").startswith(identity)
+    assert field(frozen["prompt"], "Vocal Style") == "The lyrics are sung in English."
+    # A free-text style without a preset is the song's identity, after the metas.
+    assert field(frozen["prompt"], "Basic Attributes").casefold().endswith(style.casefold() + ".")
+
+
+def test_music3_already_structured_style_is_kept_per_field_with_frozen_metas(tmp_path):
+    structured = """### Global Metadata
+- **Basic Attributes**: bpm is 140. key is D, and scale is major. Synth-Pop / Dream Pop.
+- **Global Emotional Progression**: A hazy opening blooms into a euphoric chorus.
+
+### Vocal Details
+Vocal Gender & Timbre: Singer A (Female). Airy, light soprano.
+Vocal Style: Floating, legato phrasing.
+
+### Arrangement
+Instrument Lifecycle Description (Primary/Secondary Layering):
+Primary: Shimmering synth arpeggio throughout.
+Groove & Foundation Progression: Half-time drums open into a driving four-on-the-floor chorus."""
+    selection = {"version": 1, "presetId": "emotional-hiphop", "ruleIds": ["steady-groove"]}
+    store = ProjectStore.initialize(tmp_path, title="Structured", lyrics="[Verse]\nStay\n[Chorus]\nGo",
+                                   style_prompt=structured, target_duration_seconds=60, bpm=96,
+                                   key_scale="F# minor", production_rules=selection)
+    frozen = _frozen_generation_payload(store.load(), seed=1, model=MODEL, lm_model="unused")
+    prompt = frozen["prompt"]
+    caption_blocks(prompt)
+    assert field(prompt, "Basic Attributes") == "bpm is 96. key is F#, and scale is minor. Synth-Pop / Dream Pop."
+    assert field(prompt, "Global Emotional Progression").startswith("A hazy opening blooms")
+    assert field(prompt, "Vocal Gender & Timbre") == "Singer A (Female). Airy, light soprano."
+    assert field(prompt, "Primary") == "Shimmering synth arpeggio throughout."
+    # The person's fields replace the preset's, while selected rules still add direction.
+    assert "piano" not in field(prompt, "Primary") and "laid-back boom-bap" not in prompt
+    assert "consistent drum pocket" in field(prompt, "Groove & Foundation Progression")
+    assert "**" not in prompt and "###" not in prompt and prompt.count("Basic Attributes") == 1
+    assert frozen["music3ProductionGuidance"]["structuredStyle"] is True
+    assert frozen["sourceStylePrompt"] == structured
+
+
+def test_music3_preset_prose_is_not_mistaken_for_loop_intent():
+    from local_music_engine.music3 import translate_payload
+    selection = {"version": 1, "presetId": "emotional-hiphop", "ruleIds": ["repeated-harmony"]}
+    project = {"inputs": {"stylePrompt": "warm late-night song", "lyricsNormalized": "[Verse]\nStay\n[Chorus]\nGo",
+                          "targetDurationSeconds": 30, "productionRules": selection}}
+    frozen = _frozen_generation_payload(project, seed=1, model=MODEL, lm_model="unused")
+    assert "chord loop" in frozen["prompt"]
+    prepared = prepare_payload(frozen)
+    assert prepared["lyrics"].endswith("\n\n[Outro]")
+    assert "outro_structure_tag_added" in prepared["qualityPreparation"]["changes"]
+    project["inputs"]["stylePrompt"] = "seamless loop for a game menu"
+    looped = prepare_payload(_frozen_generation_payload(project, seed=1, model=MODEL, lm_model="unused"))
+    assert "[Outro]" not in looped["lyrics"]
+    assert translate_payload(prepared) == prepared

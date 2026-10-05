@@ -68,7 +68,9 @@ def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if normalized != model_lyrics and not changes:
         changes.append("unicode_and_newlines_normalized")
     instrumental = is_instrumental_lyrics(normalized)
-    caption = payload["prompt"]
+    # Loop/cut/rap intent belongs to the person's own style. Music 3's rendered
+    # caption also carries preset prose (e.g. "chord loop") that is not that intent.
+    caption = payload.get("sourceStylePrompt", payload["prompt"]) if payload.get("engine") == "minimax-music3" else payload["prompt"]
     loop_or_cut = bool(re.search(r"\b(loop|loopable|seamless|hard cut|abrupt ending)\b|반복용|루프|갑자기.*끝", caption, re.I))
     if not instrumental and not loop_or_cut and len(normalized) <= 4084 and not re.search(r"\[(outro|ending|end)\b", normalized, re.I):
         normalized = normalized.rstrip() + "\n\n[Outro]"

@@ -120,15 +120,18 @@ def checkpoint_layout(runtime, tmp_path):
     """Metadata only; no weights or real inference are used in these checks."""
     root = tmp_path / "checkpoint"
     (root / "tokenizer").mkdir(parents=True)
+    # Tiny stand-in shards; the real pins are 28.5 GB of weights.
+    runtime.MODEL_SHARDS = {"model-00001-of-00002.safetensors": (16, "a" * 64),
+                            "model-00002-of-00002.safetensors": (8, "b" * 64)}
+    for name, (size, _) in runtime.MODEL_SHARDS.items():
+        (root / name).write_bytes(b"\0" * size)
     metadata = {
         "runtime-manifest.json": {
             "repository": runtime.MODEL_ID, "revision": runtime.MODEL_REVISION,
-            "upstreamCommit": runtime.UPSTREAM_COMMIT, "quantization": "mxfp8",
+            "upstreamCommit": runtime.UPSTREAM_COMMIT, "precision": "bf16",
+            "shards": {name: {"bytes": size, "sha256": digest} for name, (size, digest) in runtime.MODEL_SHARDS.items()},
         },
-        "config.json": {
-            **runtime.CHECKPOINT_CONFIG,
-            "quantization": {"mode": "mxfp8", "group_size": 32, "bits": 8},
-        },
+        "config.json": {**runtime.CHECKPOINT_CONFIG, "torch_dtype": "bfloat16"},
         "tokenizer/tokenizer_config.json": {"tokenizer_class": "Qwen2Tokenizer"},
         "tokenizer/tokenizer.json": {
             "added_tokens": [{"content": token, "id": value}
@@ -163,7 +166,8 @@ def test_checkpoint_metadata_requires_caption_and_lyrics_token_ids(runtime, chec
 @pytest.mark.parametrize("changes,error", [
     ({"sample_rate": 32_000}, "architecture/audio"),
     ({"audio_code_offset": 42}, "architecture/audio"),
-    ({"quantization": {"mode": "mxfp4", "group_size": 32, "bits": 4}}, "MXFP8"),
+    ({"quantization": {"mode": "mxfp8", "group_size": 32, "bits": 8}}, "dense BF16"),
+    ({"torch_dtype": "float16"}, "dense BF16"),
 ])
 def test_checkpoint_cannot_misdeclare_audio_or_quantization(runtime, checkpoint_layout, changes, error):
     path = checkpoint_layout / "config.json"
@@ -386,3 +390,40 @@ def test_eager_ar_preserves_seed_frames_and_materializes_cache(runtime):
     assert len(mx.evaluated) == 5  # every frame, then the completed stack
     assert [evaluation[2][0] for evaluation in mx.evaluated[:-1]] == caches
     assert events == [(3, 3)]
+
+
+def test_checkpoint_shards_must_match_the_pinned_bootstrap(runtime, checkpoint_layout):
+    runtime.validate_checkpoint_layout(checkpoint_layout)
+    shard = checkpoint_layout / "model-00002-of-00002.safetensors"
+    shard.write_bytes(b"\0" * 9)
+    with pytest.raises(RuntimeError, match="missing or changed"):
+        runtime.validate_checkpoint_layout(checkpoint_layout)
+    shard.unlink()
+    with pytest.raises(RuntimeError, match="missing or changed"):
+        runtime.validate_checkpoint_layout(checkpoint_layout)
+    manifest = checkpoint_layout / "runtime-manifest.json"
+    value = json.loads(manifest.read_text())
+    value["precision"] = "mxfp8"
+    manifest.write_text(json.dumps(value))
+    with pytest.raises(RuntimeError, match="manifest"):
+        runtime.validate_checkpoint_layout(checkpoint_layout)
+
+
+def test_acoustic_precision_is_validated_before_any_model_work(runtime, checkpoint_layout):
+    with pytest.raises(ValueError, match="MUSIC_ENGINE_MUSIC3_ACOUSTIC_DTYPE"):
+        runtime.MlxMusic3Engine(checkpoint_layout, acoustic_dtype="float16")
+
+
+def test_health_and_results_report_the_precision_actually_used(runtime, tmp_path):
+    class OfficialEngine(FakeEngine):
+        precision = {"profile": "official-ar-bfloat16-acoustic-float32", "ar": "bfloat16", "acoustic": "float32"}
+
+    state = runtime.Music3State(tmp_path / "runtime", tmp_path / "model", OfficialEngine)
+    state.start()
+    wait_until(lambda: state.health()["models_initialized"])
+    assert state.health()["precision"]["profile"] == "official-ar-bfloat16-acoustic-float32"
+    assert state.health()["loaded_model"] == "mlx-community/MiniMax-Music3-bf16"
+    task_id = state.submit({"prompt": "Global Metadata\nBasic Attributes: Pop.", "lyrics": "[Verse]\nHello", "audio_duration": 5, "seed": 1})
+    wait_until(lambda: state.tasks[task_id]["status"] == 1)
+    assert state.tasks[task_id]["metas"]["precision"]["acoustic"] == "float32"
+    state.pending.put(None)

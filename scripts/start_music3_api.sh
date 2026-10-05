@@ -6,9 +6,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RUNTIME_ROOT="$PROJECT_ROOT/.runtime/minimax-music3"
 HOST="${MUSIC_ENGINE_MUSIC3_HOST:-127.0.0.1}"
 PORT="${MUSIC_ENGINE_MUSIC3_PORT:-18002}"
-MODEL="${MUSIC_ENGINE_MUSIC3_MODEL:-mlx-community/MiniMax-Music3-mxfp8}"
-if [[ "$MODEL" != "mlx-community/MiniMax-Music3-mxfp8" ]]; then
-  echo "Music 3 requires the pinned MXFP8 checkpoint." >&2; exit 1
+MODEL="${MUSIC_ENGINE_MUSIC3_MODEL:-mlx-community/MiniMax-Music3-bf16}"
+if [[ "$MODEL" != "mlx-community/MiniMax-Music3-bf16" ]]; then
+  echo "Music 3 requires the pinned dense BF16 checkpoint." >&2; exit 1
 fi
 case "$HOST" in
   127.0.0.1|localhost|::1) ;;
