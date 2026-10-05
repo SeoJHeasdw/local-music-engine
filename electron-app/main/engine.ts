@@ -19,6 +19,7 @@ type Health = {
   llm_initialized?: boolean;
   loaded_model?: string | null;
   loaded_lm_model?: string | null;
+  precision?: { profile?: string } | null;
 };
 
 type LogSink = { write(chunk: string): unknown; end(): unknown };
@@ -132,7 +133,7 @@ export class EngineManager {
       baseUrl: displayUrl,
       owned,
       engine: "minimax-music3",
-      models: { music: health?.loaded_model ?? null },
+      models: { music: health?.loaded_model ?? null, precision: typeof health?.precision?.profile === "string" ? health.precision.profile : null },
       capabilities: { text2music: health?.capabilities?.text2music === true, cover: false, repaint: false, referenceAudio: false },
       maxDurationSeconds: Math.min(300, Math.max(10, Number(health?.maxDurationSeconds) || 300)),
       log: [],

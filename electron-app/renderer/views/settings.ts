@@ -1,7 +1,7 @@
 import type { AssistantKind, Settings } from "../../shared.ts";
 import { api, engineReady, refreshSongs } from "../actions.ts";
 import { byId, h, icon, mount } from "../dom.ts";
-import { elapsed, lengthLabel } from "../format.ts";
+import { elapsed, lengthLabel, precisionLabel } from "../format.ts";
 import { get, set } from "../store.ts";
 import { errorText, toast, withBusy } from "../ui.ts";
 
@@ -196,7 +196,7 @@ export function renderSettings(): void {
       section(
         "생성 방식",
         "새 곡과 새 전체 버전은 Music 3로 만들어요. 기존 곡의 재생과 내보내기도 계속 사용할 수 있어요.",
-        row("음악 모델", null, h("span", null, "MiniMax Music 3 · MXFP8")),
+        row("음악 모델", "공식 서버와 같은 정밀도로 곡 구조를 먼저 만들고, 이어서 음색을 렌더링해요. 쉬는 동안에는 메모리를 거의 쓰지 않아요.", h("span", null, precisionLabel(state.engine.models.precision))),
         row("버전 다시 만들기", null, h("span", null, "가사와 편곡을 이어 받아 새 전체 곡을 만들어요.")),
       ),
       section(

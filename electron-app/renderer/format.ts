@@ -192,3 +192,10 @@ export function findingCopy(finding: Finding): { label: string; message: string;
       return { label: finding.check, message: finding.message, value: null };
   }
 }
+
+// The server reports the precision it actually loaded; nothing is assumed while it is off.
+export function precisionLabel(profile: string | null): string {
+  if (profile === "official-ar-bfloat16-acoustic-float32") return "MiniMax Music 3 · 공식 정밀도 (BF16 구조 + FP32 음색)";
+  if (profile === "official-ar-bfloat16-acoustic-bfloat16") return "MiniMax Music 3 · BF16 구조 + BF16 음색 (빠른 모드)";
+  return "MiniMax Music 3 · 엔진이 켜지면 표시돼요";
+}

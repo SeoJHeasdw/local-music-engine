@@ -2,7 +2,7 @@ import path from "node:path";
 import type { AssistantKind, Settings, Strength } from "../shared.ts";
 import { requireLoopbackUrl } from "./files.ts";
 
-export const MUSIC3_MODEL = "mlx-community/MiniMax-Music3-mxfp8";
+export const MUSIC3_MODEL = "mlx-community/MiniMax-Music3-bf16";
 export const MUSIC3_BASE_URL = "http://127.0.0.1:18002";
 export const MUSIC3_MAX_DURATION = 300;
 

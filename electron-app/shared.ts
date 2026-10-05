@@ -309,7 +309,7 @@ export type EngineStatus = {
   baseUrl: string;
   owned: boolean;
   engine: "minimax-music3";
-  models: { music: string | null };
+  models: { music: string | null; precision: string | null };
   capabilities: EngineCapabilities;
   maxDurationSeconds: number;
   log: string[];
