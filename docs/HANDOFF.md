@@ -2,6 +2,73 @@
 
 업데이트: 2026-10-06
 
+## 2026-10-06 ACE XL 비교(turbo / xl-turbo / xl-sft)
+
+사용자가 받은 `acestep-v15-xl-turbo`(revision `d4a0b288…`)와 `acestep-v15-xl-sft`(revision `d06de46b…`)의
+8개 shard SHA-256을 HF 메타데이터와 대조했다. 기준 곡 요청(`en-202610071-enhanced-eight`: 영어 8줄·84 BPM·
+A minor·seed 202610071·4B LM·LM 온도 0.6·8개 제작 규칙)을 DiT만 바꿔 조건마다 새 추론 1회씩 만들었다.
+요청 비교에서 모델·step·CFG 외의 차이는 없었다. 모든 결과는 `unreviewed`다.
+
+`scripts/ace_api_server.py`에 세 가지를 고쳤다(자세한 근거는 파일 docstring).
+
+- **XL 적재**: PyTorch 디코더를 MPS에 올린 뒤 해제하면 텐서는 풀려도(MPS 할당 19.95 → 3.28GB) MPS
+  드라이버가 17.29GB를 `empty_cache` 뒤에도 쥐고 있었다. 이제 `from_pretrained` 직후 mmap된 CPU
+  체크포인트에서 텐서 단위로 MLX로 옮기므로 디코더는 MPS에 올라가지 않는다. 3B 파라미터를 넘는 디코더는
+  행렬 가중치를 BF16으로 둔다(`MUSIC_ENGINE_ACE_MLX_DIT_DTYPE=auto|float32|bfloat16`, CUDA의 ACE와 같은
+  정밀도. norm·bias·활성값은 FP32). xl-turbo + 4B LM 상주 40.5GB(swap 25GB) → **26.2GB**.
+- **SFT 무보컬 원인**: 고정 런타임의 REST API에는 `dcw_enabled` 필드가 없어 모든 요청이 DCW on이었다.
+  upstream이 non-turbo에서 소리를 일그러뜨린다고 확인하고 끈 설정이다(ACE-Step #1259, #1282). 로드된
+  모델의 `config.is_turbo`가 아니면 DCW를 끈다. 같은 seed에서 xl-sft 가사 일치가 5% → 100%가 됐다.
+  2026-09-24의 "SFT는 보컬이 없다"는 이 원인으로 설명된다.
+- **MLX APG**: SFT의 CFG(APG) momentum이 PyTorch(`running = diff − 0.75·running`)와 달리 MLX 포트는
+  `diff + running`이었다. PyTorch와 맞췄다(무작위 50 step에서 오차 1.4e-6, 기존 포트는 최대 3.7).
+  보컬 유무와는 무관했다(upstream APG + DCW off도 가사 100%). 다만 upstream APG는 보컬이 반주보다 커졌다.
+
+turbo는 최종 런처에서 기준 곡과 SHA-256(`0f0087…`)이 같다. 출력이 바뀌지 않았다.
+
+| 조건 | DiT 시간 | 가사 일치 | 15–30초 반주−보컬 | 반주 빠짐 / 보컬 단독 | 원음 LUFS | 생성 peak / 끝난 뒤 |
+| --- | --- | --- | --- | --- | --- | --- |
+| turbo(기준 곡과 동일) | 7.3초 | 100% | +2.1 dB | 12.9% / 16.4% | −13.6 | 36.6 / 23.7GB |
+| xl-turbo | 13.1초 | 97.3% | +4.4 dB | 7.8% / 6.9% | −15.1 | 37.0 / 25.8GB |
+| xl-sft(DCW off, APG 수정) | 52.4초 | 100% | +1.8 dB | 8.6% / 12.9% | −13.3 | 37.0 / 25.8GB |
+| xl-sft(DCW on, 수정 전 상태) | 45.1초 | 5.4%(환각 1줄) | +11.9 dB | 0% / 0% | −14.7 | 37.0 / 25.8GB |
+| xl-sft(DCW off, upstream APG) | 45.2초 | 100% | −4.5 dB | 8.6% / 23.3% | −12.2 | 33.6 / 25.8GB |
+
+LM 단계는 모든 조건에서 8초 안팎, 같은 토큰 수(151)였다. 같은 seed·LM이라 멜로디·구조 계획은 같고 DiT의
+렌더링만 다르다. 즉 XL은 "같은 곡을 더 큰 모델로 그린" 비교다. 생성 peak는 모든 조건에서 마지막 MLX VAE
+디코딩(약 5초)에서 +13GB 튀는 값이며 swap이 13–15GB까지 늘었다. 기준 turbo도 같다.
+
+블라인드 청취: `exports/ace-xl-comparison-20261006/A.wav`·`B.wav`·`C.wav`(turbo / xl-turbo / xl-sft를 무작위
+배정, −15.1 LUFS로 낮추는 방향으로만 맞춤). 정답은 같은 폴더 `key.json`이다. 실행기·서버 로그·메모리
+시계열·보고서·`summary.json`은 `.runtime/ace-xl-comparison-20261006/`(Git 제외)에 있다.
+
+사용자 블라인드 청취(정답 확인 전 판정, 세 후보에 `listened`로 기록): A(xl-turbo)와 C(turbo)는 "듣기 좋다,
+찾아서 들을 정도", B(xl-sft)는 "음질까지 깨지는 느낌". 30초에서는 xl-turbo가 turbo보다 낫다고 구분되지
+않았고, xl-sft는 보컬은 돌아왔지만 음질이 불합격이다. xl-sft의 원인(BF16 가중치로 50 step·CFG 7을 누적,
+shift 3.0 등)은 확인하지 않았다. FP32 xl-sft는 4B LM과 함께 이 Mac 메모리에 들어가지 않는다.
+
+### xl-turbo 3분 재연장(사용자 선택)
+
+기존 turbo 3분과 같은 원곡 앞 29.3초·같은 가사·seed 202610101·27.3–180초 repaint(강도 0.8)·크로스페이드로
+DiT만 xl-turbo로 바꿔 새 추론 1회를 했다(`.runtime/three-minute-xl-20261006/extend_song_3min_xl.py`, 원본
+스크립트와 모델·이름만 다름). 총 80초, DiT 35.0초(turbo 20.2초), VAE 10초, 프로세스 peak 37.8GB·swap 17.6GB.
+프로젝트 `projects/city-lights-3min-xl-20261006-104735`, 내보내기 `exports/city-lights-3min-xl-20261006-104735.wav`.
+
+| 3분 곡 | LUFS / TP | 가사 일치 | 보컬 구간 반주−보컬 | 보컬 단독 | 1초 이상 반주 빠짐(앞 12초 제외) | 음악 끝 |
+| --- | --- | --- | --- | --- | --- | --- |
+| turbo(기존) | −13.7 / −1.0 | 93.3% `unknown` | +0.7 dB | 9.4% | 61, 111–112, 116–118, 170–173초 | 176.5초 |
+| xl-turbo | −13.4 / −0.9 | 82.9% `pass`(2절 48%) | +5.0 dB | 6.7% | 43–45, 78–79.5, 124.5–126초 | 178.2초 |
+
+36–46초에서 turbo는 0.25초 단위로 −28~−39 dB까지 떨어지는 짧은 틈이 여러 번 있고, xl-turbo는 41–43초에
+점점 줄어든 뒤 43–45초에 반주가 2.4초 빠진다. 블라인드 사본은 `exports/three-minute-ab-20261006/A.wav`·`B.wav`
+(−13.7 LUFS, 정답 `key.json`: A = xl-turbo, B = turbo).
+
+사용자 블라인드 청취(두 후보에 `listened`로 기록): **A(xl-turbo)가 완성도가 더 높다, 조금만 다듬으면 출시할 수
+있을 것 같다.** B(turbo)가 더 멜로디컬하지만 끊김과 "드 드" 하는 버퍼링 같은 렉이 있고 완성도가 낮다. XL로
+간 이유(끊김·완성도)가 3분 곡에서 확인됐다. 50ms 단위로 15 dB 이상 꺼졌다 돌아오는 200ms 이하 틈은 29.3초
+이후 turbo 43회, xl-turbo 17회였다(`short-gaps.json`). 그러나 사용자가 좋아한 원곡 앞 29.3초에도 10회(초당
+0.34회, turbo 연장부 0.29회)가 있어 이 지표는 렉과 리듬상의 끊음을 구분하지 못한다. 자동 검사로 쓰지 않는다.
+
 ## 2026-10-06 기준 곡 3분 연장(ACE)
 
 사용자 요청으로 기준 곡을 ACE(turbo + 4B LM) repaint 연장으로 3분 곡으로 만들었다. 원곡을 180초로
@@ -22,7 +89,7 @@ padding하고 27.3–180초를 새로 만든 뒤 원곡 0–29.3초를 보존하
 메모리 한도 안에서 다시 시도한다. 과거 XL은 적재 peak 때문에 이 Mac에서 켜지지 않았다.
 사용하지 않는 `.runtime/models/minimax-music3-mxfp8`(13GB)와 BF16 overlay(5.7GB)는 사용자 요청으로 삭제했다.
 
-### 다음 세션 계획: ACE XL 비교(사용자 결정)
+### 다음 세션 계획: ACE XL 비교(사용자 결정, 위 "ACE XL 비교"에서 수행)
 
 사용자는 멜로디·완성도 개선을 위해 ACE XL을 쓰기로 했고, **xl-turbo와 xl-sft를 둘 다 받아 비교**한다.
 다운로드는 하지 않았으며 다음 세션에서 처음부터 시작한다.
