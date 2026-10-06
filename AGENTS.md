@@ -1,8 +1,8 @@
 # 저장소 작업 원칙
 
-- Python 3.12를 사용한다. 프로젝트 환경은 루트 `.venv`, 기본 Music 3 환경은
-  `.runtime/minimax-music3/.venv`로 분리한다. 과거 ACE-Step 환경
-  `.runtime/ace-step-1.5/.venv`와 음원·요청은 보존한다.
+- Python 3.12를 사용한다. 프로젝트 환경은 루트 `.venv`, 앱 기본 엔진(ACE-Step XL turbo) 환경은
+  `.runtime/ace-step-1.5/.venv`로 분리한다. Music 3 코드와 그 음원·요청은 보존한다
+  (모델·실행 환경은 사용자 요청으로 삭제, `scripts/bootstrap_music3.sh`로 다시 준비).
 - 모델, 생성 음원, 개인 입력, 작업 프로젝트, 로그는 Git에 넣지 않는다.
 - `project.json`이 프로젝트·작업·artifact·선택 이력의 정본이다. 저장은 같은 디렉터리의
   임시 파일을 `fsync`한 뒤 원자적으로 교체한다.
@@ -23,5 +23,6 @@ npm run check:app
 npm run test:app
 ```
 
-실제 추론 검사는 별도로 Music 3 서버를 띄운 뒤 수행한다. 과거 ACE 검사는 ACE 서버와
-명시적인 legacy 엔진 선택으로만 수행한다. 실제 추론을 mock 검사로 대체했다고 기록하지 않는다.
+실제 추론 검사는 별도로 ACE 서버(`scripts/start_ace_api.sh`, 기본 DiT XL turbo)를 띄우고 CLI에서는
+`--engine ace-step`을 명시해 수행한다. Music 3 검사는 Music 3를 다시 준비한 뒤에만 한다.
+실제 추론을 mock 검사로 대체했다고 기록하지 않는다.

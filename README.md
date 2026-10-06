@@ -1,52 +1,61 @@
 # local-music-engine
 
 Apple Silicon Mac에서 곡을 만들고, 들어 보고, 가사와 편곡을 다듬는 로컬 제작 엔진과 데스크톱 앱이다.
-기본 생성 엔진은 **MiniMax Music 3 · native MLX · 공식 정밀도(BF16 구조 + FP32 음색)**이다. 설명에서 제목·스타일·가사
-초안을 준비하고, 감성 힙합·신나는 팝 제작 규칙을 골라 새 곡을 만든다. 한국어와 영어 가사를
-지원한다. 발음과 음악적 완성도는 생성한 음원을 직접 들어 확인한다.
+앱의 기본 생성 엔진은 **ACE-Step 1.5 XL turbo(4B DiT) + 4B 5Hz LM · native MLX**다. 설명에서 제목·스타일·가사
+초안을 준비하고, 감성 힙합·신나는 팝 제작 규칙을 골라 새 곡을 만든다. 파형에서 고른 구간만 다시 만들 수
+있다. 한국어와 영어 가사를 지원한다. 발음과 음악적 완성도는 생성한 음원을 직접 들어 확인한다.
 
 원본과 모든 버전을 보존한다. 요청·생성·자동 검사·사람 평가·최종본 선택의 정본은
 `project.json`이다. 자동 검사 통과와 사람 청취 승인은 별도이며, 새 음원은 `unreviewed`다.
-기존 ACE로 만든 곡도 재생·비교·평가·선택·내보낼 수 있다.
+Music 3로 만든 곡도 재생·비교·평가·선택·내보낼 수 있다.
 
 ## 준비
 
-- Apple Silicon Mac, [uv](https://docs.astral.sh/uv/), Node.js, Git
+- Apple Silicon Mac(36GB에서 실측), [uv](https://docs.astral.sh/uv/), Node.js, Git
 - [FFmpeg](https://ffmpeg.org/): 로컬 받아쓰기, true peak·음량 측정
 - 선택: Ollama 또는 OpenAI 호환 loopback LLM. 자유로운 가사 초안과 피드백 해석에 사용
 
 ```bash
 chmod +x scripts/*.sh app.sh
-./scripts/bootstrap_music3.sh  # 독립 Python 3.12 환경과 고정 판본의 약 28.5GB Music 3 BF16 모델 준비(SHA-256 검증)
-./app.sh                      # 프로젝트 Python·Electron 환경 준비, 앱 빌드 및 실행
+./scripts/bootstrap_ace.sh  # 고정 판본의 ACE-Step 실행 환경 준비
+./app.sh                    # 프로젝트 Python·Electron 환경 준비, 앱 빌드 및 실행
 ```
 
-환경은 루트 `.venv`, Music 3의 `.runtime/minimax-music3/.venv`, 품질 검사의
-`.runtime/quality/.venv`로 분리한다. 과거 ACE 환경과 모델은 삭제하지 않는다.
-음원·가사·프로젝트·모델·로그는 Git에 넣지 않는다. 생성과 품질 검사에서 음원·가사를 외부 API에
-업로드하지 않는다. 최초 모델 다운로드에는 인터넷이 필요하다.
+환경은 루트 `.venv`, ACE의 `.runtime/ace-step-1.5/.venv`, 품질 검사의 `.runtime/quality/.venv`로 분리한다.
+모델은 `.runtime/models/`에 둔다. 엔진을 처음 켤 때 없는 모델(XL turbo 약 20GB, 4B LM 약 8GB와 기본 묶음)을
+Hugging Face에서 받는다. 음원·가사·프로젝트·모델·로그는 Git에 넣지 않는다. 생성과 품질 검사에서
+음원·가사를 외부 API에 업로드하지 않는다.
 
-모델은 `mlx-community/MiniMax-Music3-bf16`의 고정 revision을 쓴다. 정밀도는 MiniMax의 기준 서버
-(SGLang-Omni)와 같다. 곡 구조를 만드는 8B global LM·0.6B local LM은 BF16, 음색을 만드는 condition
-encoder·DiT·vocoder는 FP32로 계산한다. 두 단계를 함께 올리면 36GB Mac의 한도를 넘으므로 곡마다 구조
-단계(약 18.5GB)를 올려 생성하고 내린 뒤 음색 단계(약 10GB)를 올려 렌더링한다. 쉬는 동안에는 모델을
-메모리에 두지 않는다. 60초 곡은 약 10분(구조 약 3분 + 음색 약 7분), 생성 peak은 약 19.4GB였다.
-`MUSIC_ENGINE_MUSIC3_ACOUSTIC_DTYPE=bfloat16`은 음색 단계를 BF16으로 계산하는 빠른 모드다. 실제 정밀도는
-health·설정 화면·결과 metadata에 남는다.
-[판본과 라이선스](docs/DECISIONS.md), [전환과 실측](docs/HANDOFF.md)을 참고한다.
+## 음악 엔진
 
-앱은 `scripts/start_music3_api.sh`로 `127.0.0.1:18002` 서버를 켜고, 자기가 켠 서버만 종료한다.
-이미 켜 둔 같은 Music 3 서버는 외부 소유로 사용한다. 다른 엔진이나 모델이 응답하면 준비된
-서버로 인정하지 않는다. 한 번에 한 곡을 계산하며 기본 실행에는 ACE·PyTorch가 필요하지 않다.
+곡의 멜로디·구성은 4B 5Hz LM이 계획하고, DiT가 소리로 그린다. 설정에서 DiT를 고른다.
+
+| DiT | 특징 | 30초 곡 DiT 시간 | 엔진 상주 메모리 |
+| --- | --- | --- | --- |
+| `acestep-v15-xl-turbo` (기본) | 같은 곡을 더 큰 모델로 그린다. 블라인드 청취에서 끊김이 적고 완성도가 높았다 | 13초 | 26.2GB |
+| `acestep-v15-turbo` | 더 빠르다. 블라인드 청취에서 더 멜로디컬했지만 렉·끊김이 있었다 | 7초 | 23.7GB |
+
+같은 seed·LM에서 turbo의 출력은 기존과 비트 단위로 같다. XL은 `scripts/ace_api_server.py`가 체크포인트를
+MPS에 올리기 전에 MLX로 옮기고 행렬 가중치를 BF16으로 둬 이 Mac에 들어가게 한다(ACE가 CUDA에서 쓰는 정밀도).
+모든 조건에서 생성 마지막의 VAE 디코딩이 약 5초 동안 메모리를 13GB 더 쓰고, 3분 곡 peak은 약 38GB였다.
+SFT 계열(`acestep-v15-xl-sft`)은 같은 런처로 보컬이 나오지만 청취에서 음질이 깨져 쓰지 않는다.
+측정과 근거는 [인수인계](docs/HANDOFF.md)에 있다.
+
+앱은 `scripts/start_ace_api.sh`로 `127.0.0.1:18001` 서버를 켜고, 자기가 켠 서버만 종료한다.
+이미 켜 둔 ACE 서버는 외부 소유로 사용한다. 다른 엔진이나 설정과 다른 DiT·LM이 응답하면 준비된
+서버로 인정하지 않는다. 한 번에 한 곡을 계산한다.
 
 큰 로컬 AI 도우미를 부를 때 앱은 자기가 켠 음악 엔진을 잠시 끄고, 답을 받으면 다시 켠다.
 외부에서 켠 서버는 임의로 종료하지 않는다. 곡을 만드는 중에는 도우미를 호출하지 않는다.
 CLI에서 큰 도우미를 부를 때는 엔진을 직접 끈다.
 
-인증 키는 `.runtime/music3-api-key`의 사용자 전용 파일(0600)로 main·CLI·서버가 공유한다.
-별도 키는 `MUSIC_ENGINE_MUSIC3_API_KEY`, 키 파일은 `MUSIC_ENGINE_MUSIC3_API_KEY_FILE`로 지정한다.
-renderer에는 키를 전달하지 않는다. 서버는 인증된 health·생성·진행 조회와 opaque ID의 완료
-WAV 다운로드만 제공하며, 브라우저 Origin·임의 파일 경로·명령·모델 관리 API는 거부한다.
+인증 키는 `.runtime/ace-api-key`의 사용자 전용 파일(0600)로 main·CLI·서버가 공유한다.
+별도 키는 `MUSIC_ENGINE_ACE_API_KEY`, 키 파일은 `MUSIC_ENGINE_ACE_API_KEY_FILE`로 지정한다.
+renderer에는 키를 전달하지 않는다. 서버 앞단은 인증된 요청만 받고 브라우저 Origin을 거부한다.
+
+MiniMax Music 3 엔진 코드(`scripts/start_music3_api.sh`, CLI의 기본 `--engine`)는 남아 있지만 앱에서는 쓰지
+않으며, 모델은 삭제했다. 쓰려면 `./scripts/bootstrap_music3.sh`로 약 28.5GB를 다시 받는다. CLI로 ACE를
+쓸 때는 `--engine ace-step --model acestep-v15-xl-turbo`를 명시한다.
 
 ## 앱
 
@@ -54,18 +63,16 @@ WAV 다운로드만 제공하며, 브라우저 Origin·임의 파일 경로·명
 | --- | --- |
 | 내 곡 | 기존·새 곡 목록, 다른 곡 폴더 열기, 버전·사람 평가 확인 |
 | 새 곡 만들기 | 설명과 언어 → 가사·스타일 초안 → 제작 규칙·전개 계획 → 전체 곡 생성 |
-| 작업실 | 파형·구간 반복·버전 비교, 가사·편곡을 바탕으로 새 전체 버전, 검사·평가·최종본·WAV 내보내기 |
-| 설정 | Music 3 상태·시작·종료·기록, AI 도우미, 저장 위치와 생성 기본값 |
+| 작업실 | 파형·구간 반복·버전 비교, 구간 다시 만들기, 가사·편곡을 바탕으로 새 전체 버전, 검사·평가·최종본·WAV 내보내기 |
+| 설정 | ACE 상태·시작·종료·기록, DiT 선택, AI 도우미, 저장 위치와 생성 기본값 |
 
-기존 설정은 최초 실행 때 Music 3로 옮기고 원본을 백업한다. 저장 위치·AI 도우미·내보내기
-위치와 기존 곡 데이터는 보존한다. 요청 길이 상한은 **300초**다. 길이는 상한 요청이며 모델이
-끝 토큰을 먼저 내면 실제 음원이 더 짧아질 수 있다. 실제 길이는 artifact에 기록하고 무음을
-덧붙여 성공한 것처럼 표시하지 않는다.
+이전 설정(Music 3 또는 첫 ACE 판)은 최초 실행 때 ACE XL turbo로 옮기고 원본을 백업한다
+(`settings-before-ace-xl.json`). 저장 위치·AI 도우미·내보내기 위치와 기존 곡 데이터는 보존한다. 요청 길이
+상한은 **300초**다. 실제 길이는 artifact에 기록하고 무음을 덧붙여 성공한 것처럼 표시하지 않는다.
 
-현재 공개 구현은 텍스트·가사로 **전체 곡 생성**을 지원한다. 음원 참조 커버·음색 복사·선택
-구간 repaint는 지원하지 않는다. 특정 버전을 바탕으로 새로 만들면 그 버전의 **가사·스타일·
-제작 규칙**을 사용한다. 기존 파형을 모델에 전달하지 않는다. 지원하지 않는 편집을 전체 생성으로
-몰래 바꾸지 않는다. 기존 ACE 요청도 Music 3 요청으로 재해석하지 않는다.
+구간 다시 만들기는 고른 구간만 새로 만들고 원본은 그대로 둔다. 앱이 켠 DiT로 요청하므로 turbo로 만든 옛
+버전도 XL로 고칠 수 있고, 어느 모델이 실행됐는지 요청에 남는다. 음원 참조 커버는 CLI(`cover`)에서만 만든다.
+특정 버전을 바탕으로 새로 만들면 그 버전의 **가사·스타일·제작 규칙**을 사용한다.
 
 ## 제작 규칙과 곡 계획
 
@@ -80,7 +87,10 @@ WAV 다운로드만 제공하며, 브라우저 Origin·임의 파일 경로·명
 싱잉랩 구절에서 노래하는 후렴으로, 신나는 팝은 밝은 선율과 탄력 있는 프레이징으로 안내한다.
 선율 규칙은 도입에서 후렴의 주제를 예고하고, 후렴의 리듬·선율 동기와 응답 구절을 반복하도록 안내한다.
 
-Music 3에는 안내를 모델 학습 형식의 구조화된 음악 설명(caption v4)으로 보낸다. MiniMax가 공개한
+ACE에는 직접 쓴 스타일 뒤에 프리셋·규칙 문장을 쉼표로 이은 짧은 caption(약 650자 한도)과 `[Verse - restrained]`
+처럼 구간 안내를 붙인 가사를 보낸다. 화면은 이 한도를 넘으면 알린다.
+
+Music 3(CLI)에는 안내를 모델 학습 형식의 구조화된 음악 설명(caption v4)으로 보낸다. MiniMax가 공개한
 [caption 예시 1,000개](https://github.com/MiniMax-AI/MiniMax-Music3/tree/main/skills/music-caption-rewriter)는
 모두 괄호 없는 `Global Metadata / Vocal Details / Arrangement` 제목과 고정된 13개 항목
 (`Basic Attributes: bpm is 84. key is A, and scale is minor. Hip-Hop / Melodic Rap.`,
@@ -105,13 +115,14 @@ uv run music-engine production-rules
 uv run music-engine draft --query "늦은 밤 감성 힙합" --duration 30 --vocal-language en
 uv run music-engine init projects/my-song --title "내 노래" --lyrics-file lyrics.txt \
   --style "emotional hip hop, warm piano, clear male melodic rap" --duration 60
-uv run music-engine generate projects/my-song --seeds 101
+uv run music-engine generate projects/my-song --seeds 101 --engine ace-step --model acestep-v15-xl-turbo
 uv run music-engine status projects/my-song
 uv run music-engine library --dir projects
 ```
 
 `init`·`revise`·`draft`의 `--production-rules-json`으로 화면과 같은 규칙을 전달한다.
-기본 생성은 Music 3와 `--quality auto --quality-attempts 4`다. 버전마다 첫 생성·재시도를 합쳐
+CLI의 기본 `--engine`은 아직 Music 3이므로 ACE로 만들 때는 `--engine ace-step`을 붙인다. 품질 기본값은
+`--quality auto --quality-attempts 4`다. 버전마다 첫 생성·재시도를 합쳐
 최대 네 번이며 검사 불확실성만으로 다시 만들지 않는다. 모든 시도의 입력과 예산을 첫 batch에
 고정하고, 명시적인 재개도 예산을 늘리지 않는다. 자동 추천은 사람의 최종본 선택과 분리한다.
 [자동 품질 흐름과 한계](docs/AUTO-QUALITY.md)를 참고한다.
@@ -122,7 +133,9 @@ uv run music-engine generate projects/my-song --seeds 102 --quality audio
 uv run music-engine generate projects/my-song --source-candidate-id <candidate-id> \
   --seeds 103 --style "fuller chorus, clear lead vocal"
 uv run music-engine revise projects/my-song --title "새 제목" --duration 120
-uv run music-engine resume projects/my-song --job-id <batch-job-id>
+uv run music-engine repaint projects/my-song --engine ace-step --candidate-id <candidate-id> \
+  --start 41 --end 58 --seed 104 --strength strong --model acestep-v15-xl-turbo
+uv run music-engine resume projects/my-song --engine ace-step --job-id <batch-job-id>
 uv run music-engine recover projects/my-song
 uv run music-engine review projects/my-song <candidate-id> --status listened --note "후렴 좋음"
 uv run music-engine select projects/my-song <candidate-id>
@@ -134,9 +147,8 @@ uv run music-engine export projects/my-song --output ~/Music/my-song.wav
 묵시적으로 재사용하지 않는다. `resume`만 같은 계보·요청 fingerprint·파일 존재·크기·SHA-256이
 모두 일치하는 완료 결과를 재사용한다. export는 프로젝트 밖의 새 파일 이름만 허용한다.
 
-과거 ACE 환경은 명시적인 `--engine ace-step`에서만 사용한다. 과거 요청·음원·이력을 보존하기
-위한 호환 경로다. 과거 실측 실행기는 `scripts/smoke_real_engine.py`와
-`scripts/compare_production.py`로 남는다.
+`repaint`는 고른 구간만 새로 만든 새 버전을 남기며 원본은 바꾸지 않는다. 구간 밖도 조금 달라질 수
+있다. ACE 실측 실행기는 `scripts/smoke_real_engine.py`와 `scripts/compare_production.py`다.
 
 ## 데이터와 검사
 

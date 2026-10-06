@@ -2,6 +2,35 @@
 
 업데이트: 2026-10-06
 
+## 2026-10-06 앱 기본 엔진을 ACE XL turbo로 전환, 모델 정리, A곡 다듬기
+
+사용자 결정: XL을 앱 기본 엔진으로, A곡(xl-turbo 3분) 다듬기, XL 멜로디 후보 추가, 쓰지 않는 모델 삭제.
+
+- **모델 정리**(사용자 선택): `acestep-v15-xl-sft`(19GB), `acestep-5Hz-lm-0.6B`(1.3GB), `minimax-music3-bf16`(27GB)과
+  Music 3 가상환경·upstream 소스를 지웠다(여유 310 → 357GB). Music 3의 과거 원음(`outputs`)과 작업 기록은 남겼다.
+  ACE는 시작할 때 기본 묶음(`acestep-v15-turbo`, `acestep-5Hz-lm-1.7B`, vae, Qwen3-Embedding)이 하나라도 없으면
+  묶음 전체를 다시 받으므로 turbo와 1.7B LM은 쓰지 않아도 지우지 않는다.
+- **앱 전환**: 설정 v3(`engine: "ace-step"`, 기본 DiT `acestep-v15-xl-turbo`, `turbo` 선택 가능, 포트 18001, 4B LM 고정,
+  길이 상한 5분). v2(Music 3)·v1(ACE) 설정은 최초 실행 때 옮기고 원본을 `settings-before-ace-xl.json`에 백업한다.
+  엔진 관리자는 `start_ace_api.sh`에 DiT·LM을 넘기고 `service: "ACE-Step API"`와 켜진 DiT·LM이 설정과 같을 때만
+  준비로 본다. Music 3 때 숨긴 **구간 다시 만들기**(파형 선택 → 범위·강도 → 계획 → repaint)를 되살렸고, repaint는
+  앱이 켠 DiT를 `--model`로 명시한다. 제작 규칙 목록은 ACE용(650자 한도)을 받는다. 앱 초안은 지금처럼 엔진 없이
+  쓰는 로컬 규칙이다. CLI의 기본 `--engine`은 아직 Music 3이다(ACE는 `--engine ace-step` 명시). `start_ace_api.sh`의
+  기본 DiT도 XL turbo다.
+- **실제 앱 검증**(격리 사용자 데이터 `.runtime/ace-app-ui-20261006/`, 실제 설정 사본): v2 → v3 이전·백업, 외부 XL
+  서버를 `external`·repaint 가능으로 인식, 앱 IPC로 A곡 76–82초 구간 계획(`repaint`) → 실행 → 새 수정본·정리본 생성
+  (요청에 `acestep-v15-xl-turbo`·강도 0.5, 원본 SHA-256·모든 artifact 검증, 피드백 문장 기록). 설정에서 turbo로 바꾸면
+  켜진 XL과 불일치로 생성이 막히고 원인 문구가 그대로 보인다. 화면 캡처는 같은 폴더의 `studio.png`·`settings*.png`.
+  실제 사용자 설정 파일은 바꾸지 않았다(다음 앱 실행 때 이전된다).
+- **A곡 다듬기**(41–58초, strong, seed 202610111–3, 각 1회): A는 2절 8줄 중 앞 5줄을 건너뛰고 후렴을 한 번 더 불렀고
+  42.8–45.2초에 반주가 빠졌다. seed 111·112는 빠진 2절을 불러 가사 일치 82.9% → 96%가 됐고, **112는 43–45초 반주
+  공백도 없앴다**(29.3초 이후 짧은 끊김 17 → 12회). 113은 2절 69%. 블라인드 사본 `exports/three-minute-polish-20261006/`
+  (원본 A + 3개, 정답 `key.json`).
+- **XL 멜로디 후보**(같은 앞 29.3초, seed 202610102–4, 각 1회, 약 80초씩): 가사 일치 87 / 95 / 95%. 103은 1초 이상
+  반주 빠짐이 2곳으로 가장 적다(아웃트로 미인식), 104는 5곳, 102는 2절 62%. 블라인드 사본
+  `exports/three-minute-melody-20261006/`(A곡 + 3개). 모두 `unreviewed`. 분석은 `.runtime/three-minute-xl-20261006/
+  candidates-analysis.json`, 연속 6회 실행의 peak 38.2GB·swap 18.8GB.
+
 ## 2026-10-06 ACE XL 비교(turbo / xl-turbo / xl-sft)
 
 사용자가 받은 `acestep-v15-xl-turbo`(revision `d4a0b288…`)와 `acestep-v15-xl-sft`(revision `d06de46b…`)의
