@@ -96,7 +96,7 @@ export async function startEngine(): Promise<void> {
 
 export function engineReady(): boolean {
   const engine = get().engine;
-  return engine.engine === "minimax-music3" && engine.capabilities.text2music
+  return engine.engine === "ace-step" && engine.capabilities.text2music
     && (engine.state === "ready" || engine.state === "external");
 }
 

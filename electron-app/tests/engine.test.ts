@@ -3,8 +3,11 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import { music3LaunchAddress, EngineManager, type EngineDependencies } from "../main/engine.ts";
-import { precisionLabel } from "../renderer/format.ts";
+import { aceLaunchAddress, EngineManager, type EngineDependencies } from "../main/engine.ts";
+import { modelLabel } from "../renderer/format.ts";
+
+const ACE_OK = { status: "ok", service: "ACE-Step API", models_initialized: true, llm_initialized: true,
+  loaded_model: "acestep-v15-xl-turbo", loaded_lm_model: "acestep-5Hz-lm-4B" };
 
 function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -33,11 +36,11 @@ function fixture(
     fetch: async (input, options) => {
       requests.push({ url: String(input), options });
       return external || live
-        ? new Response(JSON.stringify({ data: { status: "ok", engine: "minimax-music3", loaded_model: "mlx-community/MiniMax-Music3-bf16", loaded_lm_model: null, capabilities: { text2music: true }, maxDurationSeconds: 300, models_initialized: true, llm_initialized: true } }))
+        ? new Response(JSON.stringify({ data: ACE_OK }))
         : new Response("", { status: 503 });
     },
     installed: async () => {},
-    logFile: () => "/unused/music3-server.log",
+    logFile: () => "/unused/ace-server.log",
     openLog: async () => ({ write: () => {}, end: () => {} }),
     spawn: (_command, _args, options) => {
       events.push("spawn");
@@ -62,7 +65,7 @@ function fixture(
     authHeaders: async () => ({ Authorization: "Bearer test-only-key" }),
   };
   Object.assign(dependencies, overrides);
-  const engine = new EngineManager(() => baseUrl, () => {}, () => "mlx-community/MiniMax-Music3-bf16", beforeStart, dependencies);
+  const engine = new EngineManager(() => baseUrl, () => {}, () => "acestep-v15-xl-turbo", beforeStart, dependencies);
   return {
     engine, events, requests, launches, dependencies,
     live: () => Boolean(live),
@@ -72,7 +75,7 @@ function fixture(
   };
 }
 
-test("startup holds memory while preparing and an arriving assistant stops Music3 before use", async () => {
+test("startup holds memory while preparing and an arriving assistant stops ACE before use", async () => {
   const preparing = deferred();
   const releasePreparation = deferred();
   let preparationCalls = 0;
@@ -87,7 +90,7 @@ test("startup holds memory while preparing and an arriving assistant stops Music
   await preparing.promise;
   let assistantRan = false;
   const answer = value.engine.handoff.withEngineStopped(async () => {
-    assert.equal(value.live(), false, "the assistant must never share memory with Music3");
+    assert.equal(value.live(), false, "the assistant must never share memory with ACE");
     assistantRan = true;
     value.events.push("assistant");
     return "draft";
@@ -126,7 +129,7 @@ test("a user start waits for an assistant and its automatic restart without dead
   await value.close();
 });
 
-test("failing preparation releases memory for the assistant and does not spawn Music3", async () => {
+test("failing preparation releases memory for the assistant and does not spawn ACE", async () => {
   const value = fixture("http://127.0.0.1:18002", async () => { throw new Error("assistant unload failed"); });
   assert.equal((await value.engine.start()).state, "failed");
   const result = await value.engine.handoff.withEngineStopped(async () => {
@@ -282,18 +285,18 @@ test("a normalized explicit HTTP port 80 launches and polls that same port", asy
   assert.equal(baseUrl, "http://127.0.0.1");
   const value = fixture(baseUrl);
   await value.engine.start();
-  assert.equal(value.launches[0].env?.MUSIC_ENGINE_MUSIC3_PORT, "80");
-  assert.equal(value.launches[0].env?.MUSIC_ENGINE_MUSIC3_HOST, "127.0.0.1");
+  assert.equal(value.launches[0].env?.MUSIC_ENGINE_ACE_PORT, "80");
+  assert.equal(value.launches[0].env?.MUSIC_ENGINE_ACE_HOST, "127.0.0.1");
   assert.equal(value.requests[0].url, "http://127.0.0.1/health");
   await value.close();
 });
 
 test("launch bindings follow validated loopback hosts and ports", () => {
-  assert.deepEqual(music3LaunchAddress("http://localhost:18002"), { host: "localhost", port: "18002" });
-  assert.deepEqual(music3LaunchAddress("http://[::1]:18003/"), { host: "::1", port: "18003" });
-  assert.throws(() => music3LaunchAddress("http://127.0.0.1:18002/prefix"), /경로/);
-  assert.throws(() => music3LaunchAddress("https://127.0.0.1:18002"), /이 Mac/);
-  assert.throws(() => music3LaunchAddress("http://example.com:18002"), /이 Mac/);
+  assert.deepEqual(aceLaunchAddress("http://localhost:18002"), { host: "localhost", port: "18002" });
+  assert.deepEqual(aceLaunchAddress("http://[::1]:18003/"), { host: "::1", port: "18003" });
+  assert.throws(() => aceLaunchAddress("http://127.0.0.1:18002/prefix"), /경로/);
+  assert.throws(() => aceLaunchAddress("https://127.0.0.1:18002"), /이 Mac/);
+  assert.throws(() => aceLaunchAddress("http://example.com:18002"), /이 Mac/);
 });
 
 test("an unavailable prefixed URL fails instead of spawning an unreachable server", async () => {
@@ -316,21 +319,21 @@ test("an external engine is used as configured and is never stopped for the assi
   assert.deepEqual(value.events, []);
 });
 
-test("Music3 launch selects the installed runtime and does not pass ACE model options", async () => {
+test("ACE launch passes the configured DiT and the 4B LM to the start script", async () => {
   const value = fixture();
   await value.engine.start();
   const env = value.launches[0].env!;
-  assert.equal(env.MUSIC_ENGINE_MUSIC3_PORT, "18002");
-  assert.equal(env.MUSIC_ENGINE_MUSIC3_MODEL, "mlx-community/MiniMax-Music3-bf16");
-  assert.equal(env.MUSIC_ENGINE_ACE_DIT_MODEL, process.env.MUSIC_ENGINE_ACE_DIT_MODEL);
-  assert.equal(env.MUSIC_ENGINE_ACE_LM_MODEL, process.env.MUSIC_ENGINE_ACE_LM_MODEL);
+  assert.equal(env.MUSIC_ENGINE_ACE_PORT, "18002");
+  assert.equal(env.MUSIC_ENGINE_ACE_DIT_MODEL, "acestep-v15-xl-turbo");
+  assert.equal(env.MUSIC_ENGINE_ACE_LM_MODEL, "acestep-5Hz-lm-4B");
+  assert.equal(env.MUSIC_ENGINE_MUSIC3_MODEL, process.env.MUSIC_ENGINE_MUSIC3_MODEL);
   await value.close();
 });
 
-test("loading Music3 becomes ready only after model initialization", async () => {
+test("loading ACE becomes ready only after model initialization", async () => {
   let loaded = false;
   const value = fixture("http://127.0.0.1:18002", async () => {}, {
-    fetch: async () => new Response(JSON.stringify({ data: { status: "ok", engine: "minimax-music3", loaded_model: "mlx-community/MiniMax-Music3-bf16", models_initialized: loaded, loaded_lm_model: null, capabilities: { text2music: true }, maxDurationSeconds: 300 } })),
+    fetch: async () => new Response(JSON.stringify({ data: { ...ACE_OK, models_initialized: loaded, loaded_model: loaded ? ACE_OK.loaded_model : null, loaded_lm_model: null } })),
   });
   assert.equal((await value.engine.check()).state, "starting");
   assert.equal(value.engine.isReady(), false);
@@ -341,23 +344,23 @@ test("loading Music3 becomes ready only after model initialization", async () =>
   assert.equal(value.engine.snapshot().maxDurationSeconds, 300);
 });
 
-test("the settings view names only the precision the server reports as loaded", async () => {
-  let precision: unknown = { profile: "official-ar-bfloat16-acoustic-float32", ar: "bfloat16", acoustic: "float32" };
+test("the views name the DiT and LM the server reports as loaded, and a loaded ACE can repaint", async () => {
   const value = fixture("http://127.0.0.1:18002", async () => {}, {
-    fetch: async () => new Response(JSON.stringify({ data: { status: "ok", engine: "minimax-music3", loaded_model: "mlx-community/MiniMax-Music3-bf16", models_initialized: true, loaded_lm_model: null, capabilities: { text2music: true }, maxDurationSeconds: 300, precision } })),
+    fetch: async () => new Response(JSON.stringify({ data: ACE_OK })),
   });
-  assert.equal((await value.engine.check()).models.precision, "official-ar-bfloat16-acoustic-float32");
-  assert.equal(precisionLabel(value.engine.snapshot().models.precision), "MiniMax Music 3 · 공식 정밀도 (BF16 구조 + FP32 음색)");
-  precision = { profile: "official-ar-bfloat16-acoustic-bfloat16" };
-  assert.match(precisionLabel((await value.engine.check()).models.precision), /빠른 모드/);
-  precision = undefined;
-  assert.equal((await value.engine.check()).models.precision, null);
-  assert.match(precisionLabel(null), /엔진이 켜지면/);
+  const status = await value.engine.check();
+  assert.deepEqual(status.models, { music: "acestep-v15-xl-turbo", lm: "acestep-5Hz-lm-4B" });
+  assert.equal(modelLabel(status.models.music), "ACE-Step XL turbo");
+  assert.equal(modelLabel("acestep-v15-turbo"), "ACE-Step turbo");
+  assert.equal(modelLabel("another-dit"), "another-dit");
+  assert.match(modelLabel(null), /엔진이 켜지면/);
+  assert.deepEqual(status.capabilities, { text2music: true, cover: false, repaint: true, referenceAudio: false });
+  assert.equal(status.maxDurationSeconds, 300);
 });
 
 test("an owned model-loading failure is reported safely and can restart its failed HTTP process", async () => {
-  const failedData = { status: "error", stage: "failed", engine: "minimax-music3",
-    loaded_model: "mlx-community/MiniMax-Music3-bf16", loaded_lm_model: null,
+  const failedData = { status: "error", stage: "failed", service: "ACE-Step API",
+    loaded_model: "acestep-v15-xl-turbo", loaded_lm_model: "acestep-5Hz-lm-4B",
     models_initialized: false, capabilities: { text2music: true }, error: "Bearer secret-key in an internal exception" };
   const value = fixture("http://127.0.0.1:18002", async () => {}, {
     fetch: async () => value.live()
@@ -384,8 +387,8 @@ test("an owned model-loading failure is reported safely and can restart its fail
 
 test("an external loading failure remains external and is never stopped, replaced, or shared with an assistant", async () => {
   const value = fixture("http://127.0.0.1:18002", async () => {}, {
-    fetch: async () => new Response(JSON.stringify({ data: { status: "error", stage: "failed", engine: "minimax-music3",
-      loaded_model: "mlx-community/MiniMax-Music3-bf16", models_initialized: false, loaded_lm_model: null,
+    fetch: async () => new Response(JSON.stringify({ data: { status: "error", stage: "failed", service: "ACE-Step API",
+      loaded_model: "acestep-v15-xl-turbo", models_initialized: false, loaded_lm_model: "acestep-5Hz-lm-4B",
       capabilities: { text2music: true }, error: "private failed-response-body" } })),
   });
   const failed = await value.engine.start();
@@ -399,11 +402,11 @@ test("an external loading failure remains external and is never stopped, replace
   assert.equal(value.engine.isReady(), false);
 });
 
-test("wrong engine, wrong Music3 model, or missing generation capability never becomes ready", async () => {
+test("another engine, another DiT, or another LM never becomes ready", async () => {
   for (const data of [
-    { engine: "ace-step", loaded_model: "acestep-v15-turbo", capabilities: { text2music: true } },
-    { engine: "minimax-music3", loaded_model: "unrelated/model", capabilities: { text2music: true } },
-    { engine: "minimax-music3", loaded_model: "mlx-community/MiniMax-Music3-bf16", capabilities: { text2music: false } },
+    { engine: "minimax-music3", loaded_model: "mlx-community/MiniMax-Music3-bf16", loaded_lm_model: null },
+    { service: "ACE-Step API", loaded_model: "acestep-v15-turbo", loaded_lm_model: "acestep-5Hz-lm-4B" },
+    { service: "ACE-Step API", loaded_model: "acestep-v15-xl-turbo", loaded_lm_model: "acestep-5Hz-lm-1.7B" },
   ]) {
     const value = fixture("http://127.0.0.1:18002", async () => {}, {
       fetch: async () => new Response(JSON.stringify({ data: { status: "ok", models_initialized: true, ...data } })),
@@ -506,7 +509,7 @@ test("a delayed poll for an old address cannot report the new address as ready",
   const oldPoll = value.engine.check();
   value.setUrl("http://127.0.0.1:18009");
   await value.engine.check();
-  pending.resolve(new Response(JSON.stringify({ data: { status: "ok", engine: "minimax-music3", models_initialized: true, loaded_model: "mlx-community/MiniMax-Music3-bf16", capabilities: { text2music: true } } })));
+  pending.resolve(new Response(JSON.stringify({ data: ACE_OK })));
   await oldPoll;
   assert.equal(value.engine.snapshot().state, "offline");
   assert.equal(value.engine.snapshot().baseUrl, "http://127.0.0.1:18009");

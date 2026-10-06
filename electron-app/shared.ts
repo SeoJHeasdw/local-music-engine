@@ -308,8 +308,8 @@ export type EngineStatus = {
   detail: string;
   baseUrl: string;
   owned: boolean;
-  engine: "minimax-music3";
-  models: { music: string | null; precision: string | null };
+  engine: "ace-step";
+  models: { music: string | null; lm: string | null };
   capabilities: EngineCapabilities;
   maxDurationSeconds: number;
   log: string[];
@@ -320,13 +320,18 @@ export type AssistantKind = "rules" | "ollama" | "openai";
 
 export type EngineCapabilities = { text2music: boolean; cover: boolean; repaint: boolean; referenceAudio: boolean };
 
+// The DiT checkpoints this build runs. XL renders the same song with a larger model
+// (listening, 2026-10-06: more finished, fewer glitches); turbo is faster.
+export const ACE_DIT_MODELS = ["acestep-v15-xl-turbo", "acestep-v15-turbo"] as const;
+export type AceDitModel = (typeof ACE_DIT_MODELS)[number];
+
 export type Settings = {
-  schemaVersion: 2;
-  engine: "minimax-music3";
+  schemaVersion: 3;
+  engine: "ace-step";
   projectsDir: string;
   engineBaseUrl: string;
   engineAutoStart: boolean;
-  musicModel: string;
+  musicModel: AceDitModel;
   defaultVersions: number;
   defaultDurationSeconds: number;
   feedbackStrength: Strength;

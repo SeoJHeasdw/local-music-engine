@@ -6,8 +6,8 @@ import { engineRoot } from "./paths.ts";
 
 // Never pass this credential through preload, settings, logs or renderer events.
 function keyPath(): string {
-  const configured = process.env.MUSIC_ENGINE_MUSIC3_API_KEY_FILE;
-  return configured ? path.resolve(configured.replace(/^~(?=\/|$)/, process.env.HOME ?? "~")) : path.join(engineRoot, ".runtime", "music3-api-key");
+  const configured = process.env.MUSIC_ENGINE_ACE_API_KEY_FILE;
+  return configured ? path.resolve(configured.replace(/^~(?=\/|$)/, process.env.HOME ?? "~")) : path.join(engineRoot, ".runtime", "ace-api-key");
 }
 
 function validate(value: string): string {
@@ -17,7 +17,9 @@ function validate(value: string): string {
 }
 
 async function readKey(): Promise<string | null> {
-  if (process.env.MUSIC_ENGINE_MUSIC3_API_KEY !== undefined) return validate(process.env.MUSIC_ENGINE_MUSIC3_API_KEY);
+  for (const name of ["MUSIC_ENGINE_ACE_API_KEY", "ACESTEP_API_KEY"]) {
+    if (process.env[name] !== undefined) return validate(process.env[name]!);
+  }
   let handle;
   try {
     handle = await open(keyPath(), constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -35,16 +37,16 @@ async function readKey(): Promise<string | null> {
   }
 }
 
-export async function music3AuthHeaders(): Promise<Record<string, string>> {
+export async function aceAuthHeaders(): Promise<Record<string, string>> {
   const key = await readKey();
   return key === null ? {} : { Authorization: `Bearer ${key}` };
 }
 
-export async function ensureMusic3ApiKey(): Promise<void> {
+export async function ensureAceApiKey(): Promise<void> {
   if (await readKey() !== null) return;
   const destination = keyPath();
   await mkdir(path.dirname(destination), { recursive: true });
-  const temporary = path.join(path.dirname(destination), `.music3-api-key-${randomUUID()}`);
+  const temporary = path.join(path.dirname(destination), `.ace-api-key-${randomUUID()}`);
   try {
     const handle = await open(temporary, "wx", 0o600);
     try {

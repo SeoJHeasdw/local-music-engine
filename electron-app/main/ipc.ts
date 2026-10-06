@@ -22,7 +22,7 @@ import type {
 } from "../shared.ts";
 import { runCli } from "./cli.ts";
 import { EngineManager } from "./engine.ts";
-import { music3GenerationArgs, music3Ready, requireFullGeneration } from "./generation-arguments.ts";
+import { aceGenerationArgs, aceReady, aceRepaintArgs, requirePlanAction } from "./generation-arguments.ts";
 import { requireLoopbackUrl } from "./files.ts";
 import { engineRoot } from "./paths.ts";
 import { currentSettings, loadAppState, loadSettings, saveSettings, updateAppState } from "./settings.ts";
@@ -118,10 +118,12 @@ export class Controller {
 
   private async requireEngine(): Promise<void> {
     if (this.engine.handoff.active()) throw new Error("AI 도우미가 답하는 중이라 음악 엔진을 잠시 꺼 뒀어요. 끝나면 다시 켜져요.");
-    if (music3Ready(this.engine.snapshot()) && (this.engine.isReady() || this.engine.recentlyHealthy())) return;
+    if (aceReady(this.engine.snapshot()) && (this.engine.isReady() || this.engine.recentlyHealthy())) return;
     const status = await this.engine.check();
-    if (music3Ready(status)) return;
+    if (aceReady(status)) return;
     if (status.state === "starting") throw new Error("음악 엔진을 켜는 중이에요. 준비되면 다시 시도하세요.");
+    // A running engine with another model reports why; "off" would hide that.
+    if (status.state === "failed" || status.state === "missing") throw new Error(status.detail);
     throw new Error("음악 엔진이 꺼져 있어요. 왼쪽 아래에서 엔진을 켜세요.");
   }
 
@@ -147,7 +149,7 @@ export class Controller {
   }
 
   private generationArgs(folder: string, count: number): string[] {
-    return music3GenerationArgs(folder, this.seeds(count), currentSettings());
+    return aceGenerationArgs(folder, this.seeds(count), currentSettings());
   }
 
   private async startTask(spec: Omit<TaskSpec, "songId" | "songTitle">, context?: SongContext): Promise<SongState> {
@@ -194,7 +196,7 @@ export class Controller {
   }
 
   private productionRuleCatalog(): Promise<ProductionCatalog> {
-    this.productionCatalog ??= runCli<ProductionCatalog>(["production-rules"]).catch((error) => {
+    this.productionCatalog ??= runCli<ProductionCatalog>(["production-rules", "--engine", "ace-step"]).catch((error) => {
       this.productionCatalog = null;
       throw error;
     });
@@ -392,7 +394,7 @@ export class Controller {
       return this.startTask({ kind: "generate", folder: context.folder, label: `가사·편곡으로 새 버전 ${validated.versions}개 만들기`, args, total: validated.versions, jobKind: "candidate-batch" }, context);
     });
     // Older app windows cannot turn a cover request into unrelated full generation.
-    handle("cover-song", () => { throw new Error("Music 3는 원본 음원을 참조하는 커버를 지원하지 않아요. 가사·편곡으로 새 전체 버전을 만들 수 있어요."); });
+    handle("cover-song", () => { throw new Error("원본 음원을 참조하는 커버는 앱에서 아직 만들 수 없어요. 가사·편곡으로 새 전체 버전을 만들 수 있어요."); });
     handle("plan", async (input: PlanInput): Promise<Plan> => {
       const context = this.session.require(input?.songId);
       const { folder } = context;
@@ -403,8 +405,12 @@ export class Controller {
       const versions = Math.min(4, Math.max(1, Math.round(Number(input?.versions) || 2)));
       const settings = currentSettings();
       const args = ["plan", folder, versionId, "--feedback", feedback, "--strength", strength, "--versions", String(versions)];
-      if (input.range) throw new Error("Music 3는 구간 수정을 지원하지 않아요. 곡 전체의 새 버전으로 요청해 주세요.");
-      args.push("--engine", "minimax-music3");
+      if (input.range) {
+        const { startSeconds, endSeconds } = input.range;
+        if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || startSeconds < 0 || endSeconds <= startSeconds) throw new Error("구간이 올바르지 않아요.");
+        args.push("--start", startSeconds.toFixed(2), "--end", endSeconds.toFixed(2));
+      }
+      args.push("--engine", "ace-step");
       args.push(...this.assistantArgs());
       return this.withAssistant(() => runCli<Plan>(args));
     });
@@ -413,7 +419,7 @@ export class Controller {
       const { folder } = context;
       this.requireIdle(folder);
       const versionId = requireVersionId(plan?.candidateId);
-      requireFullGeneration(plan);
+      requirePlanAction(plan);
       const style = String(plan.stylePrompt ?? "").trim();
       if (!style || style.length > 1500) throw new Error("스타일 문장이 비어 있거나 너무 길어요.");
       const strength = strengths.includes(plan.strength) ? plan.strength : "medium";
@@ -424,6 +430,23 @@ export class Controller {
       const feedback = JSON.stringify({ text, candidateId: versionId, range: plan.range, plan });
       if (typeof plan.lyrics === "string" && plan.lyrics.trim()) {
         if (plan.lyrics.length > 4096) throw new Error("가사가 너무 길어요.");
+      }
+      if (plan.action === "repaint" && plan.range) {
+        const range = plan.range;
+        return this.startTask({
+          kind: "repaint",
+          folder,
+          label: `${clock(range.startSeconds)}–${clock(range.endSeconds)} 다시 만들기`,
+          args: [
+            ...aceRepaintArgs(folder, versionId, range, this.seeds(1), settings),
+            "--style", style,
+            ...(typeof plan.lyrics === "string" && plan.lyrics.trim() ? ["--lyrics", plan.lyrics] : []),
+            "--strength", strength,
+            "--feedback-json", feedback,
+          ],
+          total: 1,
+          jobKind: "repaint-candidate",
+        }, context);
       }
       const count = Math.min(4, Math.max(1, Math.round(Number(plan.versions) || 2)));
       const args = [...this.generationArgs(folder, count), "--source-candidate-id", versionId, "--style", style, "--feedback-json", feedback];
@@ -460,7 +483,7 @@ export class Controller {
         kind: "resume",
         folder,
         label: "멈춘 생성 이어서 만들기",
-        args: ["resume", folder, "--job-id", target.jobId, "--base-url", currentSettings().engineBaseUrl],
+        args: ["resume", folder, "--engine", "ace-step", "--job-id", target.jobId, "--base-url", currentSettings().engineBaseUrl],
         total: target.seeds?.length ?? 1,
         jobKind: "candidate-batch",
       }, context);
@@ -499,12 +522,15 @@ export class Controller {
       const before = currentSettings();
       const allowed: Partial<Settings> = {};
       for (const key of [
-        "engineBaseUrl", "engineAutoStart", "defaultVersions",
+        "engineBaseUrl", "engineAutoStart", "musicModel", "defaultVersions",
         "defaultDurationSeconds", "feedbackStrength", "assistant",
       ] as const) {
         if (partial && key in partial) (allowed as Record<string, unknown>)[key] = partial[key];
       }
       let next: Settings;
+      if (allowed.musicModel !== undefined && allowed.musicModel !== before.musicModel && (this.tasks.snapshot() || this.startingGeneration)) {
+        throw new Error("곡 만들기가 끝난 뒤 음악 모델을 바꿔 주세요.");
+      }
       if (allowed.engineBaseUrl !== undefined && requireLoopbackUrl(allowed.engineBaseUrl, "음악 엔진") !== before.engineBaseUrl) {
         if (this.tasks.snapshot() || this.startingGeneration) throw new Error("곡 만들기가 끝나고 음악 엔진을 끈 뒤 주소를 바꿔 주세요.");
         next = await this.engine.withConnectionChange(allowed.engineBaseUrl, () => saveSettings(allowed));
@@ -542,6 +568,11 @@ export class Controller {
     });
     handle("engine-check", () => this.engine.check());
   }
+}
+
+function clock(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
 }
 
 function requireVersionId(value: unknown): string {

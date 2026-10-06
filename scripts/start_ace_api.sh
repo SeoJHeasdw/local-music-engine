@@ -13,7 +13,7 @@ case "$HOST" in
 esac
 # The server loads one DiT and one LM at start and ignores per-request model names
 # for anything else, so the model choice belongs here, not in each request.
-DIT_MODEL="${MUSIC_ENGINE_ACE_DIT_MODEL:-acestep-v15-turbo}"
+DIT_MODEL="${MUSIC_ENGINE_ACE_DIT_MODEL:-acestep-v15-xl-turbo}"
 LM_MODEL="${MUSIC_ENGINE_ACE_LM_MODEL:-acestep-5Hz-lm-4B}"
 
 if [[ ! -x "$ACE_ROOT/.venv/bin/acestep-api" ]]; then

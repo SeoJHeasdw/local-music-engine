@@ -64,9 +64,9 @@ export function productionPreview(input: ProductionPreviewInput, catalog?: Produ
   const additions = [preset?.caption, ...captions.map((rule) => rule.caption)].filter((caption): caption is string => Boolean(caption) && !baseStyle.toLowerCase().includes(caption!.toLowerCase()));
   const stylePrompt = [baseStyle, ...additions].filter(Boolean).join(", ");
   const warnings: string[] = [];
-  // Music3 supports detailed guidance. This preview contains style plus rules,
-  // whereas the API limit includes the complete structured prompt. Character
-  // counts do not estimate the model's token budget or imply omitted delivery.
+  // The engine's catalog sets this bound (ACE 650 characters for its short caption,
+  // Music 3 16,000). This preview contains style plus rules; character counts do not
+  // estimate the model's token budget or imply omitted delivery.
   if (stylePrompt.length > (catalog?.captionBudgetCharacters ?? 16_000)) {
     warnings.push("제작 안내가 길어요. 중요한 분위기와 편곡 방향을 분명히 정리해 주세요.");
   }

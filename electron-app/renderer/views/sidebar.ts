@@ -1,6 +1,6 @@
 import { engineReady, go, startEngine } from "../actions.ts";
 import { byId, h, icon, mount } from "../dom.ts";
-import { elapsed } from "../format.ts";
+import { elapsed, modelLabel } from "../format.ts";
 import { get, type View } from "../store.ts";
 
 const engineCopy: Record<string, { label: string; tone: string }> = {
@@ -88,7 +88,7 @@ export function renderSidebar(): void {
       ),
       engine.state === "starting" && h("p", { class: "engine-detail" }, engine.detail, " · ", elapsed(engine.since)),
       ["failed", "missing"].includes(engine.state) && h("p", { class: "engine-detail" }, engine.detail),
-      engineReady() && engine.models.music && h("p", { class: "engine-detail mono" }, "Music 3"),
+      engineReady() && engine.models.music && h("p", { class: "engine-detail mono" }, modelLabel(engine.models.music)),
       canStart &&
         h(
           "button",

@@ -3,24 +3,26 @@ import { createWriteStream } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
-import type { EngineCapabilities, EngineStatus } from "../shared.ts";
-import { music3AuthHeaders, ensureMusic3ApiKey } from "./music3-auth.ts";
+import type { EngineStatus } from "../shared.ts";
+import { aceAuthHeaders, ensureAceApiKey } from "./ace-auth.ts";
 import { requireLoopbackUrl } from "./files.ts";
 import { MemoryHandoff, type Ownership } from "./handoff.ts";
-import { music3Python, music3Server, music3StartScript, engineRoot } from "./paths.ts";
+import { acePython, aceServer, aceStartScript, engineRoot } from "./paths.ts";
+import { ACE_LM_MODEL, ACE_MAX_DURATION } from "./settings-schema.ts";
 
 type Health = {
   status?: "ok" | "error";
   stage?: string;
-  engine?: string;
-  capabilities?: Partial<EngineCapabilities>;
-  maxDurationSeconds?: number;
+  service?: string;
   models_initialized?: boolean;
   llm_initialized?: boolean;
   loaded_model?: string | null;
   loaded_lm_model?: string | null;
-  precision?: { profile?: string } | null;
 };
+
+// ACE serves text-to-music and repaint once its DiT and LM are loaded. Cover stays a
+// CLI feature; the app does not offer it.
+const ACE_SERVICE = "ACE-Step API";
 
 type LogSink = { write(chunk: string): unknown; end(): unknown };
 export type EngineDependencies = {
@@ -37,11 +39,11 @@ export type EngineDependencies = {
 
 const defaultDependencies: EngineDependencies = {
   fetch: (...args) => fetch(...args),
-  installed: async () => { await access(music3Python); await access(music3Server); },
+  installed: async () => { await access(acePython); await access(aceServer); },
   logFile: () => {
     // Lazy loading lets the manager run with injected OS dependencies in Node tests.
     const { app } = createRequire(import.meta.url)("electron") as typeof import("electron");
-    return path.join(app.getPath("userData"), "logs", "music3-server.log");
+    return path.join(app.getPath("userData"), "logs", "ace-server.log");
   },
   openLog: async (file) => {
     await mkdir(path.dirname(file), { recursive: true });
@@ -50,17 +52,17 @@ const defaultDependencies: EngineDependencies = {
   spawn,
   kill: killGroup,
   pause: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  ensureApiKey: ensureMusic3ApiKey,
-  authHeaders: music3AuthHeaders,
+  ensureApiKey: ensureAceApiKey,
+  authHeaders: aceAuthHeaders,
 };
 
-export function music3LaunchAddress(baseUrl: string): { host: string; port: string } {
+export function aceLaunchAddress(baseUrl: string): { host: string; port: string } {
   const url = new URL(requireLoopbackUrl(baseUrl, "음악 엔진"));
   if (url.pathname !== "/") throw new Error("앱에서 켤 음악 엔진 주소에는 경로를 넣을 수 없어요.");
   return { host: url.hostname.replace(/^\[|\]$/g, ""), port: url.port || "80" };
 }
 
-// The Music3 server may already be running (started from a terminal). A responding server
+// The ACE server may already be running (started from a terminal). A responding server
 // is used as-is and never stopped by the app; only a server this app started is owned.
 export class EngineManager {
   private child: ChildProcess | null = null;
@@ -132,10 +134,10 @@ export class EngineManager {
       detail,
       baseUrl: displayUrl,
       owned,
-      engine: "minimax-music3",
-      models: { music: health?.loaded_model ?? null, precision: typeof health?.precision?.profile === "string" ? health.precision.profile : null },
-      capabilities: { text2music: health?.capabilities?.text2music === true, cover: false, repaint: false, referenceAudio: false },
-      maxDurationSeconds: Math.min(300, Math.max(10, Number(health?.maxDurationSeconds) || 300)),
+      engine: "ace-step",
+      models: { music: health?.loaded_model ?? null, lm: health?.loaded_lm_model ?? null },
+      capabilities: { text2music: health?.models_initialized === true, cover: false, repaint: health?.models_initialized === true, referenceAudio: false },
+      maxDurationSeconds: ACE_MAX_DURATION,
       log: [],
       since: this.status && this.status.state === state ? this.status.since : Date.now(),
     };
@@ -148,6 +150,7 @@ export class EngineManager {
       next.baseUrl !== this.status.baseUrl ||
       next.owned !== this.status.owned ||
       next.models.music !== this.status.models.music ||
+      next.models.lm !== this.status.models.lm ||
       next.capabilities.text2music !== this.status.capabilities.text2music;
     this.status = next;
     if (changed) this.emit(this.snapshot());
@@ -187,13 +190,13 @@ export class EngineManager {
         this.lastHealthyAt = 0;
         const recovery = owned ? "다시 켜 보세요. 계속 실패하면 엔진 기록을 확인하세요."
           : "앱 밖에서 켠 엔진을 끈 뒤 다시 켜 주세요.";
-        this.set(this.make("failed", `Music 3 모델을 불러오지 못했어요. ${recovery}`, owned, health));
+        this.set(this.make("failed", `음악 모델을 불러오지 못했어요. ${recovery}`, owned, health));
       } else if (!health.models_initialized) {
         this.lastHealthyAt = 0;
         this.set(this.make("starting", "모델을 메모리에 올리는 중", owned, health));
       } else {
         this.lastHealthyAt = Date.now();
-        this.set(this.make(owned ? "ready" : "external", owned ? "앱이 켠 Music 3" : "이미 켜져 있던 Music 3", owned, health));
+        this.set(this.make(owned ? "ready" : "external", owned ? "앱이 켠 ACE-Step" : "이미 켜져 있던 ACE-Step", owned, health));
       }
     } else if (this.child && !this.stopping) {
       if (owned) this.set(this.make("starting", this.lastLogLine() || "엔진을 켜는 중", true));
@@ -216,12 +219,11 @@ export class EngineManager {
   }
 
   private modelMismatch(health: Health): string | null {
-    if (health.engine !== "minimax-music3") return "다른 음악 엔진이 이 주소에 켜져 있어요. Music 3 주소를 확인하세요.";
-    if (health.models_initialized && health.capabilities?.text2music !== true) return "이 엔진은 곡 만들기를 지원하지 않아요.";
-    if (!health.models_initialized && !health.loaded_model) return null;
-    if (health.loaded_model === this.model() && !health.loaded_lm_model) return null;
-    const restart = this.child ? "엔진을 껐다 켜면 설정한 모델로 바뀌어요." : "앱 밖에서 켠 엔진이라 그 엔진을 Music 3 모델로 다시 켜야 해요.";
-    return `설정과 다른 모델이 켜져 있어요. ${restart}`;
+    if (health.service !== ACE_SERVICE) return "다른 음악 엔진이 이 주소에 켜져 있어요. ACE-Step 주소를 확인하세요.";
+    const loaded = [health.loaded_model, health.loaded_lm_model];
+    if ((!loaded[0] || loaded[0] === this.model()) && (!loaded[1] || loaded[1] === ACE_LM_MODEL)) return null;
+    const restart = this.child ? "엔진을 껐다 켜면 설정한 모델로 바뀌어요." : "앱 밖에서 켠 엔진이라 그 엔진을 설정한 모델로 다시 켜야 해요.";
+    return `설정과 다른 모델이 켜져 있어요 (${loaded.filter(Boolean).join(" · ")}). ${restart}`;
   }
 
   private lastLogLine(): string {
@@ -301,13 +303,13 @@ export class EngineManager {
       await this.dependencies.installed();
     } catch {
       if (this.currentStartup(lifecycle)) {
-        this.set(this.make("missing", "Music 3가 아직 설치되지 않았어요. 설치를 마친 뒤 다시 켜 주세요.", false));
+        this.set(this.make("missing", "ACE-Step이 아직 설치되지 않았어요. scripts/bootstrap_ace.sh로 설치한 뒤 다시 켜 주세요.", false));
       }
       return this.snapshot();
     }
     if (!this.currentStartup(lifecycle)) return this.snapshot();
     const launchUrl = this.baseUrl();
-    const { host, port } = music3LaunchAddress(launchUrl);
+    const { host, port } = aceLaunchAddress(launchUrl);
     await this.beforeStart();
     if (!this.currentStartup(lifecycle)) return this.snapshot();
     await this.dependencies.ensureApiKey();
@@ -321,13 +323,14 @@ export class EngineManager {
     const model = this.model();
     this.appendLog(`\n--- ${new Date().toISOString()} 앱에서 엔진 시작 (port ${port}, ${model}) ---\n`);
     this.stopping = false;
-    const child = this.dependencies.spawn("/bin/bash", [music3StartScript], {
+    const child = this.dependencies.spawn("/bin/bash", [aceStartScript], {
       cwd: engineRoot,
       env: {
         ...process.env,
-        MUSIC_ENGINE_MUSIC3_HOST: host,
-        MUSIC_ENGINE_MUSIC3_PORT: port,
-        MUSIC_ENGINE_MUSIC3_MODEL: model,
+        MUSIC_ENGINE_ACE_HOST: host,
+        MUSIC_ENGINE_ACE_PORT: port,
+        MUSIC_ENGINE_ACE_DIT_MODEL: model,
+        MUSIC_ENGINE_ACE_LM_MODEL: ACE_LM_MODEL,
         PYTHONUNBUFFERED: "1",
       },
       detached: true,

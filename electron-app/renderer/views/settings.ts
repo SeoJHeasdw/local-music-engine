@@ -1,7 +1,7 @@
-import type { AssistantKind, Settings } from "../../shared.ts";
+import { ACE_DIT_MODELS, type AceDitModel, type AssistantKind, type Settings } from "../../shared.ts";
 import { api, engineReady, refreshSongs } from "../actions.ts";
 import { byId, h, icon, mount } from "../dom.ts";
-import { elapsed, lengthLabel, precisionLabel } from "../format.ts";
+import { elapsed, lengthLabel, modelLabel } from "../format.ts";
 import { get, set } from "../store.ts";
 import { errorText, toast, withBusy } from "../ui.ts";
 
@@ -77,7 +77,7 @@ export function renderSettings(): void {
       { class: "engine-status-text" },
       h("b", null, engineState[engine.state] ?? engine.state),
       h("p", null, engine.state === "starting" ? `${engine.detail} · ${elapsed(engine.since)}` : engine.detail),
-      engineReady() && h("p", null, "MiniMax Music 3 · 최대 5분"),
+      engineReady() && h("p", null, `${modelLabel(engine.models.music)} · 최대 5분`),
     ),
     h(
       "div",
@@ -147,7 +147,7 @@ export function renderSettings(): void {
       { class: "settings" },
       section(
         "음악 엔진",
-        "MiniMax Music 3가 이 Mac 안에서 곡을 만들어요. 곡을 생성하는 동안 모델이 메모리를 사용해요.",
+        "ACE-Step이 이 Mac 안에서 곡을 만들어요. 엔진이 켜져 있는 동안 모델이 메모리를 사용해요(XL turbo 약 26GB).",
         engineCard,
         row("앱을 열 때 엔진 켜기", "끄면 곡을 만들 때 직접 켜야 해요.", h("label", { class: "switch" }, autoStart, h("span", null, settings.engineAutoStart ? "켬" : "끔"))),
         row("엔진 주소", "음악 엔진과 AI 도우미를 끈 뒤 바꿀 수 있어요. 이 Mac 안의 주소만 쓸 수 있어요.", engineUrl),
@@ -156,7 +156,7 @@ export function renderSettings(): void {
       ),
       section(
         "AI 도우미",
-        "새 곡의 초안(제목·스타일·가사)을 쓰고, ‘발음이 뭉개져요’ 같은 말을 엔진이 알아듣는 새 전체 버전을 위한 편곡 계획으로 바꿔요. 결과는 항상 실행 전에 보여 드려요.",
+        "새 곡의 초안(제목·스타일·가사)을 쓰고, ‘발음이 뭉개져요’ 같은 말을 엔진이 알아듣는 수정 계획(구간 다시 만들기나 새 버전)으로 바꿔요. 결과는 항상 실행 전에 보여 드려요.",
         assistantCards,
         assistant.kind !== "rules" && row("서버 주소", null, assistantUrl),
         assistant.kind !== "rules" &&
@@ -195,9 +195,12 @@ export function renderSettings(): void {
       ),
       section(
         "생성 방식",
-        "새 곡과 새 전체 버전은 Music 3로 만들어요. 기존 곡의 재생과 내보내기도 계속 사용할 수 있어요.",
-        row("음악 모델", "공식 서버와 같은 정밀도로 곡 구조를 먼저 만들고, 이어서 음색을 렌더링해요. 쉬는 동안에는 메모리를 거의 쓰지 않아요.", h("span", null, precisionLabel(state.engine.models.precision))),
-        row("버전 다시 만들기", null, h("span", null, "가사와 편곡을 이어 받아 새 전체 곡을 만들어요.")),
+        "새 곡, 새 버전, 구간 다시 만들기를 ACE-Step으로 만들어요. 멜로디와 구성은 4B 작곡 모델이 계획하고, 고른 음악 모델이 소리로 그려요.",
+        row("음악 모델", "바꾸면 엔진을 껐다 켜야 적용돼요. 이미 만든 버전은 그대로 남아요.",
+          segmented<AceDitModel>([...ACE_DIT_MODELS], settings.musicModel, (value) => modelLabel(value),
+            (value) => void save({ musicModel: value }, "음악 모델을 바꿨어요. 엔진을 껐다 켜면 적용돼요."),
+            (value) => value === "acestep-v15-xl-turbo" ? "더 큰 모델로 그려요. 직접 들어 본 비교에서 끊김이 적고 완성도가 높았어요." : "조금 더 빠르고 메모리를 덜 써요.")),
+        row("구간 다시 만들기", null, h("span", null, "작업실의 파형에서 구간을 골라 그 부분만 다시 만들어요. 원본은 그대로 남아요.")),
       ),
       section(
         "정보",
