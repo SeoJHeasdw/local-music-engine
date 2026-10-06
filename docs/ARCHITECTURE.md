@@ -46,7 +46,7 @@ timeout 이후에는 같은 묶음의 추가 seed 제출을 중단하고 미제�
 
 ```text
 Electron renderer ─ 제한된 preload IPC ─ Electron main ─┬─ music-engine CLI (JSON 한 개 출력)
- (내 곡·새 곡·작업실·설정)                              ├─ ACE 서버 프로세스 소유·health 감시
+ (내 곡·새 곡·곡 화면·설정)                             ├─ ACE 서버 프로세스 소유·health 감시
                                                         └─ music-artifact:// 토큰 스트리밍·파형
 music-engine CLI ─ workflow.py ─ ProjectStore + qc.py
                  ├ execution.py (추론·다운로드·QC와 짧은 기록 트랜잭션)

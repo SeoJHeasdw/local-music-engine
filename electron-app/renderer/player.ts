@@ -15,6 +15,10 @@ type Drag =
   | { mode: "start" | "end" };
 
 const MIN_SELECTION = 0.5;
+// The narrowest view, in seconds. With ~4,800 waveform points a 3-minute take still
+// shows its own detail at this width.
+const MIN_VIEW_SECONDS = 3;
+const MAX_ZOOM = 48;
 
 function token(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -42,8 +46,15 @@ export class Player {
   loop = false;
   overlay: string | null = null;
   unavailable: string | null = null;
+  // Zoomed view: the visible window starts at viewStart and spans viewSpan seconds.
+  // viewSpan 0 means the whole take, which is also what a new song opens with.
+  private viewStart = 0;
+  private viewSpan = 0;
+  private overview: HTMLCanvasElement | null = null;
+  private overviewDrag = false;
   onSelection: (range: TimeRange | null) => void = () => undefined;
   onTick: () => void = () => undefined;
+  onView: () => void = () => undefined;
 
   constructor(private canvas: HTMLCanvasElement) {
     const context = canvas.getContext("2d");
@@ -76,6 +87,48 @@ export class Player {
       this.hoverX = null;
       if (!this.drag) this.draw();
     });
+    // ⌘/Ctrl + wheel (and trackpad pinch, which arrives as ctrl + wheel) zooms around the
+    // pointer. Sideways scrolling, or shift + wheel, pans a zoomed view. Plain vertical
+    // scrolling is left to the page.
+    canvas.addEventListener("wheel", (event) => {
+      if (!this.length) return;
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        this.zoomBy(Math.exp(-event.deltaY * 0.01), this.timeAt(event.clientX));
+        return;
+      }
+      const sideways = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.shiftKey ? event.deltaY : 0;
+      if (this.zoom > 1 && sideways) {
+        event.preventDefault();
+        const rect = this.canvas.getBoundingClientRect();
+        this.pan((sideways / Math.max(1, rect.width)) * this.span());
+      }
+    }, { passive: false });
+  }
+
+  // A small whole-song strip under the waveform; dragging it moves the zoomed window.
+  attachOverview(canvas: HTMLCanvasElement): void {
+    this.overview = canvas;
+    const move = (event: PointerEvent) => {
+      const rect = canvas.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / Math.max(1, rect.width)));
+      this.centerOn(ratio * this.length);
+    };
+    canvas.addEventListener("pointerdown", (event) => {
+      if (!this.length || event.button !== 0) return;
+      canvas.setPointerCapture(event.pointerId);
+      this.overviewDrag = true;
+      move(event);
+    });
+    canvas.addEventListener("pointermove", (event) => {
+      if (this.overviewDrag) move(event);
+    });
+    const end = () => {
+      this.overviewDrag = false;
+    };
+    canvas.addEventListener("pointerup", end);
+    canvas.addEventListener("pointercancel", end);
+    new ResizeObserver(() => this.draw()).observe(canvas);
   }
 
   private readPalette() {
@@ -105,6 +158,99 @@ export class Player {
 
   get playing(): boolean {
     return !this.audio.paused;
+  }
+
+  get zoom(): number {
+    const length = this.length;
+    return length && this.viewSpan ? length / this.span() : 1;
+  }
+
+  get viewRange(): TimeRange {
+    const start = this.start();
+    return { startSeconds: start, endSeconds: start + this.span() };
+  }
+
+  private span(): number {
+    const length = this.length;
+    return this.viewSpan > 0 && length ? Math.min(this.viewSpan, length) : length;
+  }
+
+  private start(): number {
+    return Math.max(0, Math.min(this.viewStart, this.length - this.span()));
+  }
+
+  private maxZoom(): number {
+    return Math.max(1, Math.min(MAX_ZOOM, this.length / MIN_VIEW_SECONDS));
+  }
+
+  // Zoom to `zoom`× keeping `anchor` (seconds) under the same spot on screen.
+  setZoom(zoom: number, anchor?: number): void {
+    const length = this.length;
+    if (!length) return;
+    const next = Math.max(1, Math.min(this.maxZoom(), zoom));
+    const oldStart = this.start();
+    const oldSpan = this.span();
+    const focus = anchor ?? (this.time >= oldStart && this.time <= oldStart + oldSpan ? this.time : oldStart + oldSpan / 2);
+    const place = oldSpan ? Math.max(0, Math.min(1, (focus - oldStart) / oldSpan)) : 0.5;
+    if (next <= 1.001) {
+      this.viewSpan = 0;
+      this.viewStart = 0;
+    } else {
+      this.viewSpan = length / next;
+      this.viewStart = Math.max(0, Math.min(length - this.viewSpan, focus - place * this.viewSpan));
+    }
+    this.draw();
+    this.onView();
+  }
+
+  zoomBy(factor: number, anchor?: number): void {
+    this.setZoom(this.zoom * factor, anchor);
+  }
+
+  showWhole(): void {
+    this.setZoom(1);
+  }
+
+  // Frame the selection with a little room on both sides so its edges can be dragged.
+  fitSelection(): void {
+    const length = this.length;
+    const range = this.selection;
+    if (!length || !range) return;
+    const width = Math.max(MIN_VIEW_SECONDS, (range.endSeconds - range.startSeconds) * 1.4);
+    const zoom = Math.max(1, Math.min(this.maxZoom(), length / width));
+    if (zoom <= 1.001) {
+      this.showWhole();
+      return;
+    }
+    this.viewSpan = length / zoom;
+    const middle = (range.startSeconds + range.endSeconds) / 2;
+    this.viewStart = Math.max(0, Math.min(length - this.viewSpan, middle - this.viewSpan / 2));
+    this.draw();
+    this.onView();
+  }
+
+  pan(seconds: number): void {
+    if (!this.viewSpan) return;
+    this.viewStart = Math.max(0, Math.min(this.length - this.span(), this.start() + seconds));
+    this.draw();
+    this.onView();
+  }
+
+  private centerOn(seconds: number): void {
+    if (!this.viewSpan) return;
+    this.viewStart = Math.max(0, Math.min(this.length - this.span(), seconds - this.span() / 2));
+    this.draw();
+    this.onView();
+  }
+
+  // While zoomed, keep the playhead on screen by turning the page when it leaves.
+  private follow(time: number): void {
+    if (!this.viewSpan || this.drag || this.overviewDrag) return;
+    const start = this.start();
+    const span = this.span();
+    if (time >= start && time <= start + span) return;
+    this.viewStart = Math.max(0, Math.min(this.length - span, time - span * 0.05));
+    this.onView();
   }
 
   async load(source: PlayerSource | null): Promise<void> {
@@ -194,6 +340,11 @@ export class Player {
     const time = Math.max(0, Math.min(this.length - 0.02, seconds));
     if (this.audio.readyState < 1) this.pendingSeek = time;
     else this.audio.currentTime = time;
+    if (this.viewSpan && !this.drag) {
+      const start = this.start();
+      const span = this.span();
+      if (time < start || time > start + span) this.centerOn(time);
+    }
     this.draw();
     this.onTick();
   }
@@ -218,6 +369,7 @@ export class Player {
     cancelAnimationFrame(this.frame);
     const step = () => {
       this.enforceLoop();
+      this.follow(this.time);
       this.draw();
       this.onTick();
       if (this.playing) this.frame = requestAnimationFrame(step);
@@ -229,12 +381,13 @@ export class Player {
   private timeAt(clientX: number): number {
     const rect = this.canvas.getBoundingClientRect();
     const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
-    return ratio * this.length;
+    return this.start() + ratio * this.span();
   }
 
   private xOf(seconds: number): number {
     const rect = this.canvas.getBoundingClientRect();
-    return this.length ? (seconds / this.length) * rect.width : 0;
+    const span = this.span();
+    return span ? ((seconds - this.start()) / span) * rect.width : 0;
   }
 
   private edgeAt(clientX: number): "start" | "end" | null {
@@ -290,8 +443,8 @@ export class Player {
     if (range && range.endSeconds - range.startSeconds < MIN_SELECTION) this.selection = null;
     if (this.selection) {
       this.selection = {
-        startSeconds: Math.round(this.selection.startSeconds * 10) / 10,
-        endSeconds: Math.round(this.selection.endSeconds * 10) / 10,
+        startSeconds: Math.round(this.selection.startSeconds * 100) / 100,
+        endSeconds: Math.round(this.selection.endSeconds * 100) / 100,
       };
     }
     this.draw();
@@ -318,7 +471,10 @@ export class Player {
     const middle = (top + bottom) / 2;
     const half = (bottom - top) / 2;
     const length = this.length;
-    const toX = (seconds: number) => (length ? (seconds / length) * width : 0);
+    const viewStart = this.start();
+    const viewSpan = this.span();
+    const toX = (seconds: number) => (viewSpan ? ((seconds - viewStart) / viewSpan) * width : 0);
+    const precise = this.zoom >= 4 ? 2 : 1;
 
     ctx.fillStyle = p.line;
     ctx.fillRect(0, Math.round(middle), width, Math.max(1, Math.round(ratio)));
@@ -355,15 +511,16 @@ export class Player {
       const gap = Math.max(1, Math.round(1.5 * ratio));
       const step = barWidth + gap;
       const count = Math.floor(width / step);
-      const progress = length ? this.time / length : 0;
+      const now = this.time;
       const peaks = this.peaks;
+      const binAt = (seconds: number) => (length ? Math.floor((seconds / length) * peaks.length) : 0);
       // Scale to the loudest moment so quiet takes stay readable; shape, not level, is the point.
       let loudest = 0;
       for (const value of peaks) if (value > loudest) loudest = value;
       const scale = loudest > 0.02 ? 1 / loudest : 1;
       for (let index = 0; index < count; index += 1) {
-        const from = Math.floor((index / count) * peaks.length);
-        const to = Math.max(from + 1, Math.floor(((index + 1) / count) * peaks.length));
+        const from = binAt(viewStart + (index / count) * viewSpan);
+        const to = Math.max(from + 1, binAt(viewStart + ((index + 1) / count) * viewSpan));
         const peakAt = (start: number, end: number) => {
           let value = 0;
           for (let bin = Math.max(0, start); bin < end && bin < peaks.length; bin += 1) if (peaks[bin] > value) value = peaks[bin];
@@ -374,8 +531,8 @@ export class Player {
         const peak = Math.max(peakAt(from, to), 0.72 * Math.max(peakAt(from - span, from), peakAt(to, to + span)));
         const amplitude = Math.max(ratio, Math.pow(Math.min(1, peak * scale), 0.9) * half * 0.96);
         const x = index * step;
-        const seconds = ((x + barWidth / 2) / width) * length;
-        const played = (x + barWidth / 2) / width <= progress;
+        const seconds = viewStart + ((x + barWidth / 2) / width) * viewSpan;
+        const played = seconds <= now;
         const inside = selection ? seconds >= selection.startSeconds && seconds <= selection.endSeconds : false;
         ctx.fillStyle = played ? (inside ? p.accentHi : p.accent) : inside ? p.mutedHi : p.muted;
         ctx.beginPath();
@@ -398,9 +555,9 @@ export class Player {
         ctx.fill();
       }
       ctx.textAlign = "left";
-      const startLabel = clock(selection.startSeconds, true);
-      const endLabel = clock(selection.endSeconds, true);
-      ctx.fillText(startLabel, Math.min(x0 + 5 * ratio, width - 90 * ratio), 13 * ratio);
+      const startLabel = clock(selection.startSeconds, true, precise);
+      const endLabel = clock(selection.endSeconds, true, precise);
+      ctx.fillText(startLabel, Math.max(4 * ratio, Math.min(x0 + 5 * ratio, width - 90 * ratio)), 13 * ratio);
       ctx.textAlign = "right";
       const endWidth = ctx.measureText(endLabel).width;
       if (x1 - x0 > endWidth + 60 * ratio) ctx.fillText(endLabel, x1 - 5 * ratio, 13 * ratio);
@@ -419,7 +576,7 @@ export class Player {
       const x = this.hoverX * ratio;
       ctx.fillStyle = p.mutedHi;
       ctx.fillRect(Math.round(x), top, Math.max(1, Math.round(ratio)), bottom - top);
-      const label = clock((this.hoverX / rect.width) * length, true);
+      const label = clock(viewStart + (this.hoverX / rect.width) * viewSpan, true, precise);
       ctx.textAlign = x > width - 60 * ratio ? "right" : "left";
       ctx.fillStyle = p.text3;
       ctx.fillText(label, x + (x > width - 60 * ratio ? -6 : 6) * ratio, bottom - 6 * ratio);
@@ -431,5 +588,51 @@ export class Player {
       ctx.fillStyle = p.edit;
       ctx.fillText(this.overlay, width - 4 * ratio, 13 * ratio);
     }
+    this.drawOverview();
+  }
+
+  private drawOverview(): void {
+    const canvas = this.overview;
+    if (!canvas || !this.viewSpan) return;
+    const rect = canvas.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(rect.width * ratio));
+    const height = Math.max(1, Math.round(rect.height * ratio));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const ctx = canvas.getContext("2d");
+    const length = this.length;
+    if (!ctx || !length) return;
+    const p = this.palette;
+    const toX = (seconds: number) => (seconds / length) * width;
+    ctx.clearRect(0, 0, width, height);
+    const peaks = this.peaks;
+    const middle = height / 2;
+    let loudest = 0;
+    for (const value of peaks) if (value > loudest) loudest = value;
+    const scale = loudest > 0.02 ? 1 / loudest : 1;
+    const step = Math.max(2, Math.round(2 * ratio));
+    for (let x = 0; x < width; x += step) {
+      const from = Math.floor((x / width) * peaks.length);
+      const to = Math.max(from + 1, Math.floor(((x + step) / width) * peaks.length));
+      let peak = 0;
+      for (let bin = from; bin < to && bin < peaks.length; bin += 1) if (peaks[bin] > peak) peak = peaks[bin];
+      const amplitude = Math.max(ratio / 2, Math.min(1, peak * scale) * middle * 0.9);
+      ctx.fillStyle = toX(this.time) >= x ? p.accent : p.muted;
+      ctx.fillRect(x, middle - amplitude, Math.max(1, step - ratio), amplitude * 2);
+    }
+    if (this.selection) {
+      ctx.fillStyle = p.selection;
+      ctx.fillRect(toX(this.selection.startSeconds), 0, toX(this.selection.endSeconds) - toX(this.selection.startSeconds), height);
+    }
+    const x0 = toX(this.start());
+    const x1 = toX(this.start() + this.span());
+    ctx.fillStyle = "rgba(238, 242, 231, .10)";
+    ctx.fillRect(x0, 0, x1 - x0, height);
+    ctx.strokeStyle = p.accent;
+    ctx.lineWidth = 1.5 * ratio;
+    ctx.strokeRect(x0 + ratio, ratio, Math.max(2 * ratio, x1 - x0 - 2 * ratio), height - 2 * ratio);
   }
 }

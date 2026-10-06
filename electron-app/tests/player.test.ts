@@ -118,3 +118,39 @@ test("a shorter comparison loops the overlapping interval and ignores a range be
   audio.dispatchEvent(new Event("timeupdate"));
   assert.equal(player.time, 30);
 });
+
+test("zooming keeps the pointed moment in place and never shows past the take", async () => {
+  const { player, audio } = playerFixture();
+  const loading = player.load(source("zoom", 120));
+  audio.ready(120);
+  await loading;
+  assert.equal(player.zoom, 1);
+  player.setZoom(4, 60);
+  assert.equal(player.zoom, 4);
+  assert.deepEqual(player.viewRange, { startSeconds: 45, endSeconds: 75 });
+  player.zoomBy(2, 45);
+  assert.deepEqual(player.viewRange, { startSeconds: 45, endSeconds: 60 });
+  player.pan(-100);
+  assert.deepEqual(player.viewRange, { startSeconds: 0, endSeconds: 15 });
+  player.pan(1000);
+  assert.deepEqual(player.viewRange, { startSeconds: 105, endSeconds: 120 });
+  player.setZoom(1000);
+  assert.equal(player.viewRange.endSeconds - player.viewRange.startSeconds, 3);
+  player.showWhole();
+  assert.deepEqual(player.viewRange, { startSeconds: 0, endSeconds: 120 });
+});
+
+test("fitting a selection frames it with room to drag its edges", async () => {
+  const { player, audio } = playerFixture();
+  const loading = player.load(source("fit", 180));
+  audio.ready(180);
+  await loading;
+  player.setSelection({ startSeconds: 30, endSeconds: 40 });
+  player.fitSelection();
+  const view = player.viewRange;
+  assert.ok(view.startSeconds < 30 && view.endSeconds > 40);
+  assert.ok(Math.abs(view.endSeconds - view.startSeconds - 14) < 1e-9);
+  // Seeking outside a zoomed view brings the playhead back on screen.
+  player.seek(150);
+  assert.ok(player.viewRange.startSeconds <= 150 && player.viewRange.endSeconds >= 150);
+});

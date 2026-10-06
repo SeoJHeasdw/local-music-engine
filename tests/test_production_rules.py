@@ -119,6 +119,23 @@ def test_repaint_effective_prompt_override_does_not_duplicate_rules(tmp_path: Pa
     assert store.load()["requests"][-1]["parameters"]["productionRules"]["baseStylePrompt"] == "soft male vocal"
 
 
+def test_lyrics_only_repaint_keeps_the_parent_style_and_sends_the_new_words(tmp_path: Path) -> None:
+    # The app's 가사 tab sends the version's base style unchanged with rewritten lyrics.
+    store = initialize(tmp_path)
+    candidate = generate_candidates(tmp_path, seeds=[1], client_factory=RecordingAceClient, engine="ace-step")["candidateIds"][0]
+    original = store.load()["requests"][0]["parameters"]
+    edited = "[Verse]\nStay with me tonight\n[Chorus]\nThrough the night"
+    repaint_candidate(tmp_path, candidate_id=candidate, start_seconds=1, end_seconds=2, seed=2,
+                      style_prompt="soft male vocal", lyrics=edited, strength="medium",
+                      client_factory=RecordingAceClient, engine="ace-step")
+    actual = RecordingAceClient.payloads[-1]
+    assert actual["prompt"] == original["prompt"]
+    assert "Stay with me tonight" in actual["lyrics"]
+    request = store.load()["requests"][-1]["parameters"]
+    assert request["productionRules"]["baseStylePrompt"] == "soft male vocal"
+    assert store.load()["candidates"][0]["candidateId"] == candidate
+
+
 @pytest.mark.parametrize("invalid", [None, {}, {"version": True, "presetId": None, "ruleIds": []},
     selection("unknown"), selection(preset="unknown"), selection(3),
     {"version": 1, "presetId": None, "ruleIds": "steady-groove"},

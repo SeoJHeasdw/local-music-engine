@@ -141,7 +141,8 @@ export function renderSettings(): void {
 
   mount(
     root,
-    h("header", { class: "view-head" }, h("div", null, h("h1", null, "설정"), h("p", null, "바꾸면 바로 저장돼요."))),
+    h("div", { class: "page narrow" },
+    h("header", { class: "page-head" }, h("div", null, h("h1", null, "설정"), h("p", null, "음악 엔진, AI 도우미, 저장 위치를 정해요. 바꾸면 바로 저장돼요."))),
     h(
       "div",
       { class: "settings" },
@@ -200,7 +201,6 @@ export function renderSettings(): void {
           segmented<AceDitModel>([...ACE_DIT_MODELS], settings.musicModel, (value) => modelLabel(value),
             (value) => void save({ musicModel: value }, "음악 모델을 바꿨어요. 엔진을 껐다 켜면 적용돼요."),
             (value) => value === "acestep-v15-xl-turbo" ? "더 큰 모델로 그려요. 직접 들어 본 비교에서 끊김이 적고 완성도가 높았어요." : "조금 더 빠르고 메모리를 덜 써요.")),
-        row("구간 다시 만들기", null, h("span", null, "작업실의 파형에서 구간을 골라 그 부분만 다시 만들어요. 원본은 그대로 남아요.")),
       ),
       section(
         "정보",
@@ -209,6 +209,7 @@ export function renderSettings(): void {
         row("엔진 코드", null, h("span", { class: "path mono" }, state.info.engineRoot.replace(/^\/Users\/[^/]+/, "~"))),
         row("앱 데이터", "설정과 엔진 기록이 있어요.", h("span", { class: "path mono" }, state.info.dataDir.replace(/^\/Users\/[^/]+/, "~"))),
       ),
+    ),
     ),
   );
   if (assistant.kind !== "rules" && needsModels && !models.length) void loadModels(assistant.kind, assistant.baseUrl).catch(() => undefined);

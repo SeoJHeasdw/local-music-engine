@@ -85,6 +85,13 @@ const ICONS: Record<string, string> = {
   lyrics: '<path d="M5 6h14M5 10.5h14M5 15h9M5 19.5h6"/>',
   chevron: '<path d="m9 6 6 6-6 6"/>',
   volume: '<path d="M4.5 9.5v5h3.5l5 4v-13l-5 4z"/><path d="M16 9a4.5 4.5 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/>',
+  back: '<path d="m14.5 6-6 6 6 6"/>',
+  forward: '<path d="m9.5 6 6 6-6 6"/>',
+  more: '<circle cx="6" cy="12" r="1.1" fill="currentColor"/><circle cx="12" cy="12" r="1.1" fill="currentColor"/><circle cx="18" cy="12" r="1.1" fill="currentColor"/>',
+  search: '<circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>',
+  note: '<path d="M9 17.5V6l10-2v11.5"/><circle cx="6.5" cy="17.5" r="2.5"/><circle cx="16.5" cy="15.5" r="2.5"/>',
+  edit: '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
+  flag: '<path d="M5 21V4.5"/><path d="M5 4.5h11l-2 4 2 4H5"/>',
   compare: '<path d="M8 4.5v15M16 4.5v15"/><path d="M3.5 9 8 4.5 12.5 9"/><path d="M11.5 15 16 19.5l4.5-4.5"/>',
 };
 

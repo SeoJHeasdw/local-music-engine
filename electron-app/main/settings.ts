@@ -6,11 +6,13 @@ import { writeJsonAtomic } from "./files.ts";
 import { defaultProjectsDir } from "./paths.ts";
 import { defaultSettings, normalizeSettings } from "./settings-schema.ts";
 import { loadAndMigrateSettings } from "./settings-storage.ts";
+import { parseWindowState, type WindowState } from "./window-state.ts";
 
 export type AppState = {
   lastSongPath: string | null;
   // Songs opened from outside the projects folder stay in the library list.
   extraSongPaths: string[];
+  window: WindowState | null;
 };
 
 const settingsFile = () => path.join(app.getPath("userData"), "settings.json");
@@ -71,6 +73,7 @@ export async function loadAppState(): Promise<AppState> {
     extraSongPaths: Array.isArray(raw.extraSongPaths)
       ? raw.extraSongPaths.filter((item): item is string => typeof item === "string").slice(0, 50)
       : [],
+    window: parseWindowState(raw.window),
   };
   return state;
 }

@@ -115,3 +115,49 @@ export function confirmDialog(options: { title: string; body: string; confirm: s
     dialog.showModal();
   });
 }
+
+// ---- Pop-over menus: a <details> that closes on outside click, Escape or a choice ----
+export type MenuItem = { label: string; icon?: string; run: () => void; disabled?: boolean; tip?: string; danger?: boolean } | null | undefined | false;
+
+export function menu(trigger: { label: string; icon?: string; className?: string; tip?: string }, items: MenuItem[]): HTMLDetailsElement {
+  const details = h(
+    "details",
+    { class: "menu-wrap" },
+    h("summary", { class: trigger.className ?? "button ghost", "aria-label": trigger.label, "data-tip": trigger.tip }, trigger.icon && icon(trigger.icon, 16), trigger.className?.includes("icon-button") ? null : trigger.label),
+    h(
+      "div",
+      { class: "menu", role: "menu" },
+      items.filter((item): item is Exclude<MenuItem, null | undefined | false> => Boolean(item)).map((item) =>
+        h(
+          "button",
+          {
+            type: "button",
+            role: "menuitem",
+            class: item.danger ? "is-danger" : "",
+            disabled: item.disabled,
+            "data-tip": item.tip,
+            onClick: () => {
+              details.open = false;
+              item.run();
+            },
+          },
+          item.icon && icon(item.icon, 15),
+          item.label,
+        ),
+      ),
+    ),
+  );
+  return details;
+}
+
+export function installMenus(): void {
+  const closeAll = (except?: Element | null) => {
+    for (const open of document.querySelectorAll<HTMLDetailsElement>("details.menu-wrap[open]")) {
+      if (open !== except) open.open = false;
+    }
+  };
+  document.addEventListener("pointerdown", (event) => closeAll((event.target as Element | null)?.closest("details.menu-wrap")), true);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeAll();
+  });
+}

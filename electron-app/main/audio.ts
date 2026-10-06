@@ -66,7 +66,8 @@ export async function handleArtifactRequest(request: Request): Promise<Response>
 }
 
 // Peak envelope for drawing. Supports the PCM widths music generation and exports produce.
-export async function wavPeaks(filePath: string, targetBins = 1600): Promise<number[]> {
+// ~4,800 points keep detail when the waveform is zoomed (3 minutes ≈ 0.04 s per point).
+export async function wavPeaks(filePath: string, targetBins = 4800): Promise<number[]> {
   let fileStat;
   try {
     fileStat = await stat(filePath);

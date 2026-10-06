@@ -14,7 +14,7 @@ import type {
 } from "../shared.ts";
 
 export type View = "library" | "create" | "studio" | "settings";
-export type InspectorTab = "fix" | "review" | "details";
+export type InspectorTab = "prompt" | "lyrics" | "checks" | "notes";
 
 export type CreateDraft = {
   description: string;
@@ -30,6 +30,8 @@ export type CreateDraft = {
   drafted: boolean;
   productionRules?: ProductionRuleSelection;
   vocalLanguage?: "ko" | "en";
+  // Style tags of instruments picked in step 1 (see instruments.ts).
+  instruments?: string[];
 };
 
 export type State = {
@@ -80,6 +82,10 @@ export function beginSongOpen(): number {
   const revision = ++songRevision;
   set({ plan: null });
   return revision;
+}
+
+export function isOpeningSong(): boolean {
+  return openingSong;
 }
 
 export function finishSongOpen(revision: number): boolean {

@@ -1,14 +1,29 @@
 import type { SongState, Version } from "../shared.ts";
-import { beginSongOpen, finishSongOpen, get, isSongTicket, listeningRevision, set, songTicket, type SongTicket, type View } from "./store.ts";
+import { beginSongOpen, finishSongOpen, get, isOpeningSong, isSongTicket, listeningRevision, set, songTicket, type SongTicket, type View } from "./store.ts";
 import { errorText, toast } from "./ui.ts";
 import { isAutomaticAttempt } from "./quality.ts";
+import { record, step } from "./history.ts";
 
 export const api = window.musicApp;
 
-export function go(view: View): void {
+type GoOptions = { record?: boolean };
+
+export function go(view: View, options: GoOptions = {}): void {
   if (view === "studio" && get().song.status !== "ready") return;
   set({ view });
-  document.getElementById("content")?.scrollTo({ top: 0 });
+  if (options.record !== false) record({ view, songId: view === "studio" ? get().song.song?.songId ?? null : null });
+  document.getElementById("views")?.scrollTo({ top: 0 });
+}
+
+// ⌘[ / ⌘] and the sidebar arrows. A studio entry for another song reopens that song.
+export async function navigateHistory(direction: -1 | 1): Promise<void> {
+  const route = step(direction);
+  if (!route) return;
+  if (route.view === "studio" && route.songId && route.songId !== get().song.song?.songId) {
+    await openSong(route.songId, { record: false });
+    return;
+  }
+  go(route.view, { record: false });
 }
 
 export function activeVersion(): Version | null {
@@ -30,7 +45,7 @@ export function applySong(next: SongState, focusVersionId?: string | null): void
     activeVersionId: active,
     ...(sameSong
       ? {}
-      : { selection: null, plan: null, feedback: "", listenToParent: false, comparisonVersionId: null, scope: "song" as const, tab: "fix" as const }),
+      : { selection: null, plan: null, feedback: "", listenToParent: false, comparisonVersionId: null, scope: "song" as const, tab: "prompt" as const }),
   }, true);
   if (next.status === "error" && next.error) toast(next.error, { tone: "error" });
 }
@@ -54,13 +69,18 @@ export async function refreshSong(songId: string, focusVersionId?: string | null
   }
 }
 
-export async function openSong(songId: string): Promise<void> {
+export async function openSong(songId: string, options: GoOptions = {}): Promise<void> {
+  // Reopening the song already on screen keeps its playback, selection and draft request.
+  if (!isOpeningSong() && get().song.song?.songId === songId && get().song.status === "ready") {
+    go("studio", options);
+    return;
+  }
   const request = beginSongOpen();
   try {
     const opened = await api.openSong(songId);
     if (!finishSongOpen(request) || !opened) return;
     applySong(opened);
-    go("studio");
+    go("studio", options);
   } catch (error) {
     if (finishSongOpen(request)) toast(errorText(error), { tone: "error" });
   }

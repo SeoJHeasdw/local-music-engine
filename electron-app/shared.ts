@@ -423,7 +423,9 @@ export type MusicEvent =
   | { type: "task"; task: ActiveTask | null }
   | { type: "task-finished"; outcome: TaskOutcome }
   | { type: "song"; songId: string; song: SongState }
-  | { type: "songs"; songs: SongSummary[] };
+  | { type: "songs"; songs: SongSummary[] }
+  // Full screen hides the traffic lights, so the sidebar controls can move left.
+  | { type: "window"; fullscreen: boolean };
 
 export type MusicAppApi = {
   bootstrap(): Promise<Bootstrap>;

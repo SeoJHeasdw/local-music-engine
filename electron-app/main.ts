@@ -1,10 +1,11 @@
-import { app, BrowserWindow, dialog, protocol } from "electron";
+import { app, BrowserWindow, dialog, protocol, screen } from "electron";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ARTIFACT_SCHEME, handleArtifactRequest } from "./main/audio.ts";
 import { Controller } from "./main/ipc.ts";
 import { distRoot } from "./main/paths.ts";
-import { loadSettings } from "./main/settings.ts";
+import { loadAppState, loadSettings, updateAppState } from "./main/settings.ts";
+import { MIN_HEIGHT, MIN_WIDTH, windowBounds, type WindowState } from "./main/window-state.ts";
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -32,17 +33,25 @@ function shutdown(): void {
   void controller.tasks.shutdown().finally(() => {
     controller.engine.disposeOwned();
     quitting = true;
-    app.quit();
+    // Cleanup is done, so leave directly. A second app.quit() is not enough: when the
+    // first quit came from SIGTERM/SIGINT (Ctrl-C in app.sh), Electron forgets it was
+    // quitting after before-quit cancelled it, closes the window and keeps running.
+    app.exit(0);
   });
 }
 
-function createWindow(): void {
+function createWindow(saved: WindowState | null): void {
+  // Screenshots keep a fixed size; the app reopens where and how it was left.
+  const bounds = screenshotPath
+    ? { width: 1440, height: 900 }
+    : windowBounds(saved?.bounds ?? null, screen.getAllDisplays().map((display) => display.workArea), screen.getPrimaryDisplay().workArea);
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1080,
-    minHeight: 700,
+    ...bounds,
+    minWidth: MIN_WIDTH,
+    minHeight: MIN_HEIGHT,
     titleBarStyle: "hiddenInset",
+    // Vertically centred with the sidebar's back/forward controls in the 52px title row.
+    trafficLightPosition: { x: 18, y: 20 },
     backgroundColor: "#0f1110",
     title: "Music Studio",
     show: false,
@@ -61,7 +70,33 @@ function createWindow(): void {
   window.webContents.on("will-navigate", (event, url) => {
     if (url !== window.webContents.getURL()) event.preventDefault();
   });
-  window.once("ready-to-show", () => window.show());
+  window.once("ready-to-show", () => {
+    if (!screenshotPath && saved?.maximized && !saved.fullscreen) window.maximize();
+    window.show();
+    if (!screenshotPath && saved?.fullscreen) window.setFullScreen(true);
+  });
+  const tellFullscreen = () => {
+    if (!window.isDestroyed()) window.webContents.send("music:event", { type: "window", fullscreen: window.isFullScreen() });
+  };
+  window.on("enter-full-screen", tellFullscreen);
+  window.on("leave-full-screen", tellFullscreen);
+  window.webContents.on("did-finish-load", tellFullscreen);
+  if (!screenshotPath) {
+    let timer: NodeJS.Timeout | undefined;
+    const remember = () => {
+      if (window.isDestroyed()) return;
+      void updateAppState({ window: { bounds: window.getNormalBounds(), fullscreen: window.isFullScreen(), maximized: window.isMaximized() } }).catch(() => undefined);
+    };
+    const soon = () => {
+      clearTimeout(timer);
+      timer = setTimeout(remember, 400);
+    };
+    for (const name of ["resize", "move", "maximize", "unmaximize", "enter-full-screen", "leave-full-screen"] as const) window.on(name as "resize", soon);
+    window.on("close", () => {
+      clearTimeout(timer);
+      remember();
+    });
+  }
   window.on("closed", () => {
     if (mainWindow === window) mainWindow = null;
   });
@@ -89,6 +124,8 @@ if (!screenshotPath && !app.requestSingleInstanceLock()) {
 }
 
 // Ctrl-C in the terminal that ran app.sh should clean up like ⌘Q, not orphan the engine.
+// On macOS Electron itself turns these signals into a quit (before-quit below); these
+// handlers cover platforms where Node receives the signal first.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     shutdown();
@@ -98,14 +135,15 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 app.whenReady().then(async () => {
   protocol.handle(ARTIFACT_SCHEME, handleArtifactRequest);
   const settings = await loadSettings();
+  const saved = (await loadAppState()).window;
   controller.register();
-  createWindow();
+  createWindow(saved);
   void controller.engine.check().then((status) => {
     if (!screenshotPath && settings.engineAutoStart && status.state === "offline") void controller.engine.start();
   });
   controller.engine.startMonitoring();
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) void loadAppState().then((state) => createWindow(state.window));
   });
 });
 
