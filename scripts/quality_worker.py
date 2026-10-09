@@ -36,6 +36,10 @@ WHISPER_REVISION = "a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb"
 WHISPER_DIRECTORY = MODELS / "whisper-large-v3-turbo" / WHISPER_REVISION
 UMX_DIRECTORY = MODELS / "umxhq"
 UMX_NAME = "vocals-b62c91ce.pth"
+UMX_DRUMS_NAME = "drums-9619578f.pth"
+UMX_DRUMS_FILE = (UMX_DIRECTORY / UMX_DRUMS_NAME,
+    "https://zenodo.org/records/3370489/files/drums-9619578f.pth?download=1",
+    "9619578f885c54737cb0234f9f9a4a679ee4f31438fd77fd1dbe02bb16c2da0a")
 MODEL_FILES = (
     (WHISPER_DIRECTORY / "config.json", f"https://huggingface.co/{WHISPER_MODEL}/resolve/{WHISPER_REVISION}/config.json", "b34fc29e4e11e0a25e812775dd67f4dd16fc2c8eb43d28ae25ff7d660ecb6379"),
     (WHISPER_DIRECTORY / "weights.safetensors", f"https://huggingface.co/{WHISPER_MODEL}/resolve/{WHISPER_REVISION}/weights.safetensors", "951ed3fc1203e6a62467abb2144a96ce7eafca8fa77e3704fdb8635ff3e7f8a6"),
@@ -203,11 +207,13 @@ def download_model(path: Path, url: str, expected_hash: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def setup() -> dict[str, Any]:
+def setup(*, include_drums: bool = False) -> dict[str, Any]:
     """Explicit bootstrap-only download; verified immutable model identities."""
     for path, url, expected_hash in MODEL_FILES:
         log(f"Preparing {path.parent.name}/{path.name}")
         download_model(path, url, expected_hash)
+    if include_drums:
+        download_model(*UMX_DRUMS_FILE)
     result = readiness(verify_hashes=True)
     result["licenses"] = {"whisper": "MIT", "mlx-whisper": "MIT", "umxhq": "MIT"}
     result["modelFiles"] = [{"path": str(path.relative_to(MODELS)), "sha256": digest}
@@ -281,6 +287,63 @@ def vocal_summary(windows: list[dict[str, float]], duration: float) -> dict[str,
             "caveat": "Source separation may leak instruments or discard vocals. Energy does not establish diction, balance quality, or a complete musical ending."}
 
 
+def drum_frame_features(drums, *, offset: float, core_start: float, core_end: float, previous=None):
+    """Compact attributed onset measurements; centered windows use separator context."""
+    import numpy as np
+    rate, hop, fft_size = 44100, 441, 2048
+    padded = np.pad(drums, ((fft_size // 2, fft_size // 2), (0, 0)))
+    times = offset + np.arange(1 + (len(padded) - fft_size) // hop) * hop / rate
+    selected = (times >= core_start - 1e-8) & (times < core_end - 1e-8)
+    power = None
+    energy = None
+    for channel in range(drums.shape[1]):
+        views = np.lib.stride_tricks.sliding_window_view(padded[:, channel], fft_size)[::hop][selected]
+        spectrum = np.abs(np.fft.rfft(views * np.hanning(fft_size), axis=1)) ** 2
+        local_energy = np.mean(views ** 2, axis=1)
+        power = spectrum if power is None else power + spectrum
+        energy = local_energy if energy is None else energy + local_energy
+    if power is None or not len(power):
+        return np.empty((0, 8)), previous
+    magnitude = np.sqrt(power / drums.shape[1])
+    magnitude[:, 0] = 0
+    preceding = np.vstack((np.zeros(magnitude.shape[1]) if previous is None else previous, magnitude[:-1]))
+    denominator = magnitude.sum(axis=1)
+    flux = np.divide(np.maximum(0, magnitude - preceding).sum(axis=1), denominator,
+                     out=np.zeros(len(magnitude)), where=denominator > 0)
+    rms = np.sqrt(energy / drums.shape[1])
+    flux[rms < 0.0001] = 0
+    features = np.zeros((len(magnitude), 8))
+    features[:, 0], features[:, 1], features[:, 7] = times[selected], rms, flux
+    return features, magnitude[-1]
+
+
+def drum_timing_summary(features, *, duration: float, source_hash: str) -> dict[str, Any]:
+    import numpy as np
+    sys.path.insert(0, str(ROOT / "src"))
+    from local_music_engine.music_structure import _tempo, _onsets
+    from local_music_engine.percussion_analysis import VERSION as PERCUSSION_VERSION, _supported_beat_candidates
+    tempo = _tempo(features[:, 7], 0.01)
+    peaks, _ = _onsets(features[:, 7], 0.01)
+    segments = []
+    for start in range(0, len(features), 1200):
+        local = features[start:start + 1200]
+        if len(local) < 600:
+            continue
+        estimate = _tempo(local[:, 7], 0.01)
+        segments.append({"startSeconds": round(float(local[0, 0]), 4),
+            "endSeconds": round(min(duration, float(local[-1, 0]) + 0.01), 4),
+            "bpm": estimate["bpm"], "confidence": estimate["confidence"], "onsetCount": estimate["onsetCount"]})
+    return {"version": PERCUSSION_VERSION, "status": "observed" if tempo["bpm"] is not None else "unknown",
+        "sourceArtifactSha256": source_hash, "durationSeconds": duration,
+        "source": {"kind": "isolated_percussion", "method": "UMXHQ estimated drums", "reliability": 0.75,
+            "modelRevision": "zenodo:3370489-v1.0.1", "modelSha256": UMX_DRUMS_FILE[2],
+            "caveat": "Drum estimates may leak other instruments; pulse is not a verified quarter-note beat."},
+        "pulse": {"bpm": tempo["bpm"], "confidence": tempo["confidence"]}, "segments": segments,
+        "onsetTimesSeconds": [round(float(features[index, 0]), 4) for index in peaks],
+        "beatCandidatesSeconds": _supported_beat_candidates(features, tempo, segments),
+        "method": "model-estimated-drum-onset-observations"}
+
+
 def separation(audio: Path) -> dict[str, Any]:
     import numpy as np
     import soundfile as sf
@@ -300,10 +363,21 @@ def separation(audio: Path) -> dict[str, Any]:
         weights.pop(legacy_buffer, None)
     target.load_state_dict(weights, strict=True)
     target.eval()
-    model = Separator(target_models={"vocals": target}, niter=1, residual=True,
+    targets = {"vocals": target}
+    if UMX_DRUMS_FILE[0].is_file() and sha256(UMX_DRUMS_FILE[0]) == UMX_DRUMS_FILE[2]:
+        drums_target = OpenUnmix(nb_bins=2049, nb_channels=2, hidden_size=512,
+            max_bin=bandwidth_to_max_bin(rate=44100.0, n_fft=4096, bandwidth=16000))
+        drum_weights = torch.load(UMX_DRUMS_FILE[0], map_location="cpu", weights_only=True)
+        for legacy_buffer in ("sample_rate", "stft.window", "transform.0.window"):
+            drum_weights.pop(legacy_buffer, None)
+        drums_target.load_state_dict(drum_weights, strict=True)
+        targets["drums"] = drums_target.eval()
+    model = Separator(target_models=targets, niter=1, residual=True,
                       n_fft=4096, n_hop=1024, nb_channels=2, sample_rate=44100.0,
                       wiener_win_len=300, filterbank="torch").eval()
+    source_hash = sha256(audio)
     windows: list[dict[str, float]] = []
+    drum_features, previous_drum = [], None
     with sf.SoundFile(audio) as source, torch.inference_mode():
         rate = source.samplerate
         duration = len(source) / rate
@@ -325,12 +399,18 @@ def separation(audio: Path) -> dict[str, Any]:
                 divisor = math.gcd(rate, 44100)
                 original = resample_poly(original, 44100 // divisor, rate // divisor, axis=0)
             samples = torch.from_numpy(np.ascontiguousarray(original.T)).unsqueeze(0)
-            estimate = model(samples)[0, 0].cpu().numpy().T
+            estimates = model(samples)[0].cpu().numpy()
+            estimate = estimates[0].T
+            if "drums" in targets:
+                features, previous_drum = drum_frame_features(estimates[1].T, offset=read_start / rate,
+                    core_start=core_start / rate, core_end=core_end / rate, previous=previous_drum)
+                drum_features.append(features)
             # Ignore context edges; each source frame is measured exactly once.
             trim_start = round((core_start - read_start) * 44100 / rate)
             trim_end = trim_start + round((core_end - core_start) * 44100 / rate)
             vocal = estimate[trim_start:trim_end]
             mixed = original[trim_start:trim_end]
+            accompaniment = mixed - vocal
             step = round(ACTIVITY_WINDOW_SECONDS * 44100)
             for start in range(0, len(vocal), step):
                 end = min(len(vocal), start + step)
@@ -339,9 +419,21 @@ def separation(audio: Path) -> dict[str, Any]:
                 windows.append({"startSeconds": core_start / rate + start / 44100,
                                 "endSeconds": min(duration, core_start / rate + end / 44100),
                                 "vocalRms": float(np.sqrt(np.mean(vocal[start:end] ** 2))),
-                                "mixRms": float(np.sqrt(np.mean(mixed[start:end] ** 2)))})
+                                "mixRms": float(np.sqrt(np.mean(mixed[start:end] ** 2))),
+                                "accompanimentRms": float(np.sqrt(np.mean(accompaniment[start:end] ** 2)))})
             log(f"Vocal analysis: {core_end / rate:.1f}/{duration:.1f} seconds")
-    return vocal_summary(windows, duration)
+    if sha256(audio) != source_hash:
+        raise ValueError("Audio changed during separated frame measurement")
+    result = vocal_summary(windows, duration)
+    if drum_features:
+        result["percussionEvidence"] = drum_timing_summary(np.concatenate(drum_features), duration=duration, source_hash=source_hash)
+    # These already-computed residuals add no model, model invocation or remix.
+    result["frameEvidence"] = {"version": "separated-energy-v1", "sourceArtifactSha256": source_hash,
+        "durationSeconds": duration, "windowSeconds": ACTIVITY_WINDOW_SECONDS,
+        "frameSeries": {"columns": ["startSeconds", "endSeconds", "mixRms", "vocalRms", "accompanimentRms"],
+            "points": [[window[key] for key in ("startSeconds", "endSeconds", "mixRms", "vocalRms", "accompanimentRms")] for window in windows]},
+        "method": "UMXHQ vocal estimate and same-frame mix-minus-vocal residual", "evidenceOnly": True}
+    return result
 
 
 def clean_segments(raw: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -443,13 +535,28 @@ def analyze(audio: Path) -> dict[str, Any]:
         return _analyze_unlocked(audio)
 
 
+def separate_only(audio: Path) -> dict[str, Any]:
+    """Measure attributed vocal/backing energy without loading the recognizer."""
+    if not audio.is_absolute() or not audio.is_file():
+        raise ValueError("--audio must name an existing absolute audio file")
+    with analysis_lock():
+        if not (UMX_DIRECTORY / UMX_NAME).is_file() or sha256(UMX_DIRECTORY / UMX_NAME) != MODEL_FILES[-1][2]:
+            raise ValueError("Verified UMXHQ weights are unavailable; prepare the quality environment first")
+        os.environ.update(HF_HUB_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1",
+                          HF_HOME=str(RUNTIME / "huggingface"), TORCH_HOME=str(RUNTIME / "torch"))
+        return {"backend": WORKER_VERSION, "separation": separation(audio), "recognizerLoaded": False}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("setup")
+    setup_command = commands.add_parser("setup")
+    setup_command.add_argument("--drums", action="store_true", help="also prepare the optional pinned UMXHQ drum estimator")
     commands.add_parser("status")
     analyzer = commands.add_parser("analyze")
     analyzer.add_argument("--audio", required=True, type=Path)
+    separator = commands.add_parser("separate")
+    separator.add_argument("--audio", required=True, type=Path)
     measurement = commands.add_parser("measure")
     measurement.add_argument("--audio", required=True, type=Path)
     arguments = parser.parse_args(argv)
@@ -460,13 +567,15 @@ def main(argv: list[str] | None = None) -> int:
             if arguments.command == "setup":
                 if platform.system() != "Darwin" or platform.machine() not in {"arm64", "aarch64"}:
                     raise RuntimeError("The quality toolchain requires Apple Silicon macOS")
-                result = setup()
+                result = setup(include_drums=True) if arguments.drums else setup()
             elif arguments.command == "status":
                 result = readiness()
             elif arguments.command == "measure":
                 if not arguments.audio.is_absolute() or not arguments.audio.is_file():
                     raise ValueError("--audio must name an existing absolute audio file")
                 result = {"loudness": loudness(arguments.audio), "backend": WORKER_VERSION}
+            elif arguments.command == "separate":
+                result = separate_only(arguments.audio)
             else:
                 result = analyze(arguments.audio)
         print(json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)

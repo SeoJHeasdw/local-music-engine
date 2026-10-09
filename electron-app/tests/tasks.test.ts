@@ -61,6 +61,7 @@ test("quality progress counts finished requested slots rather than every success
   assert.equal(completedVersions({ ...job, parameters: undefined, resultRefs: [], reusedCandidateIds: ["old"] }, children.slice(0, 1), 2), 2);
   assert.match(stageText("seed 12: quality_lyrics"), /가사/);
   assert.match(stageText("quality_audio"), /소리/);
+  assert.equal(stageText("seed 12: quality_rhythm"), "박자와 구간별 소리 변화를 확인하는 중");
   assert.match(stageText("quality_setup"), /자동 검사/);
   assert.match(stageText("quality_retry"), /다시 만드는/);
   assert.match(stageText("finalizing"), /재생본/);

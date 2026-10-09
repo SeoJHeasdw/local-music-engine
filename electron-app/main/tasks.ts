@@ -53,6 +53,7 @@ export function stageText(raw: string | undefined): string {
   const stage = (raw ?? "").replace(/^seed -?\d+:\s*/i, "").toLowerCase();
   if (stage.includes("quality_setup")) return "자동 검사를 준비하는 중";
   if (stage.includes("quality_audio")) return "소리와 곡 길이를 확인하는 중";
+  if (stage.includes("quality_rhythm")) return "박자와 구간별 소리 변화를 확인하는 중";
   if (stage.includes("quality_lyrics")) return "가사가 빠지거나 달라졌는지 확인하는 중";
   if (stage.includes("quality_retry")) return "확실한 문제가 있어 다시 만드는 중";
   if (stage.includes("finalizing")) return "추천할 재생본을 정리하는 중";

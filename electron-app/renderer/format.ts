@@ -188,6 +188,68 @@ export function findingCopy(finding: Finding): { label: string; message: string;
           ? `${observed.actualSeconds.toFixed(2)}초 / 요청 ${Number(observed.requestedSeconds).toFixed(0)}초`
           : null,
       };
+    case "tempo_mismatch":
+    case "tempo_ambiguity":
+      return {
+        label: finding.check === "tempo_mismatch" ? "요청 템포와 차이" : "박자 해석 확인",
+        message: finding.check === "tempo_mismatch"
+          ? "반복 박자의 자동 추정값이 요청한 템포와 달라요. 박자 단위와 의도한 그루브를 들어서 확인해 주세요."
+          : "반복 박자가 요청 템포와 다른 박자 단위로 추정됐어요. 듣는 박자 단위를 확인해 주세요.",
+        value: Number.isFinite(observed.estimatedBpm) && Number.isFinite(observed.requestedBpm)
+          ? `자동 추정 ${Number(observed.estimatedBpm.toFixed(1))} / 요청 ${observed.requestedBpm} BPM` : null,
+      };
+    case "tempo_drift":
+      return {
+        label: "구간별 템포 변화",
+        message: warning
+          ? "구간별 반복 박자 추정값이 달라요. 의도한 템포 변화나 리듬 분할일 수 있어 이 구간을 들어 보세요."
+          : "구간별 반복 박자 추정값이 달라요. 요청한 템포 변화에 맞는지 이 구간을 들어 보세요.",
+        value: Number.isFinite(observed.minimumBpm) && Number.isFinite(observed.maximumBpm)
+          ? `자동 추정 ${Number(observed.minimumBpm.toFixed(1))}–${Number(observed.maximumBpm.toFixed(1))} BPM` : null,
+      };
+    case "loudness_shift":
+      return {
+        label: "구간별 음량 변화",
+        message: "음량이 갑자기 변하는 부분이 있어요. 의도한 편곡 변화인지 이 구간을 들어 보세요.",
+        value: Number.isFinite(observed.differenceDb) ? `${observed.differenceDb.toFixed(1)} dB 변화` : null,
+      };
+    case "spectral_shift":
+      return { label: "구간별 소리 색 변화", message: "소리의 주파수 균형이 갑자기 변하는 부분이 있어요. 의도한 악기나 구간 변화인지 들어 보세요.", value: null };
+    case "beat_timing_instability_suspected":
+      return {
+        label: warning ? "박자 불안정 의심" : "박자 변화 · 의도 확인 필요",
+        message: warning ? "분리한 리듬 성분의 추정 박자 간격이 불안정해요. 연주 방식과 분리 오차를 포함해 이 구간을 들어서 확인해 주세요."
+          : "추정한 박자 간격이 변하는 부분이에요. 요청한 템포와 그루브 변화에 맞는지 이 구간을 들어서 확인해 주세요.",
+        value: Number.isFinite(observed.timingDeviationP95Milliseconds) ? `추정 간격 편차 ${observed.timingDeviationP95Milliseconds.toFixed(1)} ms` : null,
+      };
+    case "repeated_hit_timing_shift_suspected":
+      return {
+        label: "타격 시각 흔들림 의심",
+        message: "연속된 여러 타격이 곡 안의 다른 반복보다 이르거나 늦게 나와요. 의도한 변주일 수 있으니 이 구간을 직접 들어서 확인해 주세요.",
+        value: Number.isFinite(observed.peakDeviationMilliseconds) ? `가장 크게 어긋난 타격 ${observed.peakDeviationMilliseconds.toFixed(0)} ms` : null,
+      };
+    case "smooth_timing_change_observed":
+      return {
+        label: "완만한 템포 변화 관찰",
+        message: "타격이 반복 기준에서 서서히 벗어났다 돌아오는 구간이에요. 급격한 흔들림은 아니에요. 의도한 템포 변화인지 들어 보세요.",
+        value: Number.isFinite(observed.peakExpectedDisplacementMilliseconds) ? `가장 크게 벗어난 지점 ${observed.peakExpectedDisplacementMilliseconds.toFixed(0)} ms` : null,
+      };
+    case "backing_dropout_suspected":
+      return {
+        label: "반주 끊김 의심",
+        message: "목소리나 전체 음원이 이어지는 동안 분리된 반주가 약해진 구간이에요. 분리 오차나 의도한 편곡일 수 있어 직접 들어서 확인해 주세요.",
+        value: Number.isFinite(observed.relativeDepthDb) ? `주변보다 ${observed.relativeDepthDb.toFixed(1)} dB 작음` : null,
+      };
+    case "possible_arrangement_break":
+      return { label: "편곡 쉼 가능성 · 의도 확인 필요", message: "반주가 줄거나 비는 구간을 관찰했어요. 의도한 편곡 쉼인지 자동으로 확정하지 못했어요. 이 구간을 들어 보세요.", value: null };
+    case "percussive_gap_observed":
+      return { label: "타격 소리 쉼 관찰", message: "추정한 타격 성분의 반복 소리가 비는 구간이에요. 의도한 드럼 쉼인지 들어 보세요.",
+        value: Number.isFinite(observed.gapSeconds) ? `${observed.gapSeconds.toFixed(2)}초` : null };
+    case "mix_dropout_suspected":
+      return { label: warning ? "전체 신호 끊김 의심" : "선언한 쉼과 일치",
+        message: warning ? "곡 중간에서 전체 신호가 거의 0이 됐다 급격히 돌아왔어요. 의도된 편집인지 자동으로 확정하지 못했어요."
+          : "관측한 무음 구간 전체가 선언한 쉼 계획에 들어 있어요. 오류가 없거나 청취가 승인됐다는 뜻은 아니에요.",
+        value: Number.isFinite(observed.dropDurationSeconds) ? `${observed.dropDurationSeconds.toFixed(2)}초` : null };
     default:
       return { label: finding.check, message: finding.message, value: null };
   }

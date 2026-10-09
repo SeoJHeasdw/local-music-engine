@@ -126,7 +126,17 @@ CLI의 기본 `--engine`은 아직 Music 3이므로 ACE로 만들 때는 `--engi
 `--quality auto --quality-attempts 4`다. 버전마다 첫 생성·재시도를 합쳐
 최대 네 번이며 검사 불확실성만으로 다시 만들지 않는다. 모든 시도의 입력과 예산을 첫 batch에
 고정하고, 명시적인 재개도 예산을 늘리지 않는다. 자동 추천은 사람의 최종본 선택과 분리한다.
+`auto`·`audio`는 생성 요청의 BPM·박자표를 기준으로 반복 박동·구간 드리프트·박자 후보 간격과
+프레임별 음량·스펙트럼도 자동 검사한다. 절반·두 배·마디 단위의 해석 차이를 함께 기록하며, 마디 길이는
+요청 박자표에서 계산한 예상값이다. 리듬 경고는 청취 확인용으로 남기고 자동 시간 보정이나 재생성의
+근거로 쓰지 않는다. 원본과 사람 청취 `unreviewed` 상태를 보존한다.
+추가 구간 진단은 타격 성분의 박자 간격과 분리한 보컬·반주의 연속성을 따로 비교한다.
+검사 탭에서 박자 불안정 의심·타격 시각 흔들림 의심·반주 끊김 의심·타격 소리 쉼·판단 어려움을 구분하며,
+의도된 편곡인지 자동 승인하지 않는다. 모델 없는 타격 성분 추정만으로 반주 끊김을 판단하지 않는다.
 [자동 품질 흐름과 한계](docs/AUTO-QUALITY.md)를 참고한다.
+
+타격 시각 검사는 측정한 타격을 같은 곡의 다른 반복과 비교한다. 모델을 쓰지 않으며, 반복되는 리듬이
+부족한 곡은 판단 어려움으로 남긴다. 방법과 검증 결과는 [반복 대조 타격 시각 검사](docs/TIMBRE-TRACKING.md)에 있다.
 
 ```bash
 uv run music-engine generate projects/my-song --seeds 101 --quality-attempts 2
@@ -142,6 +152,7 @@ uv run music-engine review projects/my-song <candidate-id> --status listened --n
 uv run music-engine select projects/my-song <candidate-id>
 uv run music-engine undo-selection projects/my-song
 uv run music-engine export projects/my-song --output ~/Music/my-song.wav
+uv run music-engine analyze-rhythm path.wav --bpm 84 --time-signature 4/4
 ```
 
 `--source-candidate-id`는 그 버전의 입력으로 새 전체 곡을 만든다. 새 생성은 과거 결과를
@@ -150,6 +161,36 @@ uv run music-engine export projects/my-song --output ~/Music/my-song.wav
 
 `repaint`는 고른 구간만 새로 만든 새 버전을 남기며 원본은 바꾸지 않는다. 구간 밖도 조금 달라질 수
 있다. ACE 실측 실행기는 `scripts/smoke_real_engine.py`와 `scripts/compare_production.py`다.
+`analyze-rhythm`은 기존 WAV를 읽어 JSON으로 분석하며 음원이나 프로젝트를 바꾸지 않는다.
+`analyze-rhythm --diagnostics`는 모델 없이 타격 성분을 추가 분석한다. 분리 결과가 없으면
+반주 연속성은 판단 어려움으로 남는다. `inspect-rhythm`은 기존 후보에 새 분석 artifact·revision을
+추가하며 원래 음원·기존 QC·사람 선택과 평가는 보존한다.
+
+```bash
+uv run music-engine analyze-rhythm path.wav --bpm 84 --diagnostics
+uv run music-engine inspect-rhythm projects/my-song --candidate-id <candidate-id>
+```
+
+현재 v4 구간 진단은 전곡 프롬프트 단어만으로 경고를 낮추지 않는다. 같은 음원 해시에 연결한
+`--intent-json`으로 구간별 템포 변화·반주 쉼 계획을 대조할 수 있다. 템포 계획 안의 불규칙한
+흔들림과 계획 밖의 경고는 남기며, 표현의 의도나 모든 모델 오류를 자동으로 확정하지 않는다.
+입력 형식과 판별 범위는 [자동 품질 검사](docs/AUTO-QUALITY.md#구간별-의도-대조와-검사-범위)를 참고한다.
+곡 중간의 급격한 디지털 무음도 전체 PCM에서 측정하고, 원본 믹스와 분리 자료의 불일치·
+반복 형태를 추가 근거로 남긴다. v1·v2·v3 과거 계획의 검사 범위는 유지한다. 실제 기존 음악의
+통제된 변형으로 평가한 결과, 코드를 고정한 뒤 처음 평가한 4곡에서 끊김 16개 중 7개,
+시간 교란 48개 중 18–22개를 찾았고 부드러운 템포 변화·원곡에는 경고가 없었다. 곡마다 차이가 크며,
+모든 모델 오류나 의도를 정확히 판별하는 수준으로 보증하지 않는다.
+
+기존 품질 환경의 UMXHQ는 보컬과 잔여 반주 에너지의 시각별 근거도 남긴다. 드럼 추정 모델은
+약 35.6 MB이며 선택적으로 준비한다. 이미 검증된 가중치가 있으면 같은 분석 과정에서 함께 사용한다.
+다음 `separate` 명령은 음원을 변경하거나 받아쓰기 모델을 올리지 않고 분리 분석만 수행한다.
+
+```bash
+.runtime/quality/.venv/bin/python scripts/quality_worker.py setup --drums
+.runtime/quality/.venv/bin/python scripts/quality_worker.py separate --audio /absolute/path.wav > separated-energy.json
+uv run music-engine analyze-rhythm /absolute/path.wav --diagnostics --separation-json separated-energy.json
+uv run music-engine inspect-rhythm projects/my-song --candidate-id <candidate-id> --separation-json separated-energy.json
+```
 
 ## 데이터와 검사
 
@@ -163,7 +204,8 @@ uv run music-engine export projects/my-song --output ~/Music/my-song.wav
 
 첫 보컬 검사에서 품질 환경에 MLX Whisper·UMXHQ 가중치 약 1.65GB를 준비한다. 미리 준비하려면
 `scripts/bootstrap_quality.sh`를 실행한다. 분석 실패 시 음원을 보존하고 불확실성을 표시한다.
-연주곡은 받아쓰기 모델을 올리지 않는다. PCM·음량·가사 비교는 기술적 결함을 찾는 도구이며
+연주곡은 받아쓰기 모델을 올리지 않는다. 리듬·프레임 분석은 별도 모델 없이 실행한다.
+PCM·음량·리듬·가사 비교는 측정값과 확인할 구간을 찾는 도구이며
 선율의 매력이나 음악성을 자동 승인하지 않는다.
 
 ```bash
@@ -173,6 +215,15 @@ uv run pytest
 npm run check:app
 npm run test:app
 npm run build:app
+```
+
+생성과 리듬 검사를 함께 실측하려면 기본 XL turbo 서버에서 새 30초 연주곡을 한 번 만든다.
+원본·정리본의 분석과 artifact 해시, 사람 청취 `unreviewed` 상태를 확인한다.
+
+```bash
+./scripts/start_ace_api.sh
+# 다른 터미널에서, 존재하지 않는 출력 디렉터리를 지정한다.
+uv run python scripts/smoke_rhythm_quality.py --output-dir .runtime/rhythm-smoke-new
 ```
 
 실제 추론은 모델 없는 계약·회귀 검사와 따로 실행한다. 서버를 켜고 새 출력 폴더를 지정한다.

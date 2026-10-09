@@ -95,6 +95,35 @@ def test_analyze_requires_absolute_existing_audio(tmp_path):
         worker.analyze(tmp_path / "missing.wav")
 
 
+def test_separate_only_missing_weights_never_loads_models_or_downloads(tmp_path, monkeypatch):
+    audio = tmp_path / "source.wav"
+    audio.write_bytes(b"audio")
+    monkeypatch.setattr(worker, "UMX_DIRECTORY", tmp_path / "missing-model")
+    monkeypatch.setattr(worker, "RUNTIME", tmp_path / "quality")
+    monkeypatch.setattr(worker, "separation", lambda _audio: pytest.fail("Unverified model loaded"))
+    monkeypatch.setattr(worker.urllib.request, "urlopen", lambda *_args, **_kwargs: pytest.fail("Analysis downloaded a model"))
+    with pytest.raises(ValueError, match="Verified UMXHQ"):
+        worker.separate_only(audio)
+
+
+def test_attributed_drum_features_measure_real_pulses_without_timing_invention():
+    import numpy as np
+    rate = 44100
+    samples = np.zeros((16 * rate, 2), dtype=np.float32)
+    rng = np.random.default_rng(1)
+    burst = rng.normal(0, 0.15, round(rate * 0.03)).astype(np.float32)
+    for time in np.arange(0.3, 15.8, 0.5):
+        start = round(time * rate)
+        samples[start:start + len(burst)] = np.column_stack((burst, -burst))
+    features, _ = worker.drum_frame_features(samples, offset=0, core_start=0, core_end=16)
+    result = worker.drum_timing_summary(features, duration=16, source_hash="known-audio")
+    assert result["sourceArtifactSha256"] == "known-audio"
+    assert result["source"]["kind"] == "isolated_percussion"
+    assert result["pulse"]["bpm"] == pytest.approx(120, abs=3)
+    assert len(result["beatCandidatesSeconds"]) >= 24
+    assert result["onsetTimesSeconds"][0] == pytest.approx(0.3, abs=0.03)
+
+
 def test_cli_unknown_audio_emits_single_json():
     output = subprocess.run([sys.executable, str(MODULE_PATH), "analyze", "--audio", "/nonexistent/local-quality.wav"],
                             capture_output=True, text=True, check=False)

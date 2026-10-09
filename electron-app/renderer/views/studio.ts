@@ -21,7 +21,7 @@ import {
 import { Player } from "../player.ts";
 import { get, isPlanTicket, isSongTicket, planTicket, set, songTicket, type InspectorTab, type State } from "../store.ts";
 import { confirmDialog, errorText, menu, toast, withBusy } from "../ui.ts";
-import { audioQualityText, isAutomaticAttempt, lyricQualityText, processingText, qualityLabel, qualityRetryReason } from "../quality.ts";
+import { audioQualityText, isAutomaticAttempt, lyricQualityText, processingText, qualityLabel, qualityRetryReason, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText } from "../quality.ts";
 import { songPlanView } from "../song-plan-view.ts";
 import { comparisonChoices, comparisonVersion } from "../comparison.ts";
 import { INSTRUMENTS, applyInstrumentChanges, hasInstrument } from "../instruments.ts";
@@ -1027,6 +1027,8 @@ function qualityReport(version: Version): Child {
   const coverage = quality.lyrics.orderedCoverage;
   const knownLyrics = quality.lyrics.status === "pass" || quality.lyrics.status === "warning";
   const processing = processingText(quality.processing);
+  const rhythm = rhythmQualityText(quality);
+  const rhythmDiagnostics = rhythmDiagnosticChecks(quality);
   const retries = [...new Set(quality.retryReasons.map(qualityRetryReason))];
   const preparation = quality.preparation;
   const extended = preparation && typeof preparation.requestedDurationSeconds === "number" && typeof preparation.effectiveDurationSeconds === "number"
@@ -1040,6 +1042,10 @@ function qualityReport(version: Version): Child {
       h("div", { class: "check" }, h("span", { class: "sublabel" }, "소리"), h("p", null, audioQualityText(quality))),
       h("div", { class: "check" }, h("span", { class: "sublabel" }, "가사"), h("p", null, lyricQualityText(quality)),
         knownLyrics && typeof coverage === "number" && Number.isFinite(coverage) && h("p", { class: "footnote" }, `작성한 순서대로 인식된 가사 ${(Math.max(0, Math.min(1, coverage)) * 100).toFixed(0)}%`)),
+      rhythm && h("div", { class: "check" }, h("span", { class: "sublabel" }, "리듬 관찰"), h("p", null, rhythm),
+        h("p", { class: "footnote" }, rhythmMeterText(quality))),
+      rhythmDiagnostics.map((check) => h("div", { class: "check" }, h("span", { class: "sublabel" }, check.label), h("p", null, check.text),
+        check.evidence && h("p", { class: "footnote" }, check.evidence), check.method && h("p", { class: "footnote" }, check.method))),
       processing && h("div", { class: "check" }, h("span", { class: "sublabel" }, "재생본 정리"), h("p", null, processing)),
     ),
     retries.length ? h("details", { class: "disclosure" }, h("summary", null, "자동 재시도 이유"), h("ul", { class: "plain-list" }, retries.map((reason) => h("li", null, reason)))) : null,

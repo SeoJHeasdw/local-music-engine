@@ -266,6 +266,25 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = subparsers.add_parser("inspect", help="summarize and verify a reopened project")
     inspect.add_argument("path", type=Path)
 
+    rhythm = subparsers.add_parser("analyze-rhythm", help="measure WAV rhythm, frame levels and spectrum without changing audio")
+    rhythm.add_argument("path", type=Path)
+    rhythm.add_argument("--bpm", type=float, help="compare the measured pulse with this requested quarter-note BPM")
+    rhythm.add_argument("--time-signature", help="project the requested meter (2/4, 3/4, 4/4 or 6/8), without verifying downbeats")
+    rhythm.add_argument("--style", default="", help="musical intent, such as rubato or tempo changes")
+    rhythm.add_argument("--diagnostics", action="store_true", help="also analyze percussive timing and separately attributed backing continuity; loads no model")
+    rhythm.add_argument("--separation-json", type=Path, help="explicit source-bound separated-energy JSON or audited legacy stem cache")
+    rhythm.add_argument("--stem-label", help="label in a legacy stem cache")
+    rhythm.add_argument("--evidence-audio", type=Path, help="explicit source audio measured by the cache; transfer only identical PCM windows")
+    rhythm.add_argument("--intent-json", type=Path, help="explicit source-bound expected rhythm sections; implies diagnostics and loads no model")
+
+    diagnose = subparsers.add_parser("inspect-rhythm", help="append a model-free rhythm diagnosis report to a saved candidate")
+    diagnose.add_argument("path", type=Path)
+    diagnose.add_argument("--candidate-id", required=True)
+    diagnose.add_argument("--separation-json", type=Path)
+    diagnose.add_argument("--stem-label")
+    diagnose.add_argument("--evidence-candidate-id", help="verified source candidate originally measured by the explicit stem cache")
+    diagnose.add_argument("--intent-json", type=Path, help="explicit source-bound expected rhythm sections")
+
     return parser
 
 
@@ -311,6 +330,29 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run(args: argparse.Namespace) -> Any:
+    if args.command == "inspect-rhythm":
+        from .rhythm_inspection import inspect_saved_candidate
+        return inspect_saved_candidate(args.path, candidate_id=args.candidate_id, cache_path=args.separation_json,
+            stem_label=args.stem_label, evidence_candidate_id=args.evidence_candidate_id, intent_path=args.intent_json)
+    if args.command == "analyze-rhythm":
+        if args.diagnostics or args.separation_json is not None or args.intent_json is not None:
+            from .rhythm_inspection import inspect_audio_rhythm
+            from .rhythm_evidence import load_cached_stem_evidence
+            from .rhythm_intent import load_rhythm_intent
+            intent = load_rhythm_intent(args.intent_json, audio=args.path) if args.intent_json is not None else None
+            stems = load_cached_stem_evidence(args.separation_json, audio=args.path, label=args.stem_label,
+                evidence_audio=args.evidence_audio) if args.separation_json is not None else None
+            if args.separation_json is None and (args.stem_label is not None or args.evidence_audio is not None):
+                raise ValueError("Stem label/source audio requires explicit separated-energy JSON")
+            return inspect_audio_rhythm(args.path, requested_bpm=args.bpm, time_signature=args.time_signature,
+                style_prompt=args.style, stem_inputs=stems, intent_snapshot=intent)
+        if args.stem_label is not None or args.evidence_audio is not None:
+            raise ValueError("Stem label/source audio requires explicit separated-energy JSON")
+        from .music_structure import analyze_music_structure
+        from .storage import sha256_file
+        return {**analyze_music_structure(args.path, requested_bpm=args.bpm,
+            time_signature=args.time_signature, style_prompt=args.style),
+            "measuredArtifactSha256": sha256_file(args.path)}
     if args.command == "song-plan":
         controls = args.input_json
         return prepare_song_plan(controls["lyrics"], duration_seconds=controls["durationSeconds"],

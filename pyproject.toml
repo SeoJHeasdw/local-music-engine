@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
 authors = [{ name = "local-music-engine contributors" }]
-dependencies = []
+dependencies = ["numpy==2.3.5", "scipy==1.17.0"]
 
 [project.scripts]
 music-engine = "local_music_engine.cli:main"

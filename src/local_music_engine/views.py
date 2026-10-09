@@ -49,6 +49,11 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
                            or job["parameters"].get("feedbackId")
                            or feedback_by_job.get(job.get("parentJobId") or "")
                            or batch.get("parameters", {}).get("feedbackId"))
+        quality = candidate.get("quality")
+        inspection_findings = []
+        if candidate.get("rhythmInspectionIds"):
+            from .rhythm_inspection import candidate_inspection_view
+            quality, inspection_findings = candidate_inspection_view(store, project, candidate, artifact, source_valid=valid)
         rows.append(
             {
                 "candidateId": candidate["candidateId"],
@@ -61,13 +66,13 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
                 "artifactValid": valid,
                 "artifactValidation": reason,
                 "humanReview": candidate["humanReview"],
-                "quality": candidate.get("quality"),
+                "quality": quality,
                 "recommended": candidate["candidateId"] == project.get("recommendedCandidateId"),
                 "findings": [
                     findings[finding_id]
                     for finding_id in candidate["findingIds"]
                     if finding_id in findings
-                ],
+                ] + inspection_findings,
                 "stylePrompt": parameters.get("prompt"),
                 "baseStylePrompt": parameters.get("productionRules", {}).get("baseStylePrompt", parameters.get("sourceStylePrompt", parameters.get("prompt"))),
                 "productionRules": parameters.get("productionRules"),

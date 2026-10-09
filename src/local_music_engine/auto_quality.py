@@ -19,6 +19,9 @@ from .quality_backend import AudioOnlyBackend, LocalQualityBackend
 from .storage import ProjectStore, fingerprint, new_id, utc_now
 from .song_planning import prepare_song_plan
 from .lyrics import is_instrumental_lyrics
+from .music_structure import VERSION as RHYTHM_VERSION, analyze_music_structure
+from .rhythm_diagnostics import SUPPORTED_VERSIONS as DIAGNOSTICS_VERSIONS, VERSION as DIAGNOSTICS_VERSION
+from .rhythm_inspection import attach_diagnostics
 
 QUALITY_VERSION = "music-quality-v1"
 
@@ -31,7 +34,8 @@ def quality_policy(mode: str = "auto", *, max_attempts: int = 4) -> dict[str, An
     if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or not 1 <= max_attempts <= 4:
         raise ValueError("quality attempts must be between 1 and 4, including the first generation")
     return {"enabled": True, "version": QUALITY_VERSION, "maxAttempts": max_attempts,
-            "lyrics": mode == "auto", "finishAudio": True, "autoSetup": True}
+            "lyrics": mode == "auto", "finishAudio": True, "autoSetup": True,
+            "rhythmVersion": RHYTHM_VERSION, "diagnosticsVersion": DIAGNOSTICS_VERSION}
 
 
 def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -112,8 +116,11 @@ def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def make_quality_plan(payloads: list[dict[str, Any]], policy: dict[str, Any]) -> list[list[dict[str, Any]]]:
     if (policy.get("version") != QUALITY_VERSION or isinstance(policy.get("maxAttempts"), bool)
-            or not isinstance(policy.get("maxAttempts"), int) or not 1 <= policy["maxAttempts"] <= 4):
+            or not isinstance(policy.get("maxAttempts"), int) or not 1 <= policy["maxAttempts"] <= 4
+            or policy.get("rhythmVersion") not in (None, RHYTHM_VERSION)):
         raise ValueError("unsupported automatic quality policy")
+    if policy.get("diagnosticsVersion") not in (None, *DIAGNOSTICS_VERSIONS):
+        raise ValueError("unsupported rhythm diagnosis policy")
     used = {payload["seed"] for payload in payloads}
     plan = []
     for original in payloads:
@@ -133,6 +140,8 @@ def make_quality_plan(payloads: list[dict[str, Any]], policy: dict[str, Any]) ->
 def validate_quality_plan(parameters: dict[str, Any]) -> None:
     policy, plan, seeds = parameters.get("qualityPolicy"), parameters.get("qualityPlan"), parameters.get("seeds")
     if (not isinstance(policy, dict) or policy.get("version") != QUALITY_VERSION
+            or policy.get("rhythmVersion") not in (None, RHYTHM_VERSION)
+            or policy.get("diagnosticsVersion") not in (None, *DIAGNOSTICS_VERSIONS)
             or isinstance(policy.get("maxAttempts"), bool) or not isinstance(policy.get("maxAttempts"), int)
             or not 1 <= policy["maxAttempts"] <= 4 or not isinstance(plan, list)
             or not isinstance(seeds, list) or not plan or len(plan) != len(seeds)):
@@ -180,6 +189,38 @@ def _quality_rank(report: dict[str, Any]) -> tuple[float, ...]:
             float(audio.get("technicalScore", 0)))
 
 
+def _measure_rhythm(path: Path, payload: dict[str, Any], artifact_sha256: str) -> dict[str, Any]:
+    """An uncertain music estimate must not discard a usable generation."""
+    try:
+        report = analyze_music_structure(path, requested_bpm=payload.get("bpm"),
+            time_signature=payload.get("time_signature"),
+            style_prompt=payload.get("sourceStylePrompt", payload.get("prompt", "")))
+    except Exception as error:
+        report = {"version": RHYTHM_VERSION, "status": "unknown",
+                  "requestedBpm": payload.get("bpm"), "estimatedBpm": None,
+                  "confidence": 0.0, "findings": [],
+                  "error": f"{type(error).__name__}: {error}"}
+    return {**report, "measuredArtifactSha256": artifact_sha256}
+
+
+def _assessment_status(audio: dict[str, Any], lyrics: dict[str, Any], rhythm: dict[str, Any] | None,
+                       reasons: list[str]) -> str:
+    if (reasons or audio.get("automaticStatus") == "needs_review"
+            or lyrics.get("status") == "warning" or (rhythm or {}).get("status") == "needs_review"):
+        return "attention"
+    if lyrics.get("status") == "unknown" or (rhythm or {}).get("status") == "unknown":
+        return "unknown"
+    return "passed"
+
+
+def _assessment_summary(status: str, *, instrumental: bool) -> str:
+    if status == "attention":
+        return "자동 검사에서 확인할 부분이 있어요. 직접 들어 비교해 주세요."
+    if status == "unknown":
+        return "음원은 보존했지만 자동 검사 일부를 확정하지 못했어요."
+    return "연주곡 음원 검사를 마쳤어요. 직접 들어 확인해 주세요." if instrumental else "가사 일치와 음원 검사를 마쳤어요. 직접 들어 확인해 주세요."
+
+
 def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str, Any], backend: Any,
                      batch_id: str, context: dict[str, Any]) -> dict[str, Any]:
     candidate, artifact, path = _candidate(store, candidate_id)
@@ -198,6 +239,10 @@ def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str
 
     try:
         audio = analyze_audio_quality(path, requested_duration_seconds=context["payload"]["audio_duration"])
+        rhythm = None
+        if policy.get("rhythmVersion") == RHYTHM_VERSION:
+            stage("quality_rhythm")
+            rhythm = _measure_rhythm(path, context["payload"], artifact["sha256"])
         original_lyrics = context["payload"].get("qualityPreparation", {}).get("lyricsOriginal", context["payload"]["lyrics"])
         preflight = assess_lyric_suitability(original_lyrics, context["payload"]["audio_duration"], bpm=context["payload"].get("bpm"))
         if preflight["instrumental"]:
@@ -206,23 +251,30 @@ def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str
         else:
             stage("quality_lyrics")
             observation = backend.analyze(path, progress=lambda message: stage("quality_lyrics: " + message))
+        if rhythm is not None and policy.get("diagnosticsVersion") in DIAGNOSTICS_VERSIONS:
+            stage("quality_rhythm")
+            rhythm = attach_diagnostics(rhythm, path, duration_seconds=artifact["audio"]["durationSeconds"],
+                source_sha256=artifact["sha256"], separation=observation.get("separation"),
+                style_prompt=context["payload"].get("sourceStylePrompt", context["payload"].get("prompt", "")),
+                diagnostics_version=policy["diagnosticsVersion"])
         lyrics = evaluate_lyric_transcript(original_lyrics, observation, duration_seconds=artifact["audio"]["durationSeconds"])
         reasons = [finding["check"] for finding in audio["findings"] if finding.get("retryEligible")]
         reasons.extend(lyrics.get("retryReasons", []))
-        status = "attention" if reasons or audio["automaticStatus"] == "needs_review" or lyrics["status"] == "warning" else "unknown" if lyrics["status"] == "unknown" else "passed"
-        summary = "가사 일치와 음원 검사를 마쳤어요. 직접 들어 확인해 주세요." if status == "passed" else "자동 검사에서 확인할 부분이 있어요. 직접 들어 비교해 주세요." if status == "attention" else "음원 검사는 마쳤지만 가사 일치는 확정하지 못했어요."
-        if status == "passed" and preflight["instrumental"]:
-            summary = "연주곡 음원 검사를 마쳤어요. 직접 들어 확인해 주세요."
+        status = _assessment_status(audio, lyrics, rhythm, reasons)
+        summary = _assessment_summary(status, instrumental=preflight["instrumental"])
         report = {**context["metadata"], "version": QUALITY_VERSION, "complete": True,
                   "status": status, "summary": summary, "sourceArtifactSha256": artifact["sha256"],
                   "preferred": False, "audio": audio, "lyrics": lyrics, "preflight": preflight,
                   "preparation": context["payload"].get("qualityPreparation"),
                   "observation": observation, "processing": None, "retryReasons": list(dict.fromkeys(reasons)),
                   "score": audio["technicalScore"], "scope": "technical_integrity_and_transcript_match"}
+        if rhythm is not None:
+            report["rhythm"] = rhythm
+            report["scope"] = "technical_integrity_transcript_match_and_rhythm_observations"
         with store.transaction() as project:
             current = store.find_by_id(project, "candidates", "candidateId", candidate_id)
             current["quality"] = report
-            for finding in audio["findings"]:
+            for finding in [*audio["findings"], *(rhythm or {}).get("findings", [])]:
                 record = {**finding, "severity": "failure" if finding["severity"] == "error" else finding["severity"],
                           "findingId": new_id("finding"), "artifactId": artifact["artifactId"], "createdAt": utc_now()}
                 project["findings"].append(record)
@@ -292,6 +344,23 @@ def finalize_candidate(store: ProjectStore, candidate_id: str, *, batch_id: str)
                                                  requested_duration_seconds=source_artifact["audio"]["durationSeconds"])
         artifact.update(sourceArtifactId=source_artifact["artifactId"], sourceArtifactSha256=source_artifact["sha256"], processing=processing["processing"])
         report = deepcopy(candidate["quality"])
+        if report.get("rhythm") is not None:
+            # Gain/DC/edge finishing changes frame levels and spectrum. Measure the
+            # published file and attach its own hash instead of copying raw values.
+            report["rhythm"] = _measure_rhythm(destination, original["parameters"], artifact["sha256"])
+            if candidate["quality"]["rhythm"].get("diagnostics") is not None:
+                report["rhythm"] = attach_diagnostics(report["rhythm"], destination,
+                    duration_seconds=artifact["audio"]["durationSeconds"], source_sha256=artifact["sha256"],
+                    separation=candidate["quality"].get("observation", {}).get("separation"),
+                    backing_source_sha256=source_artifact["sha256"],
+                    style_prompt=original["parameters"].get("sourceStylePrompt", original["parameters"].get("prompt", "")),
+                    diagnostics_version=candidate["quality"]["rhythm"]["diagnostics"]["version"])
+            # Keep the original integrity/transcript evidence (attenuation cannot
+            # repair clipping), but don't retain stale rhythm status after reanalysis.
+            report["status"] = _assessment_status(report["audio"], report["lyrics"], report["rhythm"], report["retryReasons"])
+            report["summary"] = _assessment_summary(report["status"], instrumental=report["lyrics"].get("status") == "not_applicable")
+            findings.extend({**finding, "findingId": new_id("finding"), "artifactId": artifact["artifactId"],
+                             "createdAt": utc_now()} for finding in report["rhythm"].get("findings", []))
         report["processing"] = {**processing["processing"], "sourceCandidateId": candidate_id,
                                 "sourceArtifactId": source_artifact["artifactId"], "existingClippingRepaired": False,
                                 "outputQuality": processing["outputQuality"]}

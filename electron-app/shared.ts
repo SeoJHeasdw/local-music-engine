@@ -89,6 +89,79 @@ export type Review = {
   updatedAt: string | null;
 };
 
+export type RhythmDiagnosticSource = {
+  kind: "isolated_percussion" | "percussive_estimate" | "synthetic_percussion" | "separated_accompaniment" | "separated_instrumental" | "synthetic_accompaniment" | "separated_vocal" | "synthetic_vocal" | "full_mix_pcm";
+  method: string;
+  reliability: number;
+};
+
+export type RhythmDiagnosticCheck = {
+  status: "observed" | "needs_review" | "unknown";
+  reason: string;
+  source: RhythmDiagnosticSource | null;
+  vocalSource?: RhythmDiagnosticSource | null;
+  observed: Record<string, unknown>;
+};
+
+export type RhythmDiagnosticEvent = {
+  check: "beat_timing_instability_suspected" | "backing_dropout_suspected" | "possible_arrangement_break" | "percussive_gap_observed" | "mix_dropout_suspected"
+    | "repeated_hit_timing_shift_suspected" | "smooth_timing_change_observed";
+  category: "beat_timing" | "percussion_gap" | "backing_dropout" | "arrangement_break" | "mix_dropout";
+  severity: "warning" | "info";
+  confidence: number;
+  startSeconds: number;
+  endSeconds: number;
+  evidenceStatus: "suspected" | "observed" | "intent_unknown" | "consistent_with_declared_silence";
+  message: string;
+  observed: Record<string, unknown>;
+  threshold: Record<string, unknown>;
+  retryEligible: false;
+};
+
+export type RhythmDiagnostics = {
+  version: "rhythm-diagnostics-v1" | "rhythm-diagnostics-v2" | "rhythm-diagnostics-v3" | "rhythm-diagnostics-v4";
+  status: "observed" | "needs_review" | "unknown";
+  durationSeconds: number | null;
+  checks: { beatTiming: RhythmDiagnosticCheck; backingContinuity: RhythmDiagnosticCheck; mixContinuity?: RhythmDiagnosticCheck; hitTiming?: RhythmDiagnosticCheck };
+  events: RhythmDiagnosticEvent[];
+  findings: RhythmDiagnosticEvent[];
+  limitations: string[];
+  confidenceMeaning?: string;
+  eventsTruncated?: boolean;
+  totalEventCount?: number;
+  omittedEventCount?: number;
+  omittedWarningCount?: number;
+};
+
+export type RhythmQuality = {
+  status: "observed" | "needs_review" | "unknown";
+  measuredArtifactSha256?: string;
+  requestedBpm: number | null;
+  estimatedBpm: number | null;
+  confidence: number;
+  diagnostics?: RhythmDiagnostics | null;
+  segments: Array<{ startSeconds: number; endSeconds: number; estimatedBpm: number | null; confidence: number }>;
+  meter: {
+    status: "projected" | "unknown";
+    timeSignature: string | null;
+    quarterNotesPerBar: number | null;
+    caveat: string;
+  };
+  frameSeries: { columns: string[]; points: Array<Array<number | null>>; analysisHopSeconds: number; analysisWindowSeconds?: number; intervalSeconds: number };
+  findings: Array<{
+    check: string;
+    severity: "warning" | "info";
+    message: string;
+    startSeconds?: number | null;
+    endSeconds?: number | null;
+    value?: unknown;
+    observed?: Record<string, unknown>;
+    threshold?: Record<string, unknown>;
+    confidence?: number;
+    retryEligible?: false;
+  }>;
+};
+
 export type AutomaticQuality = {
   complete?: boolean;
   status: "passed" | "attention" | "unknown";
@@ -111,6 +184,7 @@ export type AutomaticQuality = {
   processing: Record<string, unknown> | null;
   preparation?: { requestedDurationSeconds?: number; effectiveDurationSeconds?: number; changes?: string[] };
   observation?: { loudness?: Record<string, unknown>; separation?: Record<string, unknown>; [key: string]: unknown };
+  rhythm?: RhythmQuality | null;
 };
 
 export type Version = {
