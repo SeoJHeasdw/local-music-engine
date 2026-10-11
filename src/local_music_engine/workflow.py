@@ -242,7 +242,13 @@ def _api_payload(frozen: dict[str, Any]) -> dict[str, Any]:
         "time_signature",
         "audio_cover_strength",
     }
-    return {key: value for key, value in frozen.items() if key in allowed}
+    payload = {key: value for key, value in frozen.items() if key in allowed}
+    # ACE's REST parser reads bpm with int(str(value)): "98.0" fails and is dropped without
+    # an error, leaving the tempo to the LM (text2music) or unset (repaint). Song plans
+    # freeze bpm as a float, so send the whole number ACE accepts.
+    if isinstance(payload.get("bpm"), float):
+        payload["bpm"] = round(payload["bpm"])
+    return payload
 
 
 def _revise_inputs(

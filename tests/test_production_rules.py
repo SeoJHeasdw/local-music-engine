@@ -68,6 +68,17 @@ def test_explicit_metadata_wins_and_old_stored_meter_is_only_normalized_for_new_
     assert store.load()["inputs"]["timeSignature"] == "3/4"
 
 
+def test_song_plan_tempo_reaches_ace_as_the_integer_its_parser_accepts(tmp_path: Path) -> None:
+    store = initialize(tmp_path, bpm=98, production_rules=selection("steady-groove", "section-development"))
+    result = generate_candidates(tmp_path, seeds=[1], client_factory=RecordingAceClient, engine="ace-step")
+    repaint_candidate(tmp_path, start_seconds=1, end_seconds=2, seed=5, candidate_id=result["candidateIds"][0],
+                      client_factory=RecordingAceClient, engine="ace-step")
+    assert "songPlan" in store.load()["requests"][0]["parameters"]
+    for sent in RecordingAceClient.payloads:
+        # ACE parses bpm with int(str(value)) and drops the field when that fails.
+        assert int(str(sent["bpm"])) == 98
+
+
 def test_instrumental_skips_vocal_rules_and_uses_duration_specific_structure(tmp_path: Path) -> None:
     store = initialize(tmp_path, lyrics="[Instrumental]")
     generate_candidates(tmp_path, seeds=[1], client_factory=RecordingAceClient, engine="ace-step")
