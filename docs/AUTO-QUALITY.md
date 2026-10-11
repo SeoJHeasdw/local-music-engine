@@ -116,6 +116,19 @@ ASR 신뢰도가 부족하거나 timestamp가 불가능하거나 환각·과도�
 uv run music-engine analyze-rhythm path.wav --bpm 84 --time-signature 4/4
 ```
 
+## 엔진이 적용한 템포·조성·박자 확인
+
+ACE는 결과와 함께 실제로 조건으로 쓴 `bpm`·`keyscale`·`timesignature`를 돌려준다. 요청한 값이 도중에
+버려지면 text2music에서는 LM이 고른 값이, repaint·cover에서는 `N/A`가 돌아온다. 자동 검사는 요청에 적은
+항목만 이 값과 비교한다. BPM은 정수로 반올림하고, 조성은 대소문자·공백을, 박자는 `4/4`와 `4`를 같게 본다.
+다르면 `engine_meta_mismatch` 경고(화면 표시 "요청한 템포 미반영")와 `quality.engine`에 요청·엔진 값을 남기고
+전체 상태를 '확인할 부분 있음'으로 둔다. 같은 입력은 seed를 바꿔도 같은 값이 버려지므로 재생성 근거로
+쓰지 않는다. 요청에 없는 항목과 엔진이 보고하지 않는 항목(Music 3)은 비교하지 않으며, `engineMetas`가 없는
+과거 품질 계획의 재개에는 추가하지 않는다. 소리를 측정한 결과가 아니라 엔진의 보고를 대조한 것이다.
+
+저장된 실제 생성 57건에 다시 대조하면 소수 BPM이 버려진 14건만 경고가 되고, 정상 전달된 27건은
+일치했다(나머지 16건은 요청 BPM이 없거나 Music 3). 2026-10-11 기록은 [인수인계](HANDOFF.md)에 있다.
+
 ## 박자·반주 구간 진단과 기존 후보 검사
 
 새 품질 계획에는 `diagnosticsVersion=rhythm-diagnostics-v4`를 고정한다. 타격 성분의 박자 간격,
