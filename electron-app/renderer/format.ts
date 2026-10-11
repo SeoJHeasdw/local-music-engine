@@ -198,6 +198,18 @@ export function findingCopy(finding: Finding): { label: string; message: string;
         value: Number.isFinite(observed.estimatedBpm) && Number.isFinite(observed.requestedBpm)
           ? `자동 추정 ${Number(observed.estimatedBpm.toFixed(1))} / 요청 ${observed.requestedBpm} BPM` : null,
       };
+    case "engine_meta_mismatch": {
+      const fields: Record<string, [string, string]> = { bpm: ["템포", " BPM"], keyScale: ["조성", ""], timeSignature: ["박자", ""] };
+      const [name, unit] = fields[String(finding.observed.field)] ?? ["음악 정보", ""];
+      const reported = finding.observed.reported;
+      return {
+        label: `요청한 ${name} 미반영`,
+        message: reported == null
+          ? `요청한 ${name} 값이 엔진에 전달되지 않은 채 만들어졌어요. 시드를 바꿔 다시 만들어도 같을 수 있어요.`
+          : `엔진이 요청과 다른 ${name} 값으로 만들었다고 알려 왔어요. 시드를 바꿔 다시 만들어도 같을 수 있어요.`,
+        value: `엔진 ${reported == null ? "값 없음" : `${String(reported)}${unit}`} / 요청 ${String(finding.observed.requested)}${unit}`,
+      };
+    }
     case "tempo_drift":
       return {
         label: "구간별 템포 변화",

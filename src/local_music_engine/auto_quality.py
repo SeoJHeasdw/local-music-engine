@@ -17,6 +17,7 @@ from .lyric_quality import assess_lyric_suitability, evaluate_lyric_transcript
 from .qc import artifact_and_findings
 from .quality_backend import AudioOnlyBackend, LocalQualityBackend
 from .storage import ProjectStore, fingerprint, new_id, utc_now
+from .production_rules import normalize_time_signature
 from .song_planning import prepare_song_plan
 from .lyrics import is_instrumental_lyrics
 from .music_structure import VERSION as RHYTHM_VERSION, analyze_music_structure
@@ -35,7 +36,7 @@ def quality_policy(mode: str = "auto", *, max_attempts: int = 4) -> dict[str, An
         raise ValueError("quality attempts must be between 1 and 4, including the first generation")
     return {"enabled": True, "version": QUALITY_VERSION, "maxAttempts": max_attempts,
             "lyrics": mode == "auto", "finishAudio": True, "autoSetup": True,
-            "rhythmVersion": RHYTHM_VERSION, "diagnosticsVersion": DIAGNOSTICS_VERSION}
+            "rhythmVersion": RHYTHM_VERSION, "diagnosticsVersion": DIAGNOSTICS_VERSION, "engineMetas": True}
 
 
 def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -203,10 +204,68 @@ def _measure_rhythm(path: Path, payload: dict[str, Any], artifact_sha256: str) -
     return {**report, "measuredArtifactSha256": artifact_sha256}
 
 
+_ENGINE_META_FIELDS = (("bpm", "bpm", "bpm"), ("keyScale", "key_scale", "keyscale"),
+                       ("timeSignature", "time_signature", "timesignature"))
+
+
+def compare_engine_metas(payload: dict[str, Any], metas: Any) -> dict[str, Any] | None:
+    """Compare the requested tempo, key and meter with what the engine says it used.
+
+    ACE echoes the values it conditioned on. A request field lost on the way comes back as
+    the planner's own choice (text2music) or as "N/A" (repaint, cover). Fields an engine
+    does not report at all (Music 3) and fields the request left open are not compared.
+    """
+
+    if not isinstance(metas, dict):
+        return None
+
+    def comparable(field: str, value: Any) -> Any:
+        if value is None or isinstance(value, bool) or str(value).strip() in {"", "N/A"}:
+            return None
+        if field == "bpm":
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return round(number) if math.isfinite(number) and number > 0 else None
+        text = " ".join(str(value).split())
+        if field == "timeSignature":
+            try:
+                return normalize_time_signature(text)
+            except ValueError:
+                return text
+        return text.casefold()
+
+    fields, findings = [], []
+    for field, requested_key, reported_key in _ENGINE_META_FIELDS:
+        requested = comparable(field, payload.get(requested_key))
+        if requested is None or reported_key not in metas:
+            continue
+        reported = comparable(field, metas[reported_key])
+        shown = None if reported is None else metas[reported_key]
+        fields.append({"field": field, "requested": payload[requested_key], "reported": shown, "matched": reported == requested})
+        if reported != requested:
+            findings.append({"check": "engine_meta_mismatch", "severity": "warning", "retryEligible": False, "confidence": 1.0,
+                             "message": f"The engine reported {shown!r} for {field}, not the requested {payload[requested_key]!r}.",
+                             "observed": {"field": field, "requested": payload[requested_key], "reported": shown},
+                             "threshold": {"comparison": "equal after rounding BPM and normalizing text"},
+                             "startSeconds": None, "endSeconds": None})
+    if not fields:
+        return None
+    return {"status": "needs_review" if findings else "matched", "fields": fields, "findings": findings}
+
+
+def _engine_metas(store: ProjectStore, candidate_id: str) -> Any:
+    job = next((item for item in store.load()["jobs"]
+                if candidate_id in item.get("resultRefs", []) and item.get("remoteResult")), None)
+    return job["remoteResult"].get("metas") if job else None
+
+
 def _assessment_status(audio: dict[str, Any], lyrics: dict[str, Any], rhythm: dict[str, Any] | None,
-                       reasons: list[str]) -> str:
+                       reasons: list[str], engine: dict[str, Any] | None = None) -> str:
     if (reasons or audio.get("automaticStatus") == "needs_review"
-            or lyrics.get("status") == "warning" or (rhythm or {}).get("status") == "needs_review"):
+            or lyrics.get("status") == "warning" or (rhythm or {}).get("status") == "needs_review"
+            or (engine or {}).get("status") == "needs_review"):
         return "attention"
     if lyrics.get("status") == "unknown" or (rhythm or {}).get("status") == "unknown":
         return "unknown"
@@ -260,7 +319,9 @@ def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str
         lyrics = evaluate_lyric_transcript(original_lyrics, observation, duration_seconds=artifact["audio"]["durationSeconds"])
         reasons = [finding["check"] for finding in audio["findings"] if finding.get("retryEligible")]
         reasons.extend(lyrics.get("retryReasons", []))
-        status = _assessment_status(audio, lyrics, rhythm, reasons)
+        # A dropped request field repeats for every seed, so this never asks for a retry.
+        engine = compare_engine_metas(context["payload"], _engine_metas(store, candidate_id)) if policy.get("engineMetas") else None
+        status = _assessment_status(audio, lyrics, rhythm, reasons, engine)
         summary = _assessment_summary(status, instrumental=preflight["instrumental"])
         report = {**context["metadata"], "version": QUALITY_VERSION, "complete": True,
                   "status": status, "summary": summary, "sourceArtifactSha256": artifact["sha256"],
@@ -271,10 +332,12 @@ def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str
         if rhythm is not None:
             report["rhythm"] = rhythm
             report["scope"] = "technical_integrity_transcript_match_and_rhythm_observations"
+        if engine is not None:
+            report["engine"] = engine
         with store.transaction() as project:
             current = store.find_by_id(project, "candidates", "candidateId", candidate_id)
             current["quality"] = report
-            for finding in [*audio["findings"], *(rhythm or {}).get("findings", [])]:
+            for finding in [*audio["findings"], *(rhythm or {}).get("findings", []), *(engine or {}).get("findings", [])]:
                 record = {**finding, "severity": "failure" if finding["severity"] == "error" else finding["severity"],
                           "findingId": new_id("finding"), "artifactId": artifact["artifactId"], "createdAt": utc_now()}
                 project["findings"].append(record)
@@ -357,10 +420,14 @@ def finalize_candidate(store: ProjectStore, candidate_id: str, *, batch_id: str)
                     diagnostics_version=candidate["quality"]["rhythm"]["diagnostics"]["version"])
             # Keep the original integrity/transcript evidence (attenuation cannot
             # repair clipping), but don't retain stale rhythm status after reanalysis.
-            report["status"] = _assessment_status(report["audio"], report["lyrics"], report["rhythm"], report["retryReasons"])
+            report["status"] = _assessment_status(report["audio"], report["lyrics"], report["rhythm"], report["retryReasons"],
+                                                  report.get("engine"))
             report["summary"] = _assessment_summary(report["status"], instrumental=report["lyrics"].get("status") == "not_applicable")
             findings.extend({**finding, "findingId": new_id("finding"), "artifactId": artifact["artifactId"],
                              "createdAt": utc_now()} for finding in report["rhythm"].get("findings", []))
+        # The finished file is the same performance; it keeps the engine's own account of it.
+        findings.extend({**finding, "findingId": new_id("finding"), "artifactId": artifact["artifactId"],
+                         "createdAt": utc_now()} for finding in (report.get("engine") or {}).get("findings", []))
         report["processing"] = {**processing["processing"], "sourceCandidateId": candidate_id,
                                 "sourceArtifactId": source_artifact["artifactId"], "existingClippingRepaired": False,
                                 "outputQuality": processing["outputQuality"]}

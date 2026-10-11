@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from local_music_engine.auto_quality import prepare_payload, quality_policy
+from local_music_engine.auto_quality import compare_engine_metas, prepare_payload, quality_policy
 from local_music_engine.jobs import recover_project
 from local_music_engine.storage import ProjectStore
 from local_music_engine.workflow import export_selected, generate_candidates, resume_latest_batch, revise_inputs
@@ -91,6 +91,43 @@ def test_attempt_budget_is_four_total_and_best_effort_remains_available(song):
     winner = song.find_by_id(project, "candidates", "candidateId", result["candidateIds"][0])
     assert winner["quality"]["status"] == "attention"
     assert winner["humanReview"]["status"] == "unreviewed"
+
+
+def test_engine_metas_compare_only_what_was_requested_and_reported():
+    requested = {"bpm": 98.0, "key_scale": "F minor", "time_signature": "4"}
+    assert compare_engine_metas(requested, {"bpm": 98, "keyscale": "f  Minor", "timesignature": "4/4"})["status"] == "matched"
+    assert compare_engine_metas(requested, None) is None
+    assert compare_engine_metas(requested, {"engine": "minimax-music3", "duration": 30.0}) is None  # reports none of them
+    assert compare_engine_metas({"bpm": None, "key_scale": ""}, {"bpm": 88, "keyscale": "E major"}) is None
+    planner_chose = compare_engine_metas(requested, {"bpm": 88, "keyscale": "F minor", "timesignature": "4"})
+    assert planner_chose["status"] == "needs_review"
+    assert [(item["check"], item["observed"], item["retryEligible"]) for item in planner_chose["findings"]] == [
+        ("engine_meta_mismatch", {"field": "bpm", "requested": 98.0, "reported": 88}, False)]
+    never_arrived = compare_engine_metas(requested, {"bpm": "N/A", "keyscale": "F minor", "timesignature": "4"})
+    assert never_arrived["findings"][0]["observed"] == {"field": "bpm", "requested": 98.0, "reported": None}
+
+
+def test_engine_that_ignored_the_requested_tempo_is_flagged_once_without_regenerating(tmp_path):
+    class PlannerChoseTempo(FakeAceClient):
+        def wait(self, task_id, **kwargs):
+            return {**super().wait(task_id, **kwargs), "metas": {"bpm": 88, "keyscale": "F minor", "timesignature": "4"}}
+
+    FakeAceClient.submitted = []
+    store = ProjectStore.initialize(tmp_path / "song", title="템포", lyrics=LYRICS, style_prompt="Korean acoustic pop",
+                                    target_duration_seconds=10, bpm=98, key_scale="F minor", time_signature="4")
+    generate_candidates(store.root, seeds=[1], client_factory=PlannerChoseTempo, quality=quality_policy(),
+                        quality_backend=Reports(), engine="ace-step")
+    project = store.load()
+    assert FakeAceClient.submitted == [1]
+    for candidate in project["candidates"]:  # the raw attempt and its finished copy
+        assert candidate["quality"]["status"] == "attention" and candidate["quality"]["retryReasons"] == []
+        assert candidate["quality"]["engine"]["fields"][0] == {"field": "bpm", "requested": 98, "reported": 88, "matched": False}
+        checks = [store.find_by_id(project, "findings", "findingId", item)["check"] for item in candidate["findingIds"]]
+        assert checks.count("engine_meta_mismatch") == 1
+    older_plan = {key: value for key, value in quality_policy().items() if key != "engineMetas"}
+    generate_candidates(store.root, seeds=[2], client_factory=PlannerChoseTempo, quality=older_plan,
+                        quality_backend=Reports(), engine="ace-step")
+    assert all("engine" not in candidate["quality"] for candidate in store.load()["candidates"][2:])
 
 
 def test_inspector_failure_is_unknown_and_cannot_cause_repeated_generation(song):

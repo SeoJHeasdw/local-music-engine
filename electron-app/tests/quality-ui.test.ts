@@ -104,6 +104,18 @@ test("uncertain rhythm and warning states remain listenable observations", () =>
   assert.match(finding.value!, /자동 추정 100.*요청 120/);
 });
 
+test("a request value the engine did not use is named with both values", () => {
+  const base = { findingId: "engine", check: "engine_meta_mismatch", severity: "warning" as const, message: "The engine reported 88 for bpm.",
+    threshold: {}, startSeconds: null, endSeconds: null };
+  const chosen = findingCopy({ ...base, observed: { field: "bpm", requested: 98, reported: 88 } });
+  assert.equal(chosen.label, "요청한 템포 미반영");
+  assert.equal(chosen.value, "엔진 88 BPM / 요청 98 BPM");
+  assert.match(chosen.message, /다른 템포 값/);
+  const dropped = findingCopy({ ...base, observed: { field: "keyScale", requested: "F minor", reported: null } });
+  assert.equal(dropped.value, "엔진 값 없음 / 요청 F minor");
+  assert.match(dropped.message, /전달되지 않은/);
+});
+
 test("older quality reports omit the optional rhythm check", () => {
   assert.equal(rhythmQualityText(quality()), null);
   assert.equal(rhythmMeterText(quality()), null);
