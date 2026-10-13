@@ -1,4 +1,4 @@
-"""Historical ACE integration check. Start the legacy server separately before running.
+"""ACE integration check. Start the ACE server (scripts/start_ace_api.sh) separately before running.
 
 uv run python scripts/smoke_real_engine.py --output-dir .runtime/smoke-001
 

@@ -23,6 +23,7 @@ npm run check:app
 npm run test:app
 ```
 
-실제 추론 검사는 별도로 ACE 서버(`scripts/start_ace_api.sh`, 기본 DiT XL turbo)를 띄우고 CLI에서는
-`--engine ace-step`을 명시해 수행한다. Music 3 검사는 Music 3를 다시 준비한 뒤에만 한다.
+실제 추론 검사는 별도로 ACE 서버(`scripts/start_ace_api.sh`, 기본 DiT XL turbo)를 띄우고 수행한다.
+CLI의 기본 엔진·모델·주소가 이 서버다. Music 3 검사는 Music 3를 다시 준비한 뒤 `--engine minimax-music3`를
+명시해서만 한다.
 실제 추론을 mock 검사로 대체했다고 기록하지 않는다.

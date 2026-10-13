@@ -39,7 +39,7 @@ Hugging Face에서 받는다. 음원·가사·프로젝트·모델·로그는 Gi
 MPS에 올리기 전에 MLX로 옮기고 행렬 가중치를 BF16으로 둬 이 Mac에 들어가게 한다(ACE가 CUDA에서 쓰는 정밀도).
 모든 조건에서 생성 마지막의 VAE 디코딩이 약 5초 동안 메모리를 13GB 더 쓰고, 3분 곡 peak은 약 38GB였다.
 SFT 계열(`acestep-v15-xl-sft`)은 같은 런처로 보컬이 나오지만 청취에서 음질이 깨져 쓰지 않는다.
-측정과 근거는 [인수인계](docs/HANDOFF.md)에 있다.
+런처가 고친 내용과 근거는 `scripts/ace_api_server.py`의 docstring에 있다.
 
 앱은 `scripts/start_ace_api.sh`로 `127.0.0.1:18001` 서버를 켜고, 자기가 켠 서버만 종료한다.
 이미 켜 둔 ACE 서버는 외부 소유로 사용한다. 다른 엔진이나 설정과 다른 DiT·LM이 응답하면 준비된
@@ -53,9 +53,9 @@ CLI에서 큰 도우미를 부를 때는 엔진을 직접 끈다.
 별도 키는 `MUSIC_ENGINE_ACE_API_KEY`, 키 파일은 `MUSIC_ENGINE_ACE_API_KEY_FILE`로 지정한다.
 renderer에는 키를 전달하지 않는다. 서버 앞단은 인증된 요청만 받고 브라우저 Origin을 거부한다.
 
-MiniMax Music 3 엔진 코드(`scripts/start_music3_api.sh`, CLI의 기본 `--engine`)는 남아 있지만 앱에서는 쓰지
-않으며, 모델은 삭제했다. 쓰려면 `./scripts/bootstrap_music3.sh`로 약 28.5GB를 다시 받는다. CLI로 ACE를
-쓸 때는 `--engine ace-step --model acestep-v15-xl-turbo`를 명시한다.
+MiniMax Music 3 엔진 코드(`scripts/start_music3_api.sh`)는 남아 있지만 앱과 CLI 기본값에서는 쓰지 않으며,
+모델은 삭제했다. 쓰려면 `./scripts/bootstrap_music3.sh`로 약 28.5GB를 다시 받고 CLI에
+`--engine minimax-music3`를 명시한다.
 
 ## 앱
 
@@ -64,7 +64,7 @@ MiniMax Music 3 엔진 코드(`scripts/start_music3_api.sh`, CLI의 기본 `--en
 | 사이드바 | 위쪽 접기(⌘\)·뒤로(⌘[)·앞으로(⌘]), 새 곡 만들기, 내 곡, 최근 곡 바로 열기. 가장자리를 끌어 너비 조절(두 번 누르면 기본) |
 | 내 곡 | 곡 목록과 검색, 상태·버전·길이, 다른 곡 폴더 열기, Finder에서 보기 |
 | 새 곡 만들기 | ① 원하는 곡을 말로(가사가 있으면 선택해서 함께 넣으면 AI는 제목·스타일만 채운다), 악기(선택)를 고르면 그 태그를 스타일에 함께 보낸다 → AI 초안 ② 제목·스타일 프롬프트·가사 다듬기(× 로 닫아도 쓴 내용은 남는다). 장르 추천·제작 규칙·BPM·전개 미리보기는 ‘세부 조정’, 실제로 보낼 값은 ‘엔진에 보낼 내용’에 접어 둔다 |
-| 곡 화면 | 위: 재생·파형·구간 선택·비교. ⌘ + 스크롤·두 손가락 벌리기·+/−로 최대 48배 확대하고 옆으로 밀거나 아래 전체 띠를 끌어 이동하며, 시작·끝을 0.01초 단위로 적거나 0.1초씩 옮긴다. 가운데: 버전 목록(듣기·좋아요·별로·최종본). 아래: 만든 프롬프트·가사·자동 검사·평가·메모 탭. 가사 탭의 ‘가사 고치기’는 파형에서 고른 구간만 고친 가사로 다시 만들거나, 고친 가사로 새 전체 버전을 만든다(원래 버전은 남는다). 오른쪽: 고치기(곡 전체/구간 → 요청 문장이나 ‘악기 더하기·빼기’ → 수정안 → 만들기)와 고친 기록. 장르 추천 안내에서 온 악기는 여기서 뺄 수 없다고 표시한다 |
+| 곡 화면 | 위: 재생·파형·구간 선택·비교. ⌘ + 스크롤·두 손가락 벌리기·+/−로 최대 48배 확대하고 옆으로 밀거나 아래 전체 띠를 끌어 이동하며, 시작·끝을 0.01초 단위로 적거나 0.1초씩 옮긴다. 가운데: 버전 목록(듣기·좋아요·별로·최종본). 아래: 만든 프롬프트·가사·자동 검사·평가·메모 탭. 자동 검사 탭은 확인할 것만 시각·듣기 버튼과 함께 먼저 보여 주고 나머지 측정값은 접어 둔다. 가사 탭의 ‘가사 고치기’는 파형에서 고른 구간만 고친 가사로 다시 만들거나, 고친 가사로 새 전체 버전을 만든다(원래 버전은 남는다). 오른쪽: 고치기(곡 전체/구간 → 요청 문장이나 ‘악기 더하기·빼기’ → 수정안 → 만들기)와 고친 기록. 장르 추천 안내에서 온 악기는 여기서 뺄 수 없다고 표시한다 |
 | 설정 | 창 크기·최대화·전체 화면은 다음 실행 때 그대로 연다(처음엔 화면을 채운다). 사이드바 아래 음악 엔진 카드에서 연다(⌘,). ACE 상태·시작·종료·기록, DiT 선택, AI 도우미, 저장 위치와 생성 기본값 |
 
 이전 설정(Music 3 또는 첫 ACE 판)은 최초 실행 때 ACE XL turbo로 옮기고 원본을 백업한다
@@ -91,21 +91,12 @@ MiniMax Music 3 엔진 코드(`scripts/start_music3_api.sh`, CLI의 기본 `--en
 ACE에는 직접 쓴 스타일 뒤에 프리셋·규칙 문장을 쉼표로 이은 짧은 caption(약 650자 한도)과 `[Verse - restrained]`
 처럼 구간 안내를 붙인 가사를 보낸다. 화면은 이 한도를 넘으면 알린다.
 
-Music 3(CLI)에는 안내를 모델 학습 형식의 구조화된 음악 설명(caption v4)으로 보낸다. MiniMax가 공개한
-[caption 예시 1,000개](https://github.com/MiniMax-AI/MiniMax-Music3/tree/main/skills/music-caption-rewriter)는
-모두 괄호 없는 `Global Metadata / Vocal Details / Arrangement` 제목과 고정된 13개 항목
-(`Basic Attributes: bpm is 84. key is A, and scale is minor. Hip-Hop / Melodic Rap.`,
-`Vocal Gender & Timbre: Singer A (Male). …`, `Primary:`, `Groove & Foundation Progression:` 등)을 쓴다.
-프리셋은 이 항목을 서술형으로 채우고, 규칙은 해당 항목에 문장을 더한다. 직접 쓴 스타일은 곡의 정체성으로
-`Basic Attributes`에 들어가며, 이미 같은 형식으로 쓴 스타일은 항목별로 그대로 쓴다. 보컬 성별은 직접
-쓴 스타일에서만 읽는다. 조성은 예시와 같은 표기(Bb·Eb·Ab·F#·C#)로 맞춘다. `Duration:`·
-"가사를 순서대로 부르라" 같은 명령문은 보내지 않는다. 구간 표현 지시는 편곡 항목에 옮기고 가사에는
-`[Verse]`, `[Chorus]` 같은 단순한 태그를 쓴다. ACE 전용 LM·샘플링 옵션은 전달하지 않는다.
-추정 시간·마디·음절 수는 기록과 미리보기에 남긴다. 지시의 효과는 후보별로 확인하며 음악성을
-보증하지 않는다. [Music 3 입력 계약](https://huggingface.co/MiniMaxAI/MiniMax-Music3)을 따른다.
+Music 3(`--engine minimax-music3`)에는 같은 안내를 MiniMax가 공개한 caption 형식(`Global Metadata /
+Vocal Details / Arrangement`의 13개 항목)으로 옮겨 보낸다. 매핑은 `music3.py`에 있다.
 
-AI 도우미가 없으면 로컬 규칙으로 수정 가능한 초안을 제공한다. 초안을 위해 ACE 모델을 올리거나
-Music 3에 없는 작사 API를 호출하지 않는다. 자유로운 작사는 선택한 로컬 도우미를 쓸 수 있다.
+AI 도우미가 없으면 로컬 규칙으로 수정 가능한 초안을 제공하며, 초안을 위해 음악 서버를 부르지 않는다.
+자유로운 작사는 선택한 로컬 도우미를 쓸 수 있다. CLI의 `draft --engine ace-step`만 켜져 있는 ACE의
+LM에 초안을 묻는다.
 
 ## CLI
 
@@ -116,28 +107,20 @@ uv run music-engine production-rules
 uv run music-engine draft --query "늦은 밤 감성 힙합" --duration 30 --vocal-language en
 uv run music-engine init projects/my-song --title "내 노래" --lyrics-file lyrics.txt \
   --style "emotional hip hop, warm piano, clear male melodic rap" --duration 60
-uv run music-engine generate projects/my-song --seeds 101 --engine ace-step --model acestep-v15-xl-turbo
+uv run music-engine generate projects/my-song --seeds 101
 uv run music-engine status projects/my-song
 uv run music-engine library --dir projects
 ```
 
 `init`·`revise`·`draft`의 `--production-rules-json`으로 화면과 같은 규칙을 전달한다.
-CLI의 기본 `--engine`은 아직 Music 3이므로 ACE로 만들 때는 `--engine ace-step`을 붙인다. 품질 기본값은
-`--quality auto --quality-attempts 4`다. 버전마다 첫 생성·재시도를 합쳐
-최대 네 번이며 검사 불확실성만으로 다시 만들지 않는다. 모든 시도의 입력과 예산을 첫 batch에
-고정하고, 명시적인 재개도 예산을 늘리지 않는다. 자동 추천은 사람의 최종본 선택과 분리한다.
-`auto`·`audio`는 생성 요청의 BPM·박자표를 기준으로 반복 박동·구간 드리프트·박자 후보 간격과
-프레임별 음량·스펙트럼도 자동 검사한다. 절반·두 배·마디 단위의 해석 차이를 함께 기록하며, 마디 길이는
-요청 박자표에서 계산한 예상값이다. 리듬 경고는 청취 확인용으로 남기고 자동 시간 보정이나 재생성의
-근거로 쓰지 않는다. 원본과 사람 청취 `unreviewed` 상태를 보존한다.
-엔진이 실제로 적용했다고 보고한 템포·조성·박자가 요청과 다르면 '요청한 템포 미반영'처럼 경고한다.
-추가 구간 진단은 타격 성분의 박자 간격과 분리한 보컬·반주의 연속성을 따로 비교한다.
-검사 탭에서 박자 불안정 의심·타격 시각 흔들림 의심·반주 끊김 의심·타격 소리 쉼·판단 어려움을 구분하며,
-의도된 편곡인지 자동 승인하지 않는다. 모델 없는 타격 성분 추정만으로 반주 끊김을 판단하지 않는다.
-[자동 품질 흐름과 한계](docs/AUTO-QUALITY.md)를 참고한다.
+CLI의 기본 엔진은 앱과 같은 ACE-Step XL turbo(`127.0.0.1:18001`, `acestep-v15-xl-turbo`)다. 서버가 다른
+DiT를 올렸으면 `--model`로 그 이름을 적는다.
 
-타격 시각 검사는 측정한 타격을 같은 곡의 다른 반복과 비교한다. 모델을 쓰지 않으며, 반복되는 리듬이
-부족한 곡은 판단 어려움으로 남긴다. 방법과 검증 결과는 [반복 대조 타격 시각 검사](docs/TIMBRE-TRACKING.md)에 있다.
+품질 기본값은 `--quality auto --quality-attempts 4`다. 버전마다 첫 생성과 재시도를 합쳐 최대 네 번이며,
+검사가 불확실하다는 이유만으로 다시 만들지 않는다. 생성 뒤 파일·음량·가사 받아쓰기·리듬과, 엔진이 실제로
+적용했다고 보고한 템포·조성·박자를 검사해 확인할 구간을 표시한다. 리듬 경고는 청취 확인용이며 재생성이나
+시간 보정의 근거로 쓰지 않는다. 자동 추천은 사람의 최종본 선택과 분리하고 새 음원은 `unreviewed`다.
+검사 항목과 한계는 [자동 품질 검사](docs/AUTO-QUALITY.md)와 [타격 시각 검사](docs/TIMBRE-TRACKING.md)에 있다.
 
 ```bash
 uv run music-engine generate projects/my-song --seeds 101 --quality-attempts 2
@@ -145,9 +128,9 @@ uv run music-engine generate projects/my-song --seeds 102 --quality audio
 uv run music-engine generate projects/my-song --source-candidate-id <candidate-id> \
   --seeds 103 --style "fuller chorus, clear lead vocal"
 uv run music-engine revise projects/my-song --title "새 제목" --duration 120
-uv run music-engine repaint projects/my-song --engine ace-step --candidate-id <candidate-id> \
+uv run music-engine repaint projects/my-song --candidate-id <candidate-id> \
   --start 41 --end 58 --seed 104 --strength strong --model acestep-v15-xl-turbo
-uv run music-engine resume projects/my-song --engine ace-step --job-id <batch-job-id>
+uv run music-engine resume projects/my-song --job-id <batch-job-id>
 uv run music-engine recover projects/my-song
 uv run music-engine review projects/my-song <candidate-id> --status listened --note "후렴 좋음"
 uv run music-engine select projects/my-song <candidate-id>
@@ -161,8 +144,7 @@ uv run music-engine analyze-rhythm path.wav --bpm 84 --time-signature 4/4
 모두 일치하는 완료 결과를 재사용한다. export는 프로젝트 밖의 새 파일 이름만 허용한다.
 
 `repaint`는 고른 구간만 새로 만든 새 버전을 남기며 원본은 바꾸지 않는다. 구간 밖도 조금 달라질 수
-있다. ACE 실측 실행기는 `scripts/smoke_real_engine.py`와 `scripts/compare_production.py`다.
-`analyze-rhythm`은 기존 WAV를 읽어 JSON으로 분석하며 음원이나 프로젝트를 바꾸지 않는다.
+있다. `analyze-rhythm`은 기존 WAV를 읽어 JSON으로 분석하며 음원이나 프로젝트를 바꾸지 않는다.
 `analyze-rhythm --diagnostics`는 모델 없이 타격 성분을 추가 분석한다. 분리 결과가 없으면
 반주 연속성은 판단 어려움으로 남는다. `inspect-rhythm`은 기존 후보에 새 분석 artifact·revision을
 추가하며 원래 음원·기존 QC·사람 선택과 평가는 보존한다.
@@ -172,19 +154,9 @@ uv run music-engine analyze-rhythm path.wav --bpm 84 --diagnostics
 uv run music-engine inspect-rhythm projects/my-song --candidate-id <candidate-id>
 ```
 
-현재 v4 구간 진단은 전곡 프롬프트 단어만으로 경고를 낮추지 않는다. 같은 음원 해시에 연결한
-`--intent-json`으로 구간별 템포 변화·반주 쉼 계획을 대조할 수 있다. 템포 계획 안의 불규칙한
-흔들림과 계획 밖의 경고는 남기며, 표현의 의도나 모든 모델 오류를 자동으로 확정하지 않는다.
-입력 형식과 판별 범위는 [자동 품질 검사](docs/AUTO-QUALITY.md#구간별-의도-대조와-검사-범위)를 참고한다.
-곡 중간의 급격한 디지털 무음도 전체 PCM에서 측정하고, 원본 믹스와 분리 자료의 불일치·
-반복 형태를 추가 근거로 남긴다. v1·v2·v3 과거 계획의 검사 범위는 유지한다. 실제 기존 음악의
-통제된 변형으로 평가한 결과, 코드를 고정한 뒤 처음 평가한 4곡에서 끊김 16개 중 7개,
-시간 교란 48개 중 18–22개를 찾았고 부드러운 템포 변화·원곡에는 경고가 없었다. 곡마다 차이가 크며,
-모든 모델 오류나 의도를 정확히 판별하는 수준으로 보증하지 않는다.
-
-기존 품질 환경의 UMXHQ는 보컬과 잔여 반주 에너지의 시각별 근거도 남긴다. 드럼 추정 모델은
-약 35.6 MB이며 선택적으로 준비한다. 이미 검증된 가중치가 있으면 같은 분석 과정에서 함께 사용한다.
-다음 `separate` 명령은 음원을 변경하거나 받아쓰기 모델을 올리지 않고 분리 분석만 수행한다.
+구간별 템포 변화나 반주 쉼이 의도된 것이면 그 음원 해시에 연결한 `--intent-json`으로 알려 대조할 수 있다.
+형식은 [자동 품질 검사](docs/AUTO-QUALITY.md#구간별-의도-대조)에 있다. 보컬·반주·드럼 분리 근거를 더하려면
+품질 환경의 UMXHQ를 쓴다(드럼 가중치 약 35.6 MB는 선택 준비). `separate`는 음원을 바꾸지 않는다.
 
 ```bash
 .runtime/quality/.venv/bin/python scripts/quality_worker.py setup --drums
@@ -227,33 +199,14 @@ npm run build:app
 uv run python scripts/smoke_rhythm_quality.py --output-dir .runtime/rhythm-smoke-new
 ```
 
-실제 추론은 모델 없는 계약·회귀 검사와 따로 실행한다. 서버를 켜고 새 출력 폴더를 지정한다.
-아래 검사는 영어 30초·한국어 30초·새 2절이 있는 영어 60초를 각각 한 번 생성하고, 자동 검사·
-export·검증된 명시적 재개·원문 보존·사람 미청취 상태를 확인한다.
-
-```bash
-./scripts/start_music3_api.sh
-# 다른 터미널에서
-uv run python scripts/smoke_music3.py --output-dir .runtime/music3-smoke-new
-```
-
-좋다고 평가한 기존 후보를 기준으로 비교하려면 아래 실행기를 사용한다. 기준 파일의 존재·크기·
-SHA-256을 확인해 새 프로젝트에 **재생용으로 명시적으로 복사**하고, 같은 가사·요청 길이·BPM·
-조성·seed로 두 Music 3 후보를 각각 한 번 새로 생성한다. 원본 파형은 모델에 보내지 않는다.
-곡 화면의 ‘비교할 버전’에서 같은 위치를 번갈아 듣고 평가할 수 있다. 보고서의 음악 기준 판정은
-직접 듣기 전까지 `pending_human_listening`이며 자동 가사 검사 결과로 승인하지 않는다.
-
-```bash
-uv run python scripts/compare_music3_quality.py \
-  --baseline-project projects/reference-song --baseline-candidate candidate_id \
-  --project-dir projects/music3-comparison-new --output-dir .runtime/music3-comparison-new
-```
+실제 추론은 모델 없는 계약·회귀 검사와 따로 실행한다. ACE의 다른 실측 실행기는
+`scripts/smoke_real_engine.py`와 `scripts/compare_production.py`, Music 3를 다시 준비했을 때의 실행기는
+`scripts/smoke_music3.py`와 `scripts/compare_music3_quality.py`다.
 
 ## 문서
 
+- [현재 상태와 다음 작업](docs/HANDOFF.md)
 - [아키텍처와 데이터 계약](docs/ARCHITECTURE.md)
-- [품질 검사와 청취 계약](docs/QUALITY.md)
-- [자동 품질 관리·재시도·실제 검증](docs/AUTO-QUALITY.md)
+- [자동 품질 검사](docs/AUTO-QUALITY.md), [타격 시각 검사](docs/TIMBRE-TRACKING.md)
+- [사람 청취 계약](docs/QUALITY.md)
 - [모델·라이선스 결정](docs/DECISIONS.md)
-- [현재 상태와 전환 기록](docs/HANDOFF.md)
-- [초기 설계 계획](PLAN.md), [과거 ACE 실측](docs/P0-VALIDATION.md)

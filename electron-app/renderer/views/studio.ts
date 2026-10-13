@@ -1,4 +1,4 @@
-import type { Plan, ReviewStatus, Song, Strength, Version } from "../../shared.ts";
+import type { Finding, Plan, ReviewStatus, Song, Strength, Version } from "../../shared.ts";
 import { activeVersion, api, applySongForContext, engineReady, go, refreshSong, songBusy, startEngine } from "../actions.ts";
 import { byId, h, icon, mount, type Child } from "../dom.ts";
 import {
@@ -21,7 +21,7 @@ import {
 import { Player } from "../player.ts";
 import { get, isPlanTicket, isSongTicket, planTicket, set, songTicket, type InspectorTab, type State } from "../store.ts";
 import { confirmDialog, errorText, menu, toast, withBusy } from "../ui.ts";
-import { audioQualityText, isAutomaticAttempt, lyricQualityText, processingText, qualityLabel, qualityRetryReason, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText } from "../quality.ts";
+import { audioQualityText, checkCount, isAutomaticAttempt, listeningPoints, lyricQualityText, processingText, qualityLabel, remainingProblems, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText } from "../quality.ts";
 import { songPlanView } from "../song-plan-view.ts";
 import { comparisonChoices, comparisonVersion } from "../comparison.ts";
 import { INSTRUMENTS, applyInstrumentChanges, hasInstrument } from "../instruments.ts";
@@ -481,7 +481,7 @@ function renderPlayer(state: State, song: Song): void {
   const parent = node(versionSourceParent(song, version)?.id);
   const compare = node(comparisonVersion(song, version, state.comparisonVersionId)?.id);
   const listeningComparison = Boolean(state.listenToParent && compare);
-  const quality = qualityLabel(version.quality);
+  const quality = qualityLabel(version);
   mount(
     els.nowPlaying,
     h("b", { class: "np-title" }, listeningComparison ? compare!.name : current.name),
@@ -656,7 +656,7 @@ function versionRow(song: Song, item: VersionNode, state: State, busy: boolean):
   const version = item.version;
   const active = version.id === state.activeVersionId;
   const automatic = isAutomaticAttempt(version);
-  const quality = qualityLabel(version.quality);
+  const quality = qualityLabel(version);
   const review = version.review.status;
   const thumb = (status: ReviewStatus, iconName: string, label: string) =>
     h(
@@ -789,7 +789,7 @@ function renderTabs(state: State): void {
   if (!els) return;
   const version = activeVersion();
   els.tabs.hidden = !version;
-  const warnings = version?.findings.filter((item) => item.severity !== "info").length ?? 0;
+  const warnings = version ? checkCount(version) : 0;
   const notes = version?.review.notes.length ?? 0;
   const tabs: Array<[InspectorTab, string, Child]> = [
     ["prompt", "만든 프롬프트", null],
@@ -1019,36 +1019,70 @@ function lyricsPanel(state: State, song: Song, version: Version): Child {
   return panel;
 }
 
+function findingRow(version: Version, finding: Finding): HTMLElement {
+  const copy = findingCopy(finding);
+  return h(
+    "li",
+    { class: `finding tone-${finding.severity}` },
+    h("div", { class: "finding-head" }, h("b", null, copy.label), copy.value && h("span", { class: "mono" }, copy.value)),
+    h("p", null, copy.message),
+    finding.startSeconds != null && finding.endSeconds != null
+      ? h("button", {
+          type: "button", class: "button small secondary", disabled: !version.fileOk,
+          onClick: () => {
+            const start = Math.max(0, finding.startSeconds! - 0.25);
+            const end = Math.min(version.durationSeconds ?? Infinity, finding.endSeconds! + 0.25);
+            set({ selection: { startSeconds: start, endSeconds: end }, scope: "range", listenToParent: false, loop: true });
+            player?.seek(start);
+            if (player && !player.playing) player.toggle();
+          },
+        }, `${clock(finding.startSeconds, true, 2)}–${clock(finding.endSeconds, true, 2)} 듣기`)
+      : null,
+  );
+}
+
+// What to check comes first, in words and with a place to play. Every other measurement
+// stays available but folded, so a version with nothing to check shows a single line.
 function qualityReport(version: Version): Child {
   const quality = version.quality;
   if (!quality) return null;
-  const badge = qualityLabel(quality)!;
+  const badge = qualityLabel(version)!;
   if (quality.complete === false) return h("div", { class: "quality-report" }, h("span", { class: "pill" }, badge.label), h("p", null, quality.summary));
   const coverage = quality.lyrics.orderedCoverage;
   const knownLyrics = quality.lyrics.status === "pass" || quality.lyrics.status === "warning";
   const processing = processingText(quality.processing);
   const rhythm = rhythmQualityText(quality);
   const rhythmDiagnostics = rhythmDiagnosticChecks(quality);
-  const retries = [...new Set(quality.retryReasons.map(qualityRetryReason))];
+  const problems = remainingProblems(quality);
+  const points = listeningPoints(version.findings);
+  const observations = version.findings.filter((finding) => !points.includes(finding));
   const preparation = quality.preparation;
   const extended = preparation && typeof preparation.requestedDurationSeconds === "number" && typeof preparation.effectiveDurationSeconds === "number"
     && preparation.effectiveDurationSeconds > preparation.requestedDurationSeconds;
   return h("div", { class: "quality-report" },
     h("div", { class: "row" }, h("span", { class: `pill tone-${badge.tone}` }, badge.label), version.recommended && h("span", { class: "pill tone-accent" }, "자동 추천"),
       h("span", { class: "footnote" }, `${quality.attempt}번째 시도 · 최대 ${quality.maxAttempts}회`)),
-    h("p", null, quality.summary),
     extended && h("p", { class: "hint" }, `가사를 다 담도록 길이를 ${lengthLabel(preparation.requestedDurationSeconds)}에서 ${lengthLabel(preparation.effectiveDurationSeconds)}로 늘렸어요.`),
-    h("div", { class: "check-grid" },
-      h("div", { class: "check" }, h("span", { class: "sublabel" }, "소리"), h("p", null, audioQualityText(quality))),
-      h("div", { class: "check" }, h("span", { class: "sublabel" }, "가사"), h("p", null, lyricQualityText(quality)),
-        knownLyrics && typeof coverage === "number" && Number.isFinite(coverage) && h("p", { class: "footnote" }, `작성한 순서대로 인식된 가사 ${(Math.max(0, Math.min(1, coverage)) * 100).toFixed(0)}%`)),
-      rhythm && h("div", { class: "check" }, h("span", { class: "sublabel" }, "리듬 관찰"), h("p", null, rhythm),
-        h("p", { class: "footnote" }, rhythmMeterText(quality))),
-      rhythmDiagnostics.map((check) => h("div", { class: "check" }, h("span", { class: "sublabel" }, check.label), h("p", null, check.text),
-        check.evidence && h("p", { class: "footnote" }, check.evidence), check.method && h("p", { class: "footnote" }, check.method))),
-      processing && h("div", { class: "check" }, h("span", { class: "sublabel" }, "재생본 정리"), h("p", null, processing)),
+    problems.length || points.length
+      ? h("ul", { class: "findings" },
+          problems.map((problem) => h("li", { class: "finding tone-warning" }, h("div", { class: "finding-head" }, h("b", null, problem)))),
+          points.map((finding) => findingRow(version, finding)))
+      : h("p", null, quality.status === "unknown" ? quality.summary : "자동 검사에서 따로 확인할 것을 찾지 못했어요. 곡이 좋은지는 직접 들어 판단해 주세요."),
+    points.some((finding) => finding.startSeconds != null)
+      && h("p", { class: "footnote" }, "듣기를 누르면 그 구간이 선택돼요. 어색하면 오른쪽 고치기에서 그 구간만 다시 만들 수 있어요."),
+    h("details", { class: "disclosure" }, h("summary", null, "측정값 자세히"),
+      h("div", { class: "check-grid" },
+        h("div", { class: "check" }, h("span", { class: "sublabel" }, "소리"), h("p", null, audioQualityText(quality))),
+        h("div", { class: "check" }, h("span", { class: "sublabel" }, "가사"), h("p", null, lyricQualityText(quality)),
+          knownLyrics && typeof coverage === "number" && Number.isFinite(coverage) && h("p", { class: "footnote" }, `작성한 순서대로 인식된 가사 ${(Math.max(0, Math.min(1, coverage)) * 100).toFixed(0)}%`)),
+        rhythm && h("div", { class: "check" }, h("span", { class: "sublabel" }, "리듬 관찰"), h("p", null, rhythm),
+          h("p", { class: "footnote" }, rhythmMeterText(quality))),
+        rhythmDiagnostics.map((check) => h("div", { class: "check" }, h("span", { class: "sublabel" }, check.label), h("p", null, check.text),
+          check.evidence && h("p", { class: "footnote" }, check.evidence), check.method && h("p", { class: "footnote" }, check.method))),
+        processing && h("div", { class: "check" }, h("span", { class: "sublabel" }, "재생본 정리"), h("p", null, processing)),
+      ),
+      observations.length > 0 && h("ul", { class: "findings" }, observations.map((finding) => findingRow(version, finding))),
     ),
-    retries.length ? h("details", { class: "disclosure" }, h("summary", null, "자동 재시도 이유"), h("ul", { class: "plain-list" }, retries.map((reason) => h("li", null, reason)))) : null,
   );
 }
 
@@ -1063,31 +1097,8 @@ function checksPanel(song: Song, version: Version): Child {
       h("div", null, h("b", null, version.fileOk ? "음원 파일 확인됨" : "파일을 쓸 수 없어요"), h("p", null, version.fileOk ? "크기와 SHA-256이 만들 때 기록과 같아요." : version.fileMessage)),
       h("button", { type: "button", class: "button ghost small", disabled: !version.fileOk, onClick: () => reveal({ kind: "version", versionId: version.id }) }, icon("folder", 14), "Finder"),
     ),
-    version.findings.length > 0 && h(
-      "ul",
-      { class: "findings" },
-      version.findings.map((finding) => {
-        const copy = findingCopy(finding);
-        return h(
-          "li",
-          { class: `finding tone-${finding.severity}` },
-          h("div", { class: "finding-head" }, h("b", null, copy.label), copy.value && h("span", { class: "mono" }, copy.value)),
-          h("p", null, copy.message),
-          finding.startSeconds != null && finding.endSeconds != null
-            ? h("button", {
-                type: "button", class: "button small secondary", disabled: !version.fileOk,
-                onClick: () => {
-                  const start = Math.max(0, finding.startSeconds! - 0.25);
-                  const end = Math.min(version.durationSeconds ?? Infinity, finding.endSeconds! + 0.25);
-                  set({ selection: { startSeconds: start, endSeconds: end }, scope: "range", listenToParent: false, loop: true });
-                  player?.seek(start);
-                  if (player && !player.playing) player.toggle();
-                },
-              }, `${clock(finding.startSeconds, true, 2)}–${clock(finding.endSeconds, true, 2)} 듣기`)
-            : null,
-        );
-      }),
-    ),
+    // A version made before automatic checks has only the file checks to show.
+    !version.quality && version.findings.length > 0 && h("ul", { class: "findings" }, version.findings.map((finding) => findingRow(version, finding))),
     exports.length
       ? h("div", { class: "exports" },
           h("span", { class: "sublabel" }, "내보낸 파일"),

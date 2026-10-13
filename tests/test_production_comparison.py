@@ -25,7 +25,7 @@ def reset_client():
     RecordingAceClient.payloads = []
     RecordingAceClient.submitted = []
     RecordingAceClient.fail_seeds = set()
-    RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
+    RecordingAceClient.loaded = ("acestep-v15-xl-turbo", "acestep-5Hz-lm-4B")
     yield
     RecordingAceClient.fail_seeds = set()
 
@@ -189,9 +189,9 @@ def test_cover_unloaded_lm_is_lazily_initialized_and_verified_after_generation(t
 
 
 @pytest.mark.parametrize("health", [
-    {"loaded_model": "acestep-v15-turbo", "loaded_lm_model": None},
-    {"loaded_model": "acestep-v15-turbo", "loaded_lm_model": None, "llm_initialized": True},
-    {"loaded_model": "acestep-v15-turbo", "loaded_lm_model": "acestep-5Hz-lm-1.7B", "llm_initialized": False},
+    {"loaded_model": "acestep-v15-xl-turbo", "loaded_lm_model": None},
+    {"loaded_model": "acestep-v15-xl-turbo", "loaded_lm_model": None, "llm_initialized": True},
+    {"loaded_model": "acestep-v15-xl-turbo", "loaded_lm_model": "acestep-5Hz-lm-1.7B", "llm_initialized": False},
     {"loaded_model": "another-dit", "loaded_lm_model": None, "llm_initialized": False},
 ])
 def test_initial_lm_exception_requires_explicit_uninitialized_state_and_correct_dit(tmp_path: Path, health):

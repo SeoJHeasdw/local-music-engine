@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
-from .music3 import ENGINE
+from .engines import DEFAULT_ENGINE, ENGINES, MUSIC3_ENGINE
 
 VERSION = 1
 PRESETS: tuple[dict[str, Any], ...] = (
@@ -158,12 +158,12 @@ RULES: tuple[dict[str, Any], ...] = (
 )
 
 
-def catalog(*, engine: str = ENGINE) -> dict[str, Any]:
-    if engine not in {ENGINE, "ace-step"}:
+def catalog(*, engine: str = DEFAULT_ENGINE) -> dict[str, Any]:
+    if engine not in ENGINES:
         raise ValueError("unknown music engine")
     result = {"version": VERSION, "presets": deepcopy(list(PRESETS)), "rules": deepcopy(list(RULES)),
-              "captionBudgetCharacters": 16000 if engine == ENGINE else 650}
-    if engine == ENGINE:
+              "captionBudgetCharacters": 16000 if engine == MUSIC3_ENGINE else 650}
+    if engine == MUSIC3_ENGINE:
         # This is the managed API's final prompt bound, not a tokenizer estimate.
         # Captions, structural instructions and headings all share that bound.
         result.update(captionBudgetScope="api_prompt_character_limit", captionTokenBudgetMeasured=False)

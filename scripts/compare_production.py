@@ -60,7 +60,7 @@ class ComparisonConfig:
     key_scale: str = "A minor"
     time_signature: str = "4"
     style_prompt: str = "intimate male melodic rap, mellow late-night mood"
-    model: str = "acestep-v15-turbo"
+    model: str = "acestep-v15-xl-turbo"
     lm_model: str = "acestep-5Hz-lm-4B"
     lm_temperature: float = 0.6
     include_baseline: bool = False
@@ -323,7 +323,7 @@ def main() -> int:
     parser.add_argument("--duration", type=float, default=30.0)
     parser.add_argument("--bpm", type=int, default=84)
     parser.add_argument("--key", default="A minor")
-    parser.add_argument("--model", default="acestep-v15-turbo")
+    parser.add_argument("--model", default="acestep-v15-xl-turbo")
     parser.add_argument("--lm-model", default="acestep-5Hz-lm-4B")
     parser.add_argument("--lm-temperature", type=float, default=0.6)
     parser.add_argument("--timeout", type=float, default=1800.0)

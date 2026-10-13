@@ -22,7 +22,7 @@ def reset_recording_client():
     RecordingAceClient.payloads = []
     RecordingAceClient.submitted = []
     RecordingAceClient.fail_seeds = set()
-    RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
+    RecordingAceClient.loaded = ("acestep-v15-xl-turbo", "acestep-5Hz-lm-4B")
     yield
     RecordingAceClient.fail_seeds = set()
 

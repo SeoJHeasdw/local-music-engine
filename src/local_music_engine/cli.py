@@ -22,8 +22,6 @@ from .song_planning import prepare_song_plan, validate_song_plan_input
 from .storage import ProjectStore
 from .views import candidate_rows, library, project_status
 from .workflow import (
-    DEFAULT_BASE_URL,
-    DEFAULT_DIT_MODEL,
     DEFAULT_LM_MODEL,
     DEFAULT_LM_TEMPERATURE,
     REPAINT_STRENGTHS,
@@ -37,7 +35,8 @@ from .workflow import (
     select_candidate,
     undo_selection,
 )
-from .music3 import CAPABILITIES, ENGINE, MAX_DURATION_SECONDS, MODEL
+from .engines import (ACE_BASE_URL, ACE_CAPABILITIES, ACE_DIT_MODEL, ACE_ENGINE, DEFAULT_ENGINE, ENGINES, MAX_DURATION_SECONDS,
+                      MUSIC3_ENGINE)
 
 
 def _print(value: Any) -> None:
@@ -121,18 +120,18 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--time-signature")
     init.add_argument("--production-rules-json", type=_parse_production_rules)
     rules = subparsers.add_parser("production-rules", help="list selectable production presets and guidance")
-    rules.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
+    rules.add_argument("--engine", choices=ENGINES, default=DEFAULT_ENGINE)
     subparsers.add_parser("capabilities", help="show the default engine's supported operations")
 
     generate = subparsers.add_parser("generate", help="start a new candidate batch")
     generate.add_argument("path", type=Path)
-    generate.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
+    generate.add_argument("--engine", choices=ENGINES, default=DEFAULT_ENGINE)
     generate.add_argument("--seeds", type=_parse_seeds, required=True)
-    generate.add_argument("--base-url", default=DEFAULT_BASE_URL)
-    generate.add_argument("--model", default=DEFAULT_DIT_MODEL)
+    generate.add_argument("--base-url", help="engine server address; defaults to the chosen engine's loopback port")
+    generate.add_argument("--model", help=f"defaults to {ACE_DIT_MODEL} for ACE")
     generate.add_argument("--lm-model", default=DEFAULT_LM_MODEL)
     generate.add_argument("--lm-temperature", type=float, default=DEFAULT_LM_TEMPERATURE,
-                          help="legacy ACE planner sampling temperature; unused by Music 3")
+                          help="ACE planner sampling temperature; unused by Music 3")
     generate.add_argument("--quality", choices=["auto", "audio", "off"], default="auto",
                           help="automatic checks and bounded regeneration; audio skips local lyric STT")
     generate.add_argument("--quality-attempts", type=int, choices=range(1, 5), default=4,
@@ -147,7 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     resume = subparsers.add_parser("resume", help="explicitly resume the latest candidate batch")
     resume.add_argument("path", type=Path)
-    resume.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
+    resume.add_argument("--engine", choices=ENGINES, default=DEFAULT_ENGINE)
     resume.add_argument("--job-id", help="resume this batch instead of the latest one")
     resume.add_argument("--base-url")
     resume.add_argument("--poll-seconds", type=float, default=1.0)
@@ -198,7 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     repaint = subparsers.add_parser("repaint", help="create a non-destructive repaint candidate")
     repaint.add_argument("path", type=Path)
-    repaint.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
+    repaint.add_argument("--engine", choices=ENGINES, default=DEFAULT_ENGINE)
     repaint.add_argument("--start", type=float, required=True)
     repaint.add_argument("--end", type=float, required=True)
     repaint.add_argument("--seed", type=int, required=True)
@@ -212,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
     repaint.add_argument("--feedback-json", type=_parse_feedback)
     repaint.add_argument("--candidate-id")
     repaint.add_argument("--model", help="DiT for this repaint; defaults to the parent version's model")
-    repaint.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    repaint.add_argument("--base-url", default=ACE_BASE_URL)
     repaint.add_argument("--poll-seconds", type=float, default=1.0)
     repaint.add_argument("--timeout-seconds", type=float, default=1800.0)
     repaint.add_argument("--quality", choices=["auto", "audio", "off"], default="auto",
@@ -220,14 +219,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     cover = subparsers.add_parser("cover", help="create new versions based on a verified candidate audio")
     cover.add_argument("path", type=Path)
-    cover.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
+    cover.add_argument("--engine", choices=ENGINES, default=DEFAULT_ENGINE)
     cover.add_argument("--candidate-id", required=True)
     cover.add_argument("--seeds", type=_parse_seeds, required=True)
     cover.add_argument("--strength", type=float, default=0.7)
     cover.add_argument("--style")
     cover.add_argument("--lyrics")
     cover.add_argument("--model")
-    cover.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    cover.add_argument("--base-url", default=ACE_BASE_URL)
     cover.add_argument("--poll-seconds", type=float, default=1.0)
     cover.add_argument("--timeout-seconds", type=float, default=1800.0)
     cover.add_argument("--quality", choices=["auto", "audio", "off"], default="auto")
@@ -235,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = subparsers.add_parser("plan", help="turn listening feedback into a proposed change")
     plan.add_argument("path", type=Path)
-    plan.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
+    plan.add_argument("--engine", choices=ENGINES, default=DEFAULT_ENGINE)
     plan.add_argument("candidate_id")
     plan.add_argument("--feedback", required=True)
     plan.add_argument("--start", type=float)
@@ -246,10 +245,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     draft = subparsers.add_parser("draft", help="draft caption, lyrics and title from a description")
     draft.add_argument("--query", required=True)
-    draft.add_argument("--engine", choices=[ENGINE, "ace-step"], default=ENGINE)
+    draft.add_argument("--engine", choices=ENGINES,
+                       help="ask this engine's planner (ACE only) when no assistant writes the draft; "
+                            "without it local rule templates write it and no music server is contacted")
     draft.add_argument("--instrumental", action="store_true")
     draft.add_argument("--duration", type=float, default=120.0)
-    draft.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    draft.add_argument("--base-url", default=ACE_BASE_URL)
     draft.add_argument("--production-rules-json", type=_parse_production_rules)
     draft.add_argument("--vocal-language", choices=["ko", "en"], default="ko")
     _add_assistant_args(draft)
@@ -289,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _plan(args: argparse.Namespace) -> dict[str, Any]:
-    if args.engine == ENGINE and (args.start is not None or args.end is not None):
+    if args.engine == MUSIC3_ENGINE and (args.start is not None or args.end is not None):
         raise ValueError("Music 3 does not support range repaint; request a whole-song regeneration")
     store = ProjectStore(args.path)
     project = store.load()
@@ -320,7 +321,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
         engine=args.engine,
     )
     plan = assistant.plan_revision(request, _llm_config(args))
-    if args.engine == ENGINE:
+    if args.engine == MUSIC3_ENGINE:
         plan.update(action="regenerate", range=None)
         plan["summary"] = f"의견을 반영해 새 곡 {args.versions}개를 만들어요."
         plan.setdefault("notes", []).append("Music 3에서는 가사와 스타일을 바탕으로 곡 전체를 새로 만들어요.")
@@ -362,7 +363,8 @@ def run(args: argparse.Namespace) -> Any:
     if args.command == "production-rules":
         return production_catalog(engine=args.engine)
     if args.command == "capabilities":
-        return {"engine": ENGINE, "model": MODEL, "capabilities": dict(CAPABILITIES), "maxDurationSeconds": MAX_DURATION_SECONDS}
+        return {"engine": ACE_ENGINE, "model": ACE_DIT_MODEL, "capabilities": dict(ACE_CAPABILITIES),
+                "maxDurationSeconds": MAX_DURATION_SECONDS}
     if args.command == "init":
         lyrics = _text_arg(args.lyrics, args.lyrics_file)
         if not math.isfinite(args.duration) or args.duration < 10 or args.duration > MAX_DURATION_SECONDS:

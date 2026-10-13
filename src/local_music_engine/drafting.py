@@ -17,7 +17,7 @@ from .ace_adapter import AceStepClient
 from .assistant import AssistantError, LlmConfig, _chat
 from .production_rules import draft_guidance, normalize_selection
 from .song_planning import prepare_song_plan
-from .music3 import BASE_URL, ENGINE, MAX_DURATION_SECONDS
+from .engines import ACE_ENGINE, ENGINES, MAX_DURATION_SECONDS
 from .lyrics import is_instrumental_lyrics
 
 INSTRUMENTAL = "[Instrumental]"
@@ -176,15 +176,16 @@ def engine_draft(
     duration_seconds: float = 120.0,
     production_rules: dict[str, Any] | None = None,
     vocal_language: str = "ko",
-    engine: str = ENGINE,
+    engine: str | None = None,
 ) -> dict[str, Any]:
-    if engine == ENGINE:
+    """Draft without a writing assistant. Only ACE has a planner to ask; naming no
+    engine, or one without a planner, keeps the draft local and the music server idle."""
+
+    if engine is not None and engine not in ENGINES:
+        raise ValueError("unknown music engine")
+    if engine != ACE_ENGINE:
         return rules_draft(description, instrumental=instrumental, duration_seconds=duration_seconds,
                            production_rules=production_rules, vocal_language=vocal_language)
-    if engine != "ace-step":
-        raise ValueError("unknown music engine")
-    if base_url == BASE_URL:
-        base_url = "http://127.0.0.1:18001"
     vocal_language = _vocal_language(vocal_language)
     guidance = draft_guidance(production_rules, duration_seconds=duration_seconds, instrumental=instrumental)
     tags = keyword_tags(description)
@@ -234,7 +235,7 @@ def rules_draft(description: str, *, instrumental: bool, duration_seconds: float
     if not description.strip():
         raise ValueError("describe the song before asking for a draft")
     if not math.isfinite(duration_seconds) or not 10 <= duration_seconds <= MAX_DURATION_SECONDS:
-        raise ValueError("Music 3 duration must be between 10 and 300 seconds")
+        raise ValueError(f"duration must be between 10 and {MAX_DURATION_SECONDS} seconds")
     vocal_language = _vocal_language(vocal_language)
     guidance = draft_guidance(production_rules, duration_seconds=duration_seconds, instrumental=instrumental)
     tags = keyword_tags(description)
@@ -373,11 +374,11 @@ def draft_song(
     client_factory: Callable[..., AceStepClient] = AceStepClient,
     production_rules: dict[str, Any] | None = None,
     vocal_language: str = "ko",
-    engine: str = ENGINE,
+    engine: str | None = None,
 ) -> dict[str, Any]:
     if not description.strip():
         raise ValueError("describe the song before asking for a draft")
-    maximum = MAX_DURATION_SECONDS if engine == ENGINE else 600
+    maximum = 600 if engine == ACE_ENGINE else MAX_DURATION_SECONDS
     if not math.isfinite(duration_seconds) or not 10 <= duration_seconds <= maximum:
         raise ValueError(f"duration must be between 10 and {maximum} seconds")
     vocal_language = _vocal_language(vocal_language)
@@ -397,7 +398,7 @@ def draft_song(
                 raise AssistantError(
                     f"LLM draft failed ({error}); engine draft also failed ({type(engine_error).__name__}: {engine_error})"
                 ) from engine_error
-            result["notes"].insert(0, f"LLM 도우미를 쓰지 못해 {'내장 규칙' if engine == ENGINE else '음악 엔진'}으로 초안을 만들었어요 ({error}).")
+            result["notes"].insert(0, f"LLM 도우미를 쓰지 못해 {'음악 엔진' if engine == ACE_ENGINE else '내장 규칙'}으로 초안을 만들었어요 ({error}).")
             return result
     return engine_draft(description, instrumental=instrumental, base_url=base_url, client_factory=client_factory,
                         duration_seconds=duration_seconds, production_rules=production_rules, vocal_language=vocal_language, engine=engine)

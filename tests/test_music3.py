@@ -1,4 +1,4 @@
-"""Music 3 defaults, immutable provenance and unsupported operation boundaries."""
+"""Music 3 as a named engine: immutable provenance, unsupported operation boundaries, and the ACE default."""
 from __future__ import annotations
 
 import json
@@ -20,7 +20,7 @@ from local_music_engine.workflow import (
     _api_payload, _frozen_generation_payload, cover_candidates, generate_candidates,
     repaint_candidate, resume_latest_batch,
 )
-from test_workflow import FakeAceClient, make_project
+from test_workflow import FakeAceClient, RecordingAceClient, make_project
 
 
 class FakeMusic3Client(FakeAceClient):
@@ -66,9 +66,9 @@ def reset_mock():
     FakeMusic3Client.models_initialized = True
 
 
-def test_new_generation_defaults_to_music3_and_keeps_human_review_separate(tmp_path):
+def test_music3_generation_uses_its_own_model_and_port_and_keeps_human_review_separate(tmp_path):
     make_project(tmp_path)
-    result = generate_candidates(tmp_path, seeds=[9], client_factory=FakeMusic3Client)
+    result = generate_candidates(tmp_path, seeds=[9], client_factory=FakeMusic3Client, engine=ENGINE)
     saved = ProjectStore(tmp_path).load()
     request = saved["requests"][0]
     assert result["status"] == "succeeded"
@@ -90,7 +90,7 @@ def test_music3_refuses_wrong_or_unready_server_before_submission(tmp_path, mism
     if mismatch == "engine": FakeMusic3Client.engine = "ace-step"
     if mismatch == "readiness": FakeMusic3Client.models_initialized = False
     with pytest.raises(Exception, match="Music 3 server"):
-        generate_candidates(tmp_path, seeds=[1], client_factory=FakeMusic3Client)
+        generate_candidates(tmp_path, seeds=[1], client_factory=FakeMusic3Client, engine=ENGINE)
     saved = ProjectStore(tmp_path).load()
     assert saved["requests"] == saved["candidates"] == FakeMusic3Client.payloads == []
     assert saved["jobs"][0]["status"] == "failed"
@@ -182,7 +182,7 @@ def test_quality_preparation_keeps_music3_caption_and_duration_limit(tmp_path):
 def test_eos_short_result_is_recorded_without_padding_or_false_duration(tmp_path):
     store = ProjectStore.initialize(tmp_path, title="EOS", lyrics="[Verse]\nStay with me",
                                    style_prompt="hip hop", target_duration_seconds=30)
-    generate_candidates(tmp_path, seeds=[1], client_factory=FakeMusic3Client)
+    generate_candidates(tmp_path, seeds=[1], client_factory=FakeMusic3Client, engine=ENGINE)
     saved = store.load(); candidate = saved["candidates"][0]
     assert candidate["requestedDurationSeconds"] == 30
     assert candidate["actualDurationSeconds"] == 10
@@ -190,18 +190,18 @@ def test_eos_short_result_is_recorded_without_padding_or_false_duration(tmp_path
     assert saved["artifacts"][0]["audio"]["durationSeconds"] == 10
 
 
-def test_legacy_resume_requires_explicit_engine_and_preserves_frozen_records(tmp_path):
+def test_ace_batch_resumes_by_default_never_on_music3_and_preserves_frozen_records(tmp_path):
     make_project(tmp_path)
     FakeAceClient.fail_seeds = {2}; FakeAceClient.submitted = []
     old = generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeAceClient, engine="ace-step")
     before = ProjectStore(tmp_path).load(); requests = deepcopy(before["requests"])
-    with pytest.raises(ValueError, match="legacy ACE"):
-        resume_latest_batch(tmp_path, client_factory=FakeMusic3Client)
+    with pytest.raises(ValueError, match="belongs to ACE-Step"):
+        resume_latest_batch(tmp_path, client_factory=FakeMusic3Client, engine=ENGINE)
     assert ProjectStore(tmp_path).load() == before
     status = project_status(ProjectStore(tmp_path), before)
-    assert status["jobs"][0]["canResume"] is False and "ACE" in status["jobs"][0]["resumeBlockedReason"]
+    assert status["jobs"][0]["canResume"] is True and status["jobs"][0]["resumeBlockedReason"] is None
     FakeAceClient.fail_seeds = set()
-    resumed = resume_latest_batch(tmp_path, client_factory=FakeAceClient, engine="ace-step")
+    resumed = resume_latest_batch(tmp_path, client_factory=FakeAceClient)
     assert resumed["reusedCandidateIds"] == old["candidateIds"]
     assert ProjectStore(tmp_path).load()["requests"][:len(requests)] == requests
 
@@ -211,7 +211,7 @@ def test_music3_regeneration_reuses_legacy_text_without_source_audio(tmp_path):
     FakeAceClient.fail_seeds = set()
     old = generate_candidates(tmp_path, seeds=[1], client_factory=FakeAceClient, engine="ace-step")
     original = deepcopy(ProjectStore(tmp_path).load()["requests"][0])
-    generate_candidates(tmp_path, seeds=[2], source_candidate_id=old["candidateIds"][0], client_factory=FakeMusic3Client)
+    generate_candidates(tmp_path, seeds=[2], source_candidate_id=old["candidateIds"][0], client_factory=FakeMusic3Client, engine=ENGINE)
     saved = ProjectStore(tmp_path).load()
     assert saved["requests"][0] == original
     assert saved["requests"][1]["parameters"]["lyrics"] == original["parameters"]["lyrics"]
@@ -223,10 +223,16 @@ def test_music3_regeneration_reuses_legacy_text_without_source_audio(tmp_path):
 def test_music3_resume_uses_only_matching_verified_frozen_request(tmp_path):
     make_project(tmp_path)
     FakeMusic3Client.fail_seeds = {2}
-    first = generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeMusic3Client)
+    first = generate_candidates(tmp_path, seeds=[1, 2], client_factory=FakeMusic3Client, engine=ENGINE)
     first_requests = deepcopy(ProjectStore(tmp_path).load()["requests"])
     FakeMusic3Client.fail_seeds = set()
-    result = resume_latest_batch(tmp_path, client_factory=FakeMusic3Client)
+    before = ProjectStore(tmp_path).load()
+    with pytest.raises(ValueError, match="belongs to Music 3"):
+        resume_latest_batch(tmp_path, client_factory=FakeAceClient)
+    assert ProjectStore(tmp_path).load() == before
+    status = project_status(ProjectStore(tmp_path), before)
+    assert status["jobs"][0]["canResume"] is False and "Music 3" in status["jobs"][0]["resumeBlockedReason"]
+    result = resume_latest_batch(tmp_path, client_factory=FakeMusic3Client, engine=ENGINE)
     assert result["reusedCandidateIds"] == first["candidateIds"]
     assert FakeMusic3Client.submitted == [1, 2, 2]
     assert ProjectStore(tmp_path).load()["requests"][:len(first_requests)] == first_requests
@@ -235,9 +241,9 @@ def test_music3_resume_uses_only_matching_verified_frozen_request(tmp_path):
 def test_unsupported_music3_edits_reject_before_manifest_mutation(tmp_path):
     make_project(tmp_path); before = ProjectStore(tmp_path).load()
     with pytest.raises(ValueError, match="does not support cover"):
-        cover_candidates(tmp_path, candidate_id="old-id", seeds=[1])
+        cover_candidates(tmp_path, candidate_id="old-id", seeds=[1], engine=ENGINE)
     with pytest.raises(ValueError, match="does not support repaint"):
-        repaint_candidate(tmp_path, start_seconds=1, end_seconds=2, seed=1)
+        repaint_candidate(tmp_path, start_seconds=1, end_seconds=2, seed=1, engine=ENGINE)
     assert ProjectStore(tmp_path).load() == before
 
 
@@ -251,11 +257,25 @@ def test_draft_rules_work_with_engine_off_and_disclose_template_origin():
         assert draft["vocalLanguage"] == language
 
 
-def test_cli_default_contract_and_capabilities():
+def test_cli_and_workflow_default_to_ace_xl_turbo(tmp_path):
     parser = build_parser()
-    args = parser.parse_args(["generate", "song", "--seeds", "1"])
-    assert (args.engine, args.model, args.base_url) == (ENGINE, MODEL, BASE_URL)
-    assert run(parser.parse_args(["capabilities"])) == {"engine": ENGINE, "model": MODEL, "capabilities": CAPABILITIES, "maxDurationSeconds": 300}
+    for command in (["generate", "song", "--seeds", "1"], ["resume", "song"], ["repaint", "song", "--start", "1", "--end", "2", "--seed", "1"],
+                    ["cover", "song", "--candidate-id", "c", "--seeds", "1"], ["plan", "song", "c", "--feedback", "f"], ["production-rules"]):
+        assert parser.parse_args(command).engine == "ace-step"
+    assert parser.parse_args(["draft", "--query", "q"]).engine is None
+    assert run(parser.parse_args(["capabilities"])) == {
+        "engine": "ace-step", "model": "acestep-v15-xl-turbo", "maxDurationSeconds": 300,
+        "capabilities": {"text2music": True, "cover": True, "repaint": True, "referenceAudio": False}}
+    make_project(tmp_path)
+    RecordingAceClient.payloads = []; RecordingAceClient.loaded = ("acestep-v15-xl-turbo", "acestep-5Hz-lm-4B")
+    generate_candidates(tmp_path, seeds=[1], client_factory=RecordingAceClient)
+    saved = ProjectStore(tmp_path).load()
+    assert saved["requests"][0]["adapter"] == "ace-step-rest" and "engine" not in saved["requests"][0]["parameters"]
+    assert saved["jobs"][0]["parameters"]["baseUrl"] == "http://127.0.0.1:18001"
+    assert saved["jobs"][0]["parameters"]["engine"] == "ace-step"
+    assert RecordingAceClient.payloads[0]["model"] == "acestep-v15-xl-turbo"
+    status = project_status(ProjectStore(tmp_path), saved)
+    assert status["engine"] == "ace-step" and status["capabilities"]["repaint"] is True
 
 
 def test_music3_transport_uses_own_late_published_private_credential(tmp_path, monkeypatch):
@@ -288,7 +308,7 @@ def test_music3_transport_refuses_source_conditioning(field):
 
 def test_music3_feedback_planner_handles_ending_without_proposing_repaint():
     from local_music_engine.assistant import PlanRequest, rule_plan, plan_from_llm_answer
-    request = PlanRequest(feedback="끝이 갑자기 끊겨요", caption="emotional hip hop", lyrics="[Verse]\nStay with me", duration_seconds=30)
+    request = PlanRequest(feedback="끝이 갑자기 끊겨요", caption="emotional hip hop", lyrics="[Verse]\nStay with me", duration_seconds=30, engine=ENGINE)
     plan = rule_plan(request)
     assert plan["action"] == "regenerate" and plan["range"] is None
     assert not any("파형" in note for note in plan["notes"])
@@ -298,7 +318,7 @@ def test_music3_feedback_planner_handles_ending_without_proposing_repaint():
 
 def test_music3_diction_plan_preserves_english_vocal_language():
     from local_music_engine.assistant import PlanRequest, rule_plan
-    plan = rule_plan(PlanRequest(feedback="발음이 뭉개져요", caption="hip hop", lyrics="[Verse]\nStay with me", duration_seconds=30))
+    plan = rule_plan(PlanRequest(feedback="발음이 뭉개져요", caption="hip hop", lyrics="[Verse]\nStay with me", duration_seconds=30, engine=ENGINE))
     assert "clear English diction" in plan["stylePrompt"] and "Korean diction" not in plan["stylePrompt"]
 
 
@@ -307,7 +327,7 @@ def test_music3_overlong_source_regeneration_and_revision_leave_manifest_untouch
     store = ProjectStore.initialize(tmp_path, title="Old long song", lyrics="[Verse]\n가사", style_prompt="pop", target_duration_seconds=301)
     before = store.load()
     with pytest.raises(ValueError, match="300"):
-        generate_candidates(tmp_path, seeds=[1], client_factory=FakeMusic3Client)
+        generate_candidates(tmp_path, seeds=[1], client_factory=FakeMusic3Client, engine=ENGINE)
     assert store.load() == before
     with pytest.raises(ValueError, match="300"):
         revise_inputs(tmp_path, duration_seconds=301)
@@ -321,7 +341,7 @@ def test_timeout_stops_later_submissions_and_explicit_resume_keeps_frozen_seeds(
             if self.seed == 2:
                 raise TimeoutError("remote task may still be running")
             return super().wait(task_id, **options)
-    result = generate_candidates(tmp_path, seeds=[1, 2, 3], client_factory=TimedOut)
+    result = generate_candidates(tmp_path, seeds=[1, 2, 3], client_factory=TimedOut, engine=ENGINE)
     before = ProjectStore(tmp_path).load()
     assert FakeMusic3Client.submitted == [1, 2]
     assert result["status"] == "partial" and result["unsubmittedSeeds"] == [3]
@@ -330,7 +350,7 @@ def test_timeout_stops_later_submissions_and_explicit_resume_keeps_frozen_seeds(
     assert before["jobs"][-1]["remoteTaskId"] == "task-2"
     assert before["jobs"][-1]["status"] == "failed"
     assert len(before["requests"]) == 2
-    resumed = resume_latest_batch(tmp_path, client_factory=FakeMusic3Client)
+    resumed = resume_latest_batch(tmp_path, client_factory=FakeMusic3Client, engine=ENGINE)
     assert resumed["status"] == "succeeded" and resumed["reusedCandidateIds"] == result["candidateIds"]
     assert FakeMusic3Client.submitted == [1, 2, 2, 3]
     assert ProjectStore(tmp_path).load()["requests"][:2] == before["requests"]
@@ -340,7 +360,7 @@ def test_first_seed_timeout_is_failed_and_never_submits_second_seed(tmp_path):
     make_project(tmp_path)
     class TimedOut(FakeMusic3Client):
         def wait(self, task_id, **options): raise TimeoutError("still running")
-    result = generate_candidates(tmp_path, seeds=[1, 2], client_factory=TimedOut)
+    result = generate_candidates(tmp_path, seeds=[1, 2], client_factory=TimedOut, engine=ENGINE)
     assert result["status"] == "failed" and result["candidateIds"] == []
     assert result["unsubmittedSeeds"] == [2] and FakeMusic3Client.submitted == [1]
 
@@ -382,18 +402,18 @@ def test_music3_inline_lyric_preparation_is_frozen_and_original_manifest_preserv
 
 def test_music3_catalog_reports_character_bound_without_claiming_token_measurement():
     from local_music_engine.production_rules import catalog
-    music3 = catalog(); legacy = catalog(engine="ace-step")
+    music3 = catalog(engine=ENGINE); ace = catalog()
     assert music3["captionBudgetCharacters"] == 16000
     assert music3["captionBudgetScope"] == "api_prompt_character_limit"
     assert music3["captionTokenBudgetMeasured"] is False
-    assert legacy["captionBudgetCharacters"] == 650
-    assert "captionTokenBudgetMeasured" not in legacy
-    assert music3["presets"] == legacy["presets"] and music3["rules"] == legacy["rules"]
-    legacy["presets"][0]["caption"] = "historical snapshot"
-    assert catalog(engine="ace-step")["presets"][0]["caption"] != "historical snapshot"
+    assert ace == catalog(engine="ace-step") and ace["captionBudgetCharacters"] == 650
+    assert "captionTokenBudgetMeasured" not in ace
+    assert music3["presets"] == ace["presets"] and music3["rules"] == ace["rules"]
+    ace["presets"][0]["caption"] = "historical snapshot"
+    assert catalog()["presets"][0]["caption"] != "historical snapshot"
     parser = build_parser()
-    assert run(parser.parse_args(["production-rules"])) == music3
-    assert run(parser.parse_args(["production-rules", "--engine", "ace-step"]))["captionBudgetCharacters"] == 650
+    assert run(parser.parse_args(["production-rules", "--engine", ENGINE])) == music3
+    assert run(parser.parse_args(["production-rules"])) == catalog(engine="ace-step")
 
 
 @pytest.mark.parametrize("duration", [30, 60, 300])

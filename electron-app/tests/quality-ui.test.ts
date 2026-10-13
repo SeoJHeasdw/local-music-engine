@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ActiveTask, AutomaticQuality, RhythmDiagnostics, RhythmQuality, Song, TaskOutcome, Version } from "../shared.ts";
+import type { ActiveTask, AutomaticQuality, Finding, RhythmDiagnostics, RhythmQuality, Song, TaskOutcome, Version } from "../shared.ts";
 import { findingCopy, versionSourceParent, versionTree } from "../renderer/format.ts";
-import { audioQualityText, isAutomaticAttempt, lyricQualityText, processingText, qualityLabel, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText, TaskListeningFocus } from "../renderer/quality.ts";
+import { audioQualityText, checkCount, isAutomaticAttempt, listeningPoints, lyricQualityText, processingText, qualityLabel, remainingProblems, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText, TaskListeningFocus } from "../renderer/quality.ts";
 
 const quality = (change: Partial<AutomaticQuality> = {}): AutomaticQuality => ({
   status: "passed", summary: "자동 검사 통과", groupId: "batch-slot", attempt: 1, maxAttempts: 4,
@@ -59,10 +59,40 @@ test("a cover and its cleaned result keep the trusted source as their comparison
   assert.equal(original.review.status, "unreviewed");
 });
 
+test("the label counts only what a listener can act on, and section changes are not something to check", () => {
+  const finding = (check: string, severity: Finding["severity"], startSeconds: number | null): Finding => ({
+    findingId: `${check}-${startSeconds}`, check, severity, message: "", observed: {}, threshold: {},
+    startSeconds, endSeconds: startSeconds === null ? null : startSeconds + 1 });
+  // What every sectioned song produces: level and tone change at the chorus, and a pulse readable at double speed.
+  const sectionChanges = [finding("wav_integrity", "info", null), finding("loudness_shift", "warning", 71.7),
+    finding("spectral_shift", "warning", 39.4), finding("tempo_ambiguity", "warning", null), finding("percussive_gap_observed", "info", 4.2)];
+  const attention = quality({ status: "attention", summary: "자동 검사에서 확인할 부분이 있어요." });
+  assert.deepEqual(listeningPoints(sectionChanges), []);
+  assert.deepEqual(qualityLabel({ quality: attention, findings: sectionChanges }), { label: "자동 검사 통과", tone: "ok" });
+
+  const timing = finding("beat_timing_instability_suspected", "warning", 55.63);
+  const dropped = finding("engine_meta_mismatch", "warning", null);
+  const early = finding("backing_dropout_suspected", "warning", 18);
+  assert.deepEqual(listeningPoints([...sectionChanges, dropped, timing, early]).map((item) => item.check),
+    ["backing_dropout_suspected", "beat_timing_instability_suspected", "engine_meta_mismatch"]);
+  assert.deepEqual(qualityLabel({ quality: attention, findings: [...sectionChanges, timing] }), { label: "확인할 것 1개", tone: "warn" });
+
+  const lyricWarning = quality({ status: "attention", lyrics: { status: "warning", orderedCoverage: 0.7 } });
+  assert.deepEqual(remainingProblems(lyricWarning), [lyricQualityText(lyricWarning)]);
+  assert.equal(qualityLabel({ quality: lyricWarning, findings: [timing] })!.label, "확인할 것 2개");
+  // The tab badge and the label are the same count; a version from before automatic checks counts its file warnings.
+  assert.equal(checkCount({ quality: lyricWarning, findings: [timing] }), 2);
+  assert.equal(checkCount({ quality: null, findings: [...sectionChanges, finding("peak_region", "warning", 12)] }), 1);
+  const retried = quality({ status: "attention", lyrics: { status: "warning" },
+    retryReasons: ["low_ordered_lyric_coverage", "large_english_transcript_error", "high_english_wer"] });
+  assert.deepEqual(remainingProblems(retried), ["작성한 가사가 많이 빠지거나 순서가 달라요.", "인식한 영어 가사에 차이가 많아요."]);
+  assert.deepEqual(remainingProblems(attention), []);
+});
+
 test("unknown analysis is visibly unknown and conservative processing never claims repaired clipping", () => {
   const unknown = quality({ status: "unknown", audio: {}, lyrics: { status: "unknown", orderedCoverage: 1 } });
-  assert.match(qualityLabel(unknown)!.label, /어려움/);
-  assert.doesNotMatch(qualityLabel(unknown)!.label, /통과/);
+  assert.match(qualityLabel({ quality: unknown, findings: [] })!.label, /어려움/);
+  assert.doesNotMatch(qualityLabel({ quality: unknown, findings: [] })!.label, /통과/);
   assert.match(lyricQualityText(unknown), /판단하지/);
   assert.match(audioQualityText(unknown), /확정하지/);
   const text = processingText({ gain: 0.8, endFadeSeconds: 0.005, channelDcOffsetsRemoved: [0.01] })!;

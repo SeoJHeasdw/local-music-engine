@@ -20,16 +20,12 @@ from .storage import ProjectStore, fingerprint, new_id, sha256_file, utc_now
 from .auto_quality import finish_single_edit, make_quality_plan, run_quality_batch, validate_quality_plan
 from .production_rules import editable_style, freeze_guidance, guided_prompt, normalize_selection, normalize_time_signature
 from .song_planning import prepare_song_plan
-from .music3 import BASE_URL, CAPABILITIES, ENGINE, MAX_DURATION_SECONDS, MODEL, translate_payload
+from .engines import (ACE_BASE_URL, ACE_DIT_MODEL, ACE_ENGINE, DEFAULT_ENGINE, ENGINES, MAX_DURATION_SECONDS, MUSIC3_ENGINE,
+                      engine_endpoint)
+from .music3 import translate_payload
 from .music3_adapter import Music3Client
 from .lyrics import INSTRUMENTAL_LYRICS, is_instrumental_lyrics
 
-DEFAULT_BASE_URL = BASE_URL
-DEFAULT_ENGINE = ENGINE
-DEFAULT_DIT_MODEL = MODEL
-LEGACY_ENGINE = "ace-step"
-LEGACY_BASE_URL = "http://127.0.0.1:18001"
-LEGACY_DIT_MODEL = "acestep-v15-turbo"
 DEFAULT_LM_MODEL = "acestep-5Hz-lm-4B"
 # ACE's server default is 0.85. On the same six seeds of a Korean/English song
 # (turbo + 4B LM, 2026-09-24), 0.6 lowered the ASR-measured Korean CER from 0.35 to
@@ -74,13 +70,13 @@ def _require_loaded_models(adapter_info: dict[str, Any], frozen: dict[str, Any])
     """ACE loads one DiT and one LM at start and silently serves any other requested
     name with them. Refuse, so project.json never records a model that did not run."""
 
-    if frozen.get("engine") == ENGINE:
-        if (adapter_info.get("engine") != ENGINE or adapter_info.get("status") != "ok"
+    if frozen.get("engine") == MUSIC3_ENGINE:
+        if (adapter_info.get("engine") != MUSIC3_ENGINE or adapter_info.get("status") != "ok"
                 or not adapter_info.get("models_initialized") or adapter_info.get("loaded_model") != frozen["model"]):
             raise AceApiError(f"Music 3 server is not ready with the requested model {frozen['model']}; engine/model health must match")
         return
-    if adapter_info.get("engine") == ENGINE:
-        raise AceApiError("a frozen ACE request cannot run on Music 3; use the explicit legacy ACE engine")
+    if adapter_info.get("engine") == MUSIC3_ENGINE:
+        raise AceApiError("a frozen ACE request cannot run on a Music 3 server; use the ACE server address")
     loaded = adapter_info.get("loaded_model")
     if loaded and loaded != frozen["model"]:
         raise AceApiError(
@@ -111,17 +107,17 @@ def _frozen_generation_payload(
     production_rules_snapshot: dict[str, Any] | None = None,
     engine: str | None = None,
 ) -> dict[str, Any]:
-    engine = engine or (LEGACY_ENGINE if model.startswith("acestep-") else ENGINE)
-    if engine not in {ENGINE, LEGACY_ENGINE}:
+    engine = engine or (ACE_ENGINE if model.startswith("acestep-") else MUSIC3_ENGINE)
+    if engine not in ENGINES:
         raise ValueError("unknown music engine")
-    if engine == ENGINE and (task_type != "text2music" or parent_artifact_sha256 or edit_range):
+    if engine == MUSIC3_ENGINE and (task_type != "text2music" or parent_artifact_sha256 or edit_range):
         raise ValueError("Music 3 supports text-to-music only; cover, repaint and reference audio are unavailable")
-    if engine == ENGINE and model.startswith("acestep-"):
+    if engine == MUSIC3_ENGINE and model.startswith("acestep-"):
         raise ValueError("ACE models require engine='ace-step'; a Music 3 request cannot use an ACE model")
-    if engine == LEGACY_ENGINE and not model.startswith("acestep-"):
-        raise ValueError("the legacy ACE engine requires an ACE model")
+    if engine == ACE_ENGINE and not model.startswith("acestep-"):
+        raise ValueError("the ACE engine requires an ACE model")
     inputs = project["inputs"]
-    if engine == ENGINE and not 10 <= float(inputs["targetDurationSeconds"]) <= MAX_DURATION_SECONDS:
+    if engine == MUSIC3_ENGINE and not 10 <= float(inputs["targetDurationSeconds"]) <= MAX_DURATION_SECONDS:
         raise ValueError("Music 3 duration must be between 10 and 300 seconds")
     base_style = style_prompt if style_prompt is not None else inputs["stylePrompt"]
     selection = inputs.get("productionRules")
@@ -202,14 +198,14 @@ def _frozen_generation_payload(
     if parent_artifact_sha256:
         # Provenance only; the adapter removes it before calling the ACE API.
         payload["source_artifact_sha256"] = parent_artifact_sha256
-    if engine == ENGINE:
+    if engine == MUSIC3_ENGINE:
         payload["sourceLyricsOriginal"] = inputs["lyricsNormalized"]
         return translate_payload(payload, base_style=base_style)
     return payload
 
 
 def _api_payload(frozen: dict[str, Any]) -> dict[str, Any]:
-    if frozen.get("engine") == ENGINE:
+    if frozen.get("engine") == MUSIC3_ENGINE:
         allowed = {"prompt", "lyrics", "audio_duration", "seed", "model", "batch_size", "inference_steps", "task_type"}
         return {key: value for key, value in frozen.items() if key in allowed}
     allowed = {
@@ -375,7 +371,7 @@ def _append_request(
     *,
     adapter_info: dict[str, Any],
 ) -> dict[str, Any]:
-    music3 = frozen.get("engine") == ENGINE
+    music3 = frozen.get("engine") == MUSIC3_ENGINE
     adapter = "minimax-music3-mlx" if music3 else "ace-step-rest"
     version = "music3-rest-v1" if music3 else "ace-rest-v1"
     request = {
@@ -491,8 +487,8 @@ def generate_candidates(
     project_root: Path | str,
     *,
     seeds: Iterable[int],
-    base_url: str = DEFAULT_BASE_URL,
-    model: str = DEFAULT_DIT_MODEL,
+    base_url: str | None = None,
+    model: str | None = None,
     lm_model: str = DEFAULT_LM_MODEL,
     lm_temperature: float = DEFAULT_LM_TEMPERATURE,
     poll_seconds: float = 1.0,
@@ -515,13 +511,8 @@ def generate_candidates(
         raise ValueError("at least one seed is required")
     if len(set(seed_list)) != len(seed_list):
         raise ValueError("seeds must be unique within a batch")
-    if engine not in {ENGINE, LEGACY_ENGINE}:
-        raise ValueError("unknown music engine")
-    if engine == LEGACY_ENGINE and model == MODEL:
-        model = LEGACY_DIT_MODEL
-    if engine == LEGACY_ENGINE and base_url == BASE_URL:
-        base_url = LEGACY_BASE_URL
-    client = (client_factory or (Music3Client if engine == ENGINE else AceStepClient))(base_url)
+    base_url, model = engine_endpoint(engine, base_url, model)
+    client = (client_factory or (Music3Client if engine == MUSIC3_ENGINE else AceStepClient))(base_url)
     source_rules = None
     with store.generation_lock():
         with store.transaction() as project:
@@ -550,7 +541,7 @@ def generate_candidates(
                 for seed in seed_list
             ]
             batch = _new_batch(store, project, {
-                "seeds": seed_list, "model": model, "lmModel": lm_model if engine == LEGACY_ENGINE else None, "engine": engine,
+                "seeds": seed_list, "model": model, "lmModel": lm_model if engine == ACE_ENGINE else None, "engine": engine,
                 "baseUrl": base_url, "explicitResume": False, "frozenPayloads": payloads,
                 "sourceCandidateId": source_candidate_id,
             })
@@ -571,7 +562,7 @@ def generate_candidates(
 def cover_candidates(
     project_root: Path | str, *, candidate_id: str, seeds: Iterable[int],
     strength: float = 0.7, style_prompt: str | None = None, lyrics: str | None = None,
-    base_url: str = DEFAULT_BASE_URL, model: str | None = None,
+    base_url: str = ACE_BASE_URL, model: str | None = None,
     poll_seconds: float = 1.0, timeout_seconds: float = 1800.0,
     feedback: dict[str, Any] | None = None,
     client_factory: Callable[..., AceStepClient] = AceStepClient,
@@ -580,10 +571,8 @@ def cover_candidates(
 ) -> dict[str, Any]:
     """Make new versions conditioned on a verified source; project inputs stay intact."""
 
-    if engine != LEGACY_ENGINE:
+    if engine != ACE_ENGINE:
         raise ValueError("Music 3 does not support cover or reference audio; create a new song from the version's lyrics and style instead")
-    if base_url == BASE_URL:
-        base_url = LEGACY_BASE_URL
     if isinstance(strength, bool) or not isinstance(strength, (int, float)) or not math.isfinite(strength) or not 0 <= strength <= 1:
         raise ValueError("cover strength must be a finite number between 0 and 1")
     seed_list = [validate_seed(seed) for seed in seeds]
@@ -617,9 +606,9 @@ def cover_candidates(
         payloads = []
         for seed in seed_list:
             frozen = _frozen_generation_payload(
-                {"inputs": source_inputs}, seed=seed, model=model or original.get("model", LEGACY_DIT_MODEL),
+                {"inputs": source_inputs}, seed=seed, model=model or original.get("model", ACE_DIT_MODEL),
                 lm_model=original.get("lm_model_path", DEFAULT_LM_MODEL), task_type="cover",
-                parent_artifact_sha256=artifact["sha256"], production_rules_snapshot=source_rules, engine=LEGACY_ENGINE,
+                parent_artifact_sha256=artifact["sha256"], production_rules_snapshot=source_rules, engine=ACE_ENGINE,
             )
             if not frozen["prompt"].strip():
                 raise ValueError("cover style must not be empty without production guidance")
@@ -664,12 +653,12 @@ def resume_latest_batch(
         project = store.load()
         previous = resume_source(project, job_id)
         payloads = frozen_batch_payloads(project, previous)
-        frozen_engine = ENGINE if payloads[0].get("engine") == ENGINE else LEGACY_ENGINE
-        if any((ENGINE if item.get("engine") == ENGINE else LEGACY_ENGINE) != frozen_engine for item in payloads):
+        frozen_engine = MUSIC3_ENGINE if payloads[0].get("engine") == MUSIC3_ENGINE else ACE_ENGINE
+        if any((MUSIC3_ENGINE if item.get("engine") == MUSIC3_ENGINE else ACE_ENGINE) != frozen_engine for item in payloads):
             raise ValueError("cannot resume a batch containing different music engines")
         if engine != frozen_engine:
-            raise ValueError("this frozen batch belongs to the legacy ACE engine; use engine='ace-step' explicitly or start a new Music 3 generation"
-                             if frozen_engine == LEGACY_ENGINE else "this frozen batch belongs to Music 3 and must resume on Music 3")
+            raise ValueError("this frozen batch belongs to ACE-Step and must resume on ACE-Step"
+                             if frozen_engine == ACE_ENGINE else "this frozen batch belongs to Music 3; resume it with engine='minimax-music3' once Music 3 is prepared, or start a new generation")
         reusable = reusable_candidates(store, project, previous, payloads)
         parameters = deepcopy(previous["parameters"])
         if parameters.get("qualityPolicy", {}).get("enabled"):
@@ -677,7 +666,7 @@ def resume_latest_batch(
         parameters.update(explicitResume=True, resumeOfJobId=previous["jobId"], frozenPayloads=payloads)
         if base_url is not None:
             parameters["baseUrl"] = base_url
-        client = (client_factory or (Music3Client if frozen_engine == ENGINE else AceStepClient))(parameters["baseUrl"])
+        client = (client_factory or (Music3Client if frozen_engine == MUSIC3_ENGINE else AceStepClient))(parameters["baseUrl"])
         with store.transaction() as project:
             recover_jobs(store, project)
             batch = _new_batch(store, project, parameters)
@@ -700,7 +689,7 @@ def repaint_candidate(
     strength: str | None = None,
     feedback: dict[str, Any] | None = None,
     candidate_id: str | None = None,
-    base_url: str = DEFAULT_BASE_URL,
+    base_url: str = ACE_BASE_URL,
     model: str | None = None,
     lm_model: str | None = None,
     poll_seconds: float = 1.0,
@@ -710,10 +699,8 @@ def repaint_candidate(
     quality_backend: Any | None = None,
     engine: str = DEFAULT_ENGINE,
 ) -> dict[str, Any]:
-    if engine != LEGACY_ENGINE:
+    if engine != ACE_ENGINE:
         raise ValueError("Music 3 does not support repaint; create a new song from the version's lyrics and style instead")
-    if base_url == BASE_URL:
-        base_url = LEGACY_BASE_URL
     seed = validate_seed(seed)
     if not math.isfinite(start_seconds) or not math.isfinite(end_seconds) or start_seconds < 0 or end_seconds <= start_seconds:
         raise ValueError("repaint range must satisfy finite 0 <= start < end")
@@ -757,13 +744,13 @@ def repaint_candidate(
         edit_range = {"startSeconds": float(start_seconds), "endSeconds": float(end_seconds)}
         frozen = _frozen_generation_payload(
             {"inputs": source_inputs}, seed=seed,
-            model=model or original.get("model", LEGACY_DIT_MODEL),
+            model=model or original.get("model", ACE_DIT_MODEL),
             lm_model=lm_model or original.get("lm_model_path", DEFAULT_LM_MODEL),
             task_type="repaint", parent_artifact_sha256=parent_artifact["sha256"],
             edit_range=edit_range, instruction=instruction,
             style_prompt=style_prompt.strip() if style_prompt is not None else None,
             repaint_strength=REPAINT_STRENGTHS[strength] if strength else None,
-            production_rules_snapshot=source_rules, engine=LEGACY_ENGINE,
+            production_rules_snapshot=source_rules, engine=ACE_ENGINE,
         )
         adapter_info = client.health()
         _require_loaded_models(adapter_info, frozen)
@@ -794,14 +781,12 @@ def repaint_candidate(
         return {"jobId": job["jobId"], "candidateId": candidate_id}
 
 
-def revise_inputs(project_root: Path | str, *, engine: str = DEFAULT_ENGINE, **changes: Any) -> dict[str, Any] | None:
+def revise_inputs(project_root: Path | str, **changes: Any) -> dict[str, Any] | None:
     """Edit title/style/lyrics/duration/metas for future requests; history is kept."""
 
-    if engine not in {ENGINE, LEGACY_ENGINE}:
-        raise ValueError("unknown music engine")
     duration = changes.get("duration_seconds")
-    if engine == ENGINE and duration is not None and (not math.isfinite(duration) or not 10 <= duration <= MAX_DURATION_SECONDS):
-        raise ValueError("Music 3 duration must be between 10 and 300 seconds")
+    if duration is not None and (not math.isfinite(duration) or not 10 <= duration <= MAX_DURATION_SECONDS):
+        raise ValueError(f"duration must be between 10 and {MAX_DURATION_SECONDS} seconds")
     store = ProjectStore(project_root)
     with store.locked():
         project = store.load()

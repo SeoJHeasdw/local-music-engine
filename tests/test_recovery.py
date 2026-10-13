@@ -251,8 +251,7 @@ generate_candidates(sys.argv[1], seeds=[1, 2, 3], client_factory=BlockingClient,
         assert not store.generation_active()
         status = project_status(store, store.load())
         assert status["jobs"][0]["status"] == "interrupted"
-        assert not status["jobs"][0]["canResume"]
-        assert "ACE" in status["jobs"][0]["resumeBlockedReason"]
+        assert status["jobs"][0]["canResume"] and status["jobs"][0]["resumeBlockedReason"] is None
         assert store.load()["jobs"][0]["status"] == "running"  # status is read-only
         assert library(None, [tmp_path])[0]["runningJobs"] == 0
         recovered = recover_project(tmp_path)

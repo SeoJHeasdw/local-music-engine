@@ -31,7 +31,7 @@ LYRICS = ("[Verse]\nCity lights are fading\nYour voice stays with me\nI walk thr
 @pytest.fixture
 def benchmark(tmp_path):
     RecordingAceClient.fail_seeds = set()
-    RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
+    RecordingAceClient.loaded = ("acestep-v15-xl-turbo", "acestep-5Hz-lm-4B")
     store = ProjectStore.initialize(tmp_path / "benchmark", title="Benchmark", lyrics=LYRICS,
         style_prompt="intimate male melodic rap, mellow late-night mood", target_duration_seconds=30,
         bpm=84, key_scale="A minor", time_signature="4",

@@ -230,14 +230,14 @@ export function findingCopy(finding: Finding): { label: string; message: string;
     case "beat_timing_instability_suspected":
       return {
         label: warning ? "박자 불안정 의심" : "박자 변화 · 의도 확인 필요",
-        message: warning ? "분리한 리듬 성분의 추정 박자 간격이 불안정해요. 연주 방식과 분리 오차를 포함해 이 구간을 들어서 확인해 주세요."
+        message: warning ? "이 구간에서 박자가 밀리거나 당겨지는 것으로 측정됐어요. 쿵·짝이 어긋나게 들리는지 들어서 확인해 주세요. 의도한 리듬이거나 측정 오차일 수도 있어요."
           : "추정한 박자 간격이 변하는 부분이에요. 요청한 템포와 그루브 변화에 맞는지 이 구간을 들어서 확인해 주세요.",
         value: Number.isFinite(observed.timingDeviationP95Milliseconds) ? `추정 간격 편차 ${observed.timingDeviationP95Milliseconds.toFixed(1)} ms` : null,
       };
     case "repeated_hit_timing_shift_suspected":
       return {
         label: "타격 시각 흔들림 의심",
-        message: "연속된 여러 타격이 곡 안의 다른 반복보다 이르거나 늦게 나와요. 의도한 변주일 수 있으니 이 구간을 직접 들어서 확인해 주세요.",
+        message: "드럼 같은 타격 여러 개가 곡의 다른 반복보다 이르거나 늦게 나와요. 박자가 어긋나게 들리는지 직접 들어서 확인해 주세요. 의도한 변주일 수도 있어요.",
         value: Number.isFinite(observed.peakDeviationMilliseconds) ? `가장 크게 어긋난 타격 ${observed.peakDeviationMilliseconds.toFixed(0)} ms` : null,
       };
     case "smooth_timing_change_observed":
@@ -249,7 +249,7 @@ export function findingCopy(finding: Finding): { label: string; message: string;
     case "backing_dropout_suspected":
       return {
         label: "반주 끊김 의심",
-        message: "목소리나 전체 음원이 이어지는 동안 분리된 반주가 약해진 구간이에요. 분리 오차나 의도한 편곡일 수 있어 직접 들어서 확인해 주세요.",
+        message: "노래는 이어지는데 반주가 갑자기 작아졌다 돌아오는 구간이에요. 소리가 끊기는 느낌인지 직접 들어서 확인해 주세요. 의도한 편곡이거나 측정 오차일 수도 있어요.",
         value: Number.isFinite(observed.relativeDepthDb) ? `주변보다 ${observed.relativeDepthDb.toFixed(1)} dB 작음` : null,
       };
     case "possible_arrangement_break":
@@ -259,7 +259,7 @@ export function findingCopy(finding: Finding): { label: string; message: string;
         value: Number.isFinite(observed.gapSeconds) ? `${observed.gapSeconds.toFixed(2)}초` : null };
     case "mix_dropout_suspected":
       return { label: warning ? "전체 신호 끊김 의심" : "선언한 쉼과 일치",
-        message: warning ? "곡 중간에서 전체 신호가 거의 0이 됐다 급격히 돌아왔어요. 의도된 편집인지 자동으로 확정하지 못했어요."
+        message: warning ? "곡 중간에 소리 전체가 순간적으로 끊겼다 돌아와요. 끊김이 들리는지 확인해 주세요."
           : "관측한 무음 구간 전체가 선언한 쉼 계획에 들어 있어요. 오류가 없거나 청취가 승인됐다는 뜻은 아니에요.",
         value: Number.isFinite(observed.dropDurationSeconds) ? `${observed.dropDurationSeconds.toFixed(2)}초` : null };
     default:

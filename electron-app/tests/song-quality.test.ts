@@ -14,7 +14,7 @@ test("in-progress raw quality metadata is normalized before renderer access", ()
   assert.deepEqual(report?.retryReasons, []);
   assert.deepEqual(report?.audio, {});
   assert.equal(report?.processing, null);
-  assert.equal(qualityLabel(report)?.label, "자동 검사 중");
+  assert.equal(qualityLabel({ quality: report, findings: [] })?.label, "자동 검사 중");
   assert.equal(report?.rhythm, undefined);
 });
 

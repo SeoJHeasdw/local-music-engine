@@ -41,7 +41,7 @@ export class MemoryHandoff {
   }
 
   // Keep the same lock from checking an existing server through unloading the assistant,
-  // preparing files and spawning Music3. An assistant cannot claim memory between these steps.
+  // preparing files and spawning the music engine. An assistant cannot claim memory between these steps.
   withEngineStarting<T>(start: () => Promise<T>): Promise<T> {
     return this.exclusive(start);
   }

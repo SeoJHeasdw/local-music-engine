@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .jobs import ACTIVE_STATUSES, RECOVERABLE_KINDS, frozen_batch_payloads
-from .music3 import CAPABILITIES, ENGINE, MAX_DURATION_SECONDS
+from .engines import ACE_CAPABILITIES, ACE_ENGINE, DEFAULT_ENGINE, MAX_DURATION_SECONDS
 from .lyrics import is_instrumental_lyrics
 from .storage import PROJECT_FILENAME, ProjectStore
 
@@ -82,7 +82,7 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
                 "coverSource": parameters.get("coverSource"),
                 "lyrics": parameters.get("lyrics"),
                 "model": parameters.get("model"),
-                "engine": parameters.get("engine", "ace-step"),
+                "engine": parameters.get("engine", ACE_ENGINE),
                 "requestedDurationSeconds": parameters.get("audio_duration"),
                 "actualDurationSeconds": artifact.get("audio", {}).get("durationSeconds"),
                 "bpm": parameters.get("bpm"),
@@ -125,8 +125,9 @@ def _job_view(project: dict[str, Any], job: dict[str, Any], generation_active: b
         blocked = None
         try:
             frozen = frozen_batch_payloads(project, job)
-            if any(item.get("engine") != ENGINE for item in frozen):
-                blocked = "과거 ACE 작업은 Music 3에서 이어 만들 수 없어요. 가사와 스타일로 새 곡을 만들어 주세요."
+            # ACE requests carry no engine field; resuming runs on the default engine.
+            if any(item.get("engine", ACE_ENGINE) != DEFAULT_ENGINE for item in frozen):
+                blocked = "Music 3로 만들던 작업은 지금 엔진에서 이어 만들 수 없어요. 가사와 스타일로 새 곡을 만들어 주세요."
         except ValueError as error:
             blocked = str(error)
         view.update(
@@ -189,8 +190,8 @@ def project_status(store: ProjectStore, project: dict[str, Any]) -> dict[str, An
     generation_active = store.generation_active()
     export_active = store.export_active()
     return {
-        "engine": ENGINE,
-        "capabilities": dict(CAPABILITIES),
+        "engine": DEFAULT_ENGINE,
+        "capabilities": dict(ACE_CAPABILITIES),
         "maxDurationSeconds": MAX_DURATION_SECONDS,
         "projectId": project["projectId"],
         "title": project["title"],

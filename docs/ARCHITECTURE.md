@@ -1,46 +1,28 @@
 # 아키텍처와 데이터 계약
 
-## 2026-10-05 Music 3 전환
+## 엔진 선택
 
-기본 생성은 `Music3Client` → 인증된 `127.0.0.1:18002` task API → 고정 판본의
-`mlx-audio`와 `mlx-community/MiniMax-Music3-bf16`으로 실행한다(구조 BF16 → 음색 FP32 단계별 적재). 프로젝트 `.venv`와 추론용
-`.runtime/minimax-music3/.venv`, 검사 `.runtime/quality/.venv`는 분리한다.
+앱과 CLI의 기본 엔진은 ACE-Step 1.5 XL turbo다. 엔진 이름과 기본 주소·모델은 `engines.py` 한 곳에 있다.
+`ace-step`은 `127.0.0.1:18001`의 `acestep-v15-xl-turbo`(LM `acestep-5Hz-lm-4B`), `minimax-music3`는
+`127.0.0.1:18002`의 `mlx-community/MiniMax-Music3-bf16`이다. 엔진·주소·모델을 적지 않은 요청은 ACE 값을
+쓰고, 서버가 올린 DiT·LM이 요청과 다르면 제출 전에 거부한다. `engine` 필드가 없는 저장된 요청은 ACE
+요청이다. ACE 서버·구간 수정·프로세스 소유는 아래 '현재 구현 범위'에 있다.
 
-Electron main은 `scripts/start_music3_api.sh`의 프로세스 그룹을 소유하고, 모델 적재 전·후의
-health를 구분한다. 같은 Music 3 엔진·모델·생성 능력이 확인돼야 준비 상태로 표시한다. 외부
-소유 서버는 임의로 종료하지 않는다. 인증 키는 `.runtime/music3-api-key`의 0600 파일로 공유한다.
-renderer에는 키·임의 파일 경로·명령 실행 능력을 주지 않는다.
+## Music 3(이름으로 고를 때만)
 
-서버는 인증된 health·생성·조회·opaque 완료 artifact 다운로드만 제공한다. 모델 적재와 계산은
-하나의 MLX worker에서 실행한다. 실제 모델과 런타임 revision은 요청 adapterInfo·원격 결과에
-남긴다. mock 계약 검사와 실제 모델 추론은 구분한다.
+Music 3는 `--engine minimax-music3`를 명시할 때만 쓴다. 모델과 실행 환경은 삭제했고
+`scripts/bootstrap_music3.sh`로 다시 준비한다. 앱은 이 서버를 띄우지 않으므로 `scripts/start_music3_api.sh`를
+직접 켠다. 요청은 `Music3Client` → 인증된 `127.0.0.1:18002` task API(`.runtime/music3-api-key`, 0600)로 가고,
+서버의 엔진·모델·준비 상태가 요청과 같아야 제출한다.
 
-제작 규칙과 songPlan은 Global Metadata / Vocal Details / Arrangement로 매핑한다. 표현 지시는
-caption에 옮기고 태그와 실제 가사는 독립 줄로 나눠 모델의 가사 유실을 막는다. 원문·단어 순서와
-과거 요청은 보존하고 실제 준비본·변경 사항은 새 요청에 기록한다. Music 3에는 ACE 전용 LM·
-thinking·CFG 설정을 전달하지 않는다. caption v4는 모델 학습 형식의 13개 항목으로 렌더링한다.
-프리셋의 `music3Schema`와 규칙의 `music3Fields`를 요청에 동결하며, 이전 snapshot에 이 항목이 없으면
-그 snapshot의 기존 문장(`music3Caption` 또는 ACE caption)을 규칙별 기본 항목에 넣는다. 시간·마디·
-음절 수 추정은 계획에 보존하되 모델에는 실제 가사 구간의 역할·선율·표현을 안내한다.
-상한은 300초이며 EOS에 따른 실제 길이를 기록하고
-무음 padding으로 길이를 맞추지 않는다.
-
-현재 공개 구현은 text2music만 지원한다. cover·repaint·파형 참조는 새 CLI와 앱에서 차단한다.
-기존 후보를 바탕으로 만들기는 가사·스타일·규칙으로 새 전체 곡을 생성하는 동작이다.
-과거 engine 없는 ACE 요청도 legacy로 판별하며, 명시적인 `--engine ace-step` 없이 Music 3로
-재해석해서 재개하지 않는다. 기존 음원·평가·선택·export는 계속 사용할 수 있다.
-
-기본 초안은 한국어·영어 규칙 기반의 수정 가능한 예시 가사다. 선택한 로컬 도우미가 있으면
-자유롭게 작사할 수 있다. Music 3에 없는 작사 API를 호출하거나 ACE를 기본 적재하지 않는다.
-
-작업 수명·원자 저장·artifact 검증·자동 검사와 사람 청취 분리 계약은 아래와 같이 유지한다.
-현재 Music 3의 취소는 로컬 CLI 작업을 취소하며 이미 제출한 원격 추론은 계속 계산할 수 있다.
-timeout 이후에는 같은 묶음의 추가 seed 제출을 중단하고 미제출 seed를 별도로 기록한다.
-
-## 과거 ACE 구현과 유지되는 데이터 계약
-
-아래 ACE 서버·구간 수정·내장 초안 설명은 명시적인 legacy 경로의 계약이며,
-앱 기본 실행이나 Music 3 요청에 적용하지 않는다.
+- text2music만 지원한다. cover·repaint·파형 참조는 CLI가 거부한다. 상한은 300초이며 실제 길이를 기록한다.
+- 제작 규칙과 songPlan은 모델 학습 형식의 caption(`Global Metadata / Vocal Details / Arrangement`의 13개 항목)으로
+  옮긴다. 프리셋의 `music3Schema`와 규칙의 `music3Fields`를 요청에 동결하고, ACE 전용 LM·thinking·CFG 설정은
+  보내지 않는다. 매핑은 `music3.py`에 있다.
+- 묶음은 만든 엔진에서만 재개한다. Music 3 묶음은 `--engine minimax-music3`를 명시해야 재개되고, 곡 화면은
+  이어 만들 수 없다고 표시한다. Music 3로 만든 음원의 재생·평가·선택·export는 그대로 쓴다.
+- 취소는 로컬 CLI 작업을 멈추며 이미 제출한 추론은 서버가 끝까지 계산할 수 있다. timeout 뒤에는 같은 묶음의
+  남은 seed를 제출하지 않고 따로 기록한다.
 
 ## 현재 구현 범위
 
@@ -51,6 +33,7 @@ Electron renderer ─ 제한된 preload IPC ─ Electron main ─┬─ music-en
 music-engine CLI ─ workflow.py ─ ProjectStore + qc.py
                  ├ execution.py (추론·다운로드·QC와 짧은 기록 트랜잭션)
                  ├ jobs.py      (최초 요청 스냅샷·재개 계보·중단 복구)
+                 ├ engines.py   (엔진 이름과 기본 주소·모델)
                  ├ views.py      (status·library: 앱과 에이전트가 읽는 뷰)
                  ├ assistant.py  (피드백 → 수정안: 규칙 또는 loopback LLM)
                  └ drafting.py   (설명 → 제목·스타일·가사 초안)
@@ -198,6 +181,7 @@ export는 새 내부 artifact를 만들며 외부 출력은 프로젝트 밖의 
 사실을 주의점에 적는다. Ollama 호출은 `keep_alive: 0`으로 답한 뒤 모델을 내려 음악 엔진과
 통합 메모리를 다투지 않게 한다. 캡션이 문장형이면 규칙은 태그를 덧붙이기만 한다.
 
-`drafting.py`는 설명에서 제목·스타일·가사 초안을 만든다. LLM이 있으면 LLM이 한글 가사까지
-쓰고, 없으면 한국어 핵심어를 영어 태그로 바꿔 ACE `/v1/create_sample`에 영어로 묻는다. 한글이
-아닌 가사는 버리고 알린다. 초안은 BPM·조성을 채우지 않는다(생성 때 ACE가 정한다).
+`drafting.py`는 설명에서 제목·스타일·가사 초안을 만든다. LLM 도우미가 있으면 LLM이 가사까지 쓰고, 없으면
+로컬 규칙이 수정 가능한 예시 초안을 만들며 음악 서버를 부르지 않는다. CLI의 `draft --engine ace-step`만
+한국어 핵심어를 영어 태그로 바꿔 켜져 있는 ACE의 `/v1/create_sample`에 묻고, 요청한 언어가 아닌 가사는 버리고
+알린다.

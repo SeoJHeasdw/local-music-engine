@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .local_http import open_local
-from .music3 import ENGINE
+from .engines import ACE_ENGINE, DEFAULT_ENGINE, ENGINES, MUSIC3_ENGINE
 
 STRENGTH_NAMES = ("light", "medium", "strong")
 ACTIONS = ("repaint", "regenerate")
@@ -289,12 +289,12 @@ class PlanRequest:
     versions: int = 2
     bpm: int | None = None
     key_scale: str | None = None
-    engine: str = ENGINE
+    engine: str = DEFAULT_ENGINE
 
     def validated(self) -> "PlanRequest":
-        if self.engine not in {ENGINE, "ace-step"}:
+        if self.engine not in ENGINES:
             raise ValueError("unknown music engine")
-        if self.engine == ENGINE and self.edit_range is not None:
+        if self.engine == MUSIC3_ENGINE and self.edit_range is not None:
             raise ValueError("Music 3 does not support range repaint; request a whole-song regeneration")
         if self.strength not in STRENGTH_NAMES:
             raise ValueError(f"strength must be one of: {', '.join(STRENGTH_NAMES)}")
@@ -310,14 +310,14 @@ def rule_plan(request: PlanRequest, *, note: str | None = None) -> dict[str, Any
     text = request.feedback.strip()
     matched = [rule for rule in RULES if rule.compiled.search(text)] if text else []
     caption, changes = _apply_rules(request.caption, matched)
-    if request.engine == ENGINE and not re.search(r"[가-힣]", request.lyrics) and re.search(r"[A-Za-z]", re.sub(r"\[[^\]]*\]", "", request.lyrics)):
+    if request.engine == MUSIC3_ENGINE and not re.search(r"[가-힣]", request.lyrics) and re.search(r"[A-Za-z]", re.sub(r"\[[^\]]*\]", "", request.lyrics)):
         caption = caption.replace("clear Korean diction", "clear English diction")
         changes = [{**change, "term": change["term"].replace("clear Korean diction", "clear English diction")} for change in changes]
     edit_range = _clean_range(request.edit_range, request.duration_seconds)
     notes: list[str] = [note] if note else []
     if matched and is_prose(request.caption) and any(rule.remove for rule in matched):
         notes.append("스타일이 문장으로 되어 있어 새 태그만 덧붙였어요. 맞지 않는 표현은 아래에서 직접 지워 주세요.")
-    if edit_range is None and request.engine == "ace-step":
+    if edit_range is None and request.engine == ACE_ENGINE:
         edges = {rule.edge for rule in matched if rule.edge}
         if len(edges) == 1 and all(rule.local for rule in matched):
             edit_range = _edge_range(edges.pop(), request.duration_seconds)
@@ -533,7 +533,7 @@ def plan_from_llm_answer(raw: str, request: PlanRequest, *, model: str) -> dict[
     action = answer.get("action")
     if action not in ACTIONS:
         raise AssistantError(f"LLM chose an unknown action: {action!r}")
-    if request.engine == ENGINE:
+    if request.engine == MUSIC3_ENGINE:
         action = "regenerate"
     caption = " ".join(str(answer.get("caption") or "").split())
     if not caption or len(caption) > MAX_CAPTION_CHARS:
@@ -542,7 +542,7 @@ def plan_from_llm_answer(raw: str, request: PlanRequest, *, model: str) -> dict[
     edit_range = _clean_range(request.edit_range, request.duration_seconds) or _clean_range(
         answer.get("range"), request.duration_seconds
     )
-    if request.engine == ENGINE:
+    if request.engine == MUSIC3_ENGINE:
         edit_range = None
     notes: list[str] = []
     if action == "repaint" and edit_range is None:
@@ -570,7 +570,7 @@ def plan_from_llm_answer(raw: str, request: PlanRequest, *, model: str) -> dict[
         if label:
             change["label"] = label
     summary = " ".join(str(answer.get("summary") or "").split())[:300]
-    if request.engine == ENGINE and answer.get("action") == "repaint":
+    if request.engine == MUSIC3_ENGINE and answer.get("action") == "repaint":
         summary = f"의견을 반영해 새 곡 {request.versions}개를 만들어요."
         notes.append("Music 3에서는 가사와 스타일을 바탕으로 곡 전체를 새로 만들어요.")
     return {
@@ -596,7 +596,7 @@ def llm_plan(request: PlanRequest, config: LlmConfig) -> dict[str, Any]:
     config = config.validated()
     context = {
         "engine": request.engine,
-        "supportedActions": ["regenerate"] if request.engine == ENGINE else list(ACTIONS),
+        "supportedActions": ["regenerate"] if request.engine == MUSIC3_ENGINE else list(ACTIONS),
         "feedback": request.feedback,
         "selectedRange": _clean_range(request.edit_range, request.duration_seconds),
         "durationSeconds": round(request.duration_seconds, 2),
@@ -607,7 +607,7 @@ def llm_plan(request: PlanRequest, config: LlmConfig) -> dict[str, Any]:
         "requestedStrength": request.strength,
     }
     system_prompt = SYSTEM_PROMPT
-    if request.engine == ENGINE:
+    if request.engine == MUSIC3_ENGINE:
         system_prompt = SYSTEM_PROMPT.replace("ACE-Step 1.5", "MiniMax Music 3").replace("ACE-Step was trained on captions such as", "Musical captions include descriptions such as").replace("lyrics: Korean lyrics", "lyrics: supplied lyrics in their original language")
         system_prompt += "\nThis engine only supports whole-song text-to-music regeneration. Always return action regenerate and range null; never propose repaint or reference-audio editing."
     raw = _chat(

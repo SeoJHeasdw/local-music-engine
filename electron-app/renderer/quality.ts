@@ -1,15 +1,39 @@
-import type { ActiveTask, AutomaticQuality, RhythmDiagnosticCheck, RhythmDiagnosticEvent, TaskOutcome, Version } from "../shared.ts";
+import type { ActiveTask, AutomaticQuality, Finding, RhythmDiagnosticCheck, RhythmDiagnosticEvent, TaskOutcome, Version } from "../shared.ts";
 
 export function isAutomaticAttempt(version: Version): boolean {
   return version.quality?.preferred === false && !version.isFinal && !version.recommended;
 }
 
-export function qualityLabel(quality: AutomaticQuality | null | undefined): { label: string; tone: string } | null {
+// Every arranged song changes level and tone between sections, and a repeating pulse can be
+// read at half or double speed. Those are measurements, not something a listener is sent to check.
+const structureObservations = new Set(["loudness_shift", "spectral_shift", "tempo_ambiguity"]);
+
+/** Warnings that name something to check, in song order; ones without a time come last. */
+export function listeningPoints(findings: Finding[]): Finding[] {
+  return findings.filter((finding) => finding.severity !== "info" && !structureObservations.has(finding.check))
+    .sort((a, b) => (a.startSeconds ?? Infinity) - (b.startSeconds ?? Infinity));
+}
+
+/** What the automatic check still holds against this version, one sentence each. */
+export function remainingProblems(quality: AutomaticQuality): string[] {
+  const reasons = [...new Set(quality.retryReasons.map(qualityRetryReason))];
+  return reasons.length || quality.lyrics.status !== "warning" ? reasons : [lyricQualityText(quality)];
+}
+
+// Counts only what the checks panel can show the listener: a problem in words or a place
+// to play. A version whose only notes are section changes has nothing to check.
+export function checkCount(version: Pick<Version, "quality" | "findings">): number {
+  return (version.quality ? remainingProblems(version.quality).length : 0) + listeningPoints(version.findings).length;
+}
+
+export function qualityLabel(version: Pick<Version, "quality" | "findings">): { label: string; tone: string } | null {
+  const quality = version.quality;
   if (!quality) return null;
   if (quality.complete === false) return { label: "자동 검사 중", tone: "muted" };
-  if (quality.status === "passed") return { label: "자동 검사 통과", tone: "ok" };
-  if (quality.status === "attention") return { label: "확인할 부분 있음", tone: "warn" };
-  return { label: "일부 자동 확인 어려움", tone: "muted" };
+  const count = checkCount(version);
+  if (count) return { label: `확인할 것 ${count}개`, tone: "warn" };
+  if (quality.status === "unknown") return { label: "일부 자동 확인 어려움", tone: "muted" };
+  return { label: "자동 검사 통과", tone: "ok" };
 }
 
 export function lyricQualityText(quality: AutomaticQuality): string {

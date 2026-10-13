@@ -32,7 +32,7 @@ class FakeAceClient:
         return {
             "status": "ok",
             "version": "test",
-            "loaded_model": "acestep-v15-turbo",
+            "loaded_model": "acestep-v15-xl-turbo",
             "loaded_lm_model": "acestep-5Hz-lm-4B",
         }
 
@@ -235,7 +235,7 @@ def test_library_summarizes_without_hashing(tmp_path: Path) -> None:
 
 class RecordingAceClient(FakeAceClient):
     payloads: list[dict[str, Any]] = []
-    loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
+    loaded = ("acestep-v15-xl-turbo", "acestep-5Hz-lm-4B")
 
     def health(self) -> dict[str, Any]:
         return dict(super().health(), loaded_model=self.loaded[0], loaded_lm_model=self.loaded[1])
@@ -248,7 +248,7 @@ class RecordingAceClient(FakeAceClient):
 def test_generation_refuses_a_model_the_server_did_not_load(tmp_path: Path) -> None:
     make_project(tmp_path)
     RecordingAceClient.payloads = []
-    RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-0.6B")
+    RecordingAceClient.loaded = ("acestep-v15-xl-turbo", "acestep-5Hz-lm-0.6B")
     with pytest.raises(Exception, match="acestep-5Hz-lm-4B"):
         generate_candidates(tmp_path, seeds=[1], lm_model="acestep-5Hz-lm-4B", client_factory=RecordingAceClient, engine="ace-step")
     project = ProjectStore(tmp_path).load()
@@ -261,7 +261,7 @@ def test_sampling_follows_the_dit_and_language_follows_the_lyrics(tmp_path: Path
     RecordingAceClient.payloads = []
     RecordingAceClient.loaded = ("acestep-v15-sft", "acestep-5Hz-lm-4B")
     generate_candidates(tmp_path, seeds=[1], model="acestep-v15-sft", client_factory=RecordingAceClient, engine="ace-step")
-    RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
+    RecordingAceClient.loaded = ("acestep-v15-xl-turbo", "acestep-5Hz-lm-4B")
     generate_candidates(tmp_path, seeds=[2], lyrics="[Verse]\nShine on me\n[Chorus]\nForever in your glow",
                         client_factory=RecordingAceClient, engine="ace-step")
     generate_candidates(tmp_path, seeds=[3], lyrics="[Verse]\n창밖에 번진 햇살\n[Chorus]\nShine on me, 내 곁에",
@@ -275,7 +275,7 @@ def test_sampling_follows_the_dit_and_language_follows_the_lyrics(tmp_path: Path
 def test_lm_temperature_is_frozen_for_text2music_only(tmp_path: Path) -> None:
     make_project(tmp_path)
     RecordingAceClient.payloads = []
-    RecordingAceClient.loaded = ("acestep-v15-turbo", "acestep-5Hz-lm-4B")
+    RecordingAceClient.loaded = ("acestep-v15-xl-turbo", "acestep-5Hz-lm-4B")
     result = generate_candidates(tmp_path, seeds=[1], lm_temperature=0.5, client_factory=RecordingAceClient, engine="ace-step")
     repaint_candidate(tmp_path, start_seconds=1, end_seconds=2, seed=5,
                       candidate_id=result["candidateIds"][0], client_factory=RecordingAceClient, engine="ace-step")
