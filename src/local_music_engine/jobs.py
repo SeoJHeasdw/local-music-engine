@@ -109,7 +109,7 @@ def recover_jobs(store: ProjectStore, project: dict[str, Any]) -> list[str]:
 
 def recover_project(project_root: str) -> dict[str, Any]:
     store = ProjectStore(project_root)
-    with store.generation_lock(), store.transaction() as project:
+    with store.generation_lock(lane=False), store.transaction() as project:
         recovered = recover_jobs(store, project)
     return {"interruptedJobIds": recovered}
 

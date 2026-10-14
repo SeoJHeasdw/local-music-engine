@@ -22,7 +22,7 @@ import type {
 } from "../shared.ts";
 import { runCli } from "./cli.ts";
 import { EngineManager } from "./engine.ts";
-import { aceGenerationArgs, aceReady, aceRepaintArgs, requirePlanAction } from "./generation-arguments.ts";
+import { aceGenerationArgs, aceRepaintArgs, requirePlanAction } from "./generation-arguments.ts";
 import { requireLoopbackUrl } from "./files.ts";
 import { engineRoot } from "./paths.ts";
 import { currentSettings, loadAppState, loadSettings, saveSettings, updateAppState } from "./settings.ts";
@@ -59,10 +59,10 @@ export class Controller {
       () => currentSettings().engineBaseUrl,
       (engine) => this.send({ type: "engine", engine }),
       () => currentSettings().musicModel,
-      () => unloadAssistantModel(),
     );
     this.tasks = new TaskRunner({
       emit: (task) => this.send({ type: "task", task }),
+      engineOff: () => ["offline", "checking"].includes(this.engine.snapshot().state),
       versionsChanged: (folder) => {
         if (folder === this.session.current()?.folder) void this.pushSong();
       },
@@ -116,15 +116,12 @@ export class Controller {
     return this.startingGeneration || this.tasks.busyFolder() !== null;
   }
 
+  // The run brings ACE up itself (see ace_runtime.py); refuse only what it cannot fix.
   private async requireEngine(): Promise<void> {
-    if (this.engine.handoff.active()) throw new Error("AI 도우미가 답하는 중이라 음악 엔진을 잠시 꺼 뒀어요. 끝나면 다시 켜져요.");
-    if (aceReady(this.engine.snapshot()) && (this.engine.isReady() || this.engine.recentlyHealthy())) return;
+    if (this.engine.handoff.active()) throw new Error("AI 도우미가 답하는 중이에요. 답을 받은 뒤 다시 시도하세요.");
     const status = await this.engine.check();
-    if (aceReady(status)) return;
-    if (status.state === "starting") throw new Error("음악 엔진을 켜는 중이에요. 준비되면 다시 시도하세요.");
-    // A running engine with another model reports why; "off" would hide that.
+    // A running engine with another model reports why.
     if (status.state === "failed" || status.state === "missing") throw new Error(status.detail);
-    throw new Error("음악 엔진이 꺼져 있어요. 왼쪽 아래에서 엔진을 켜세요.");
   }
 
   // A local assistant LLM never shares memory with the music engine (see handoff.ts).
@@ -133,7 +130,7 @@ export class Controller {
     if (this.generationBusy()) {
       throw new Error("곡을 만드는 동안에는 AI 도우미를 쓸 수 없어요. 음악 엔진과 도우미 모델을 함께 올리면 메모리가 부족해요. 끝난 뒤 다시 시도하세요.");
     }
-    return this.engine.handoff.withEngineStopped(call);
+    return this.engine.handoff.withEngineOff(call);
   }
 
   private assistantArgs(): string[] {
@@ -156,10 +153,15 @@ export class Controller {
     const state = await loadSong(spec.folder);
     if (context) this.session.assert(context);
     const song = state.song;
-    this.tasks.start({
-      ...spec,
-      songId: songIdFor(spec.folder),
-      songTitle: song?.title ?? path.basename(spec.folder),
+    // The run loads ACE's models, so the assistant's model leaves memory first, under the same lock.
+    await this.engine.handoff.withEngineStarting(async () => {
+      await unloadAssistantModel();
+      if (context) this.session.assert(context);
+      this.tasks.start({
+        ...spec,
+        songId: songIdFor(spec.folder),
+        songTitle: song?.title ?? path.basename(spec.folder),
+      });
     });
     void this.pushSongs();
     return state;
@@ -513,7 +515,7 @@ export class Controller {
           await access(file);
           shell.showItemInFolder(file);
         } catch {
-          throw new Error("아직 엔진 기록이 없어요. 앱에서 엔진을 켜면 기록이 남아요.");
+          throw new Error("아직 엔진 기록이 없어요. 곡을 만들면 엔진을 켜면서 기록이 남아요.");
         }
       }
     });
@@ -522,21 +524,19 @@ export class Controller {
       const before = currentSettings();
       const allowed: Partial<Settings> = {};
       for (const key of [
-        "engineBaseUrl", "engineAutoStart", "musicModel", "defaultVersions",
+        "engineBaseUrl", "musicModel", "defaultVersions",
         "defaultDurationSeconds", "feedbackStrength", "assistant",
       ] as const) {
         if (partial && key in partial) (allowed as Record<string, unknown>)[key] = partial[key];
       }
-      let next: Settings;
       if (allowed.musicModel !== undefined && allowed.musicModel !== before.musicModel && (this.tasks.snapshot() || this.startingGeneration)) {
         throw new Error("곡 만들기가 끝난 뒤 음악 모델을 바꿔 주세요.");
       }
-      if (allowed.engineBaseUrl !== undefined && requireLoopbackUrl(allowed.engineBaseUrl, "음악 엔진") !== before.engineBaseUrl) {
-        if (this.tasks.snapshot() || this.startingGeneration) throw new Error("곡 만들기가 끝나고 음악 엔진을 끈 뒤 주소를 바꿔 주세요.");
-        next = await this.engine.withConnectionChange(allowed.engineBaseUrl, () => saveSettings(allowed));
-      } else {
-        next = await saveSettings(allowed);
+      if (allowed.engineBaseUrl !== undefined && requireLoopbackUrl(allowed.engineBaseUrl, "음악 엔진") !== before.engineBaseUrl
+        && (this.tasks.snapshot() || this.startingGeneration)) {
+        throw new Error("곡 만들기가 끝난 뒤 음악 엔진 주소를 바꿔 주세요.");
       }
+      const next = await saveSettings(allowed);
       if (next.engineBaseUrl !== before.engineBaseUrl || next.musicModel !== before.musicModel) {
         void this.engine.check();
       }
@@ -561,11 +561,6 @@ export class Controller {
       const result = await runCli<{ models: string[] }>(["assistant", "models", "--assistant", kind, "--assistant-url", url]);
       return result.models;
     });
-    handle("engine-start", () => this.engine.start());
-    handle("engine-stop", () => {
-      if (this.generationBusy()) throw new Error("곡을 준비하거나 만드는 중에는 엔진을 끌 수 없어요. 작업 화면의 ‘취소하기’를 먼저 눌러 주세요.");
-      return this.engine.stop();
-    });
     handle("engine-check", () => this.engine.check());
   }
 }
@@ -581,7 +576,7 @@ function requireVersionId(value: unknown): string {
 }
 
 // Ollama keeps a model resident for minutes after its last answer (the engine's own
-// calls pass keep_alive 0). Unload the assistant model before the engine loads its own.
+// calls pass keep_alive 0). Unload the assistant model before a run loads the engine's.
 async function unloadAssistantModel(): Promise<void> {
   await unloadAssistant(currentSettings().assistant);
 }

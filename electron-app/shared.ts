@@ -391,8 +391,6 @@ export type EngineState =
   | "offline"
   | "starting"
   | "ready"
-  | "external"
-  | "stopping"
   | "failed"
   | "missing";
 
@@ -400,12 +398,10 @@ export type EngineStatus = {
   state: EngineState;
   detail: string;
   baseUrl: string;
-  owned: boolean;
   engine: "ace-step";
   models: { music: string | null; lm: string | null };
   capabilities: EngineCapabilities;
   maxDurationSeconds: number;
-  log: string[];
   since: number;
 };
 
@@ -423,7 +419,6 @@ export type Settings = {
   engine: "ace-step";
   projectsDir: string;
   engineBaseUrl: string;
-  engineAutoStart: boolean;
   musicModel: AceDitModel;
   defaultVersions: number;
   defaultDurationSeconds: number;
@@ -545,8 +540,6 @@ export type MusicAppApi = {
   saveSettings(partial: Partial<Settings>): Promise<Settings>;
   pickProjectsDir(): Promise<Settings>;
   listAssistantModels(kind: AssistantKind, baseUrl: string): Promise<string[]>;
-  startEngine(): Promise<EngineStatus>;
-  stopEngine(): Promise<EngineStatus>;
   checkEngine(): Promise<EngineStatus>;
   onEvent(listener: (event: MusicEvent) => void): () => void;
 };

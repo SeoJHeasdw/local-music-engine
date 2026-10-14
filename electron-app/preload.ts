@@ -28,8 +28,6 @@ const api: MusicAppApi = {
   saveSettings: (partial) => invoke("save-settings", partial),
   pickProjectsDir: () => invoke("pick-projects-dir"),
   listAssistantModels: (kind, baseUrl) => invoke("assistant-models", kind, baseUrl),
-  startEngine: () => invoke("engine-start"),
-  stopEngine: () => invoke("engine-stop"),
   checkEngine: () => invoke("engine-check"),
   onEvent: (listener) => {
     const handler = (_event: unknown, payload: MusicEvent) => listener(payload);

@@ -1,5 +1,5 @@
 import { ACE_DIT_MODELS, type AceDitModel, type AssistantKind, type Settings } from "../../shared.ts";
-import { api, engineReady, refreshSongs } from "../actions.ts";
+import { api, refreshSongs } from "../actions.ts";
 import { byId, h, icon, mount } from "../dom.ts";
 import { elapsed, lengthLabel, modelLabel } from "../format.ts";
 import { get, set } from "../store.ts";
@@ -59,43 +59,32 @@ export function renderSettings(): void {
 
   const engineState: Record<string, string> = {
     checking: "확인 중",
-    offline: "꺼져 있어요",
+    offline: "쉬고 있어요",
     starting: "켜는 중",
-    ready: "켜져 있어요 · 앱이 켠 엔진",
-    external: "켜져 있어요 · 앱 밖에서 켠 엔진",
-    stopping: "끄는 중",
-    failed: "멈췄어요",
+    ready: "켜져 있어요",
+    failed: "확인이 필요해요",
     missing: "설치되지 않았어요",
   };
 
   const engineCard = h(
     "div",
-    { class: `engine-status tone-${engineReady() ? "on" : engine.state === "starting" ? "busy" : "off"}` },
+    { class: `engine-status tone-${engine.state === "ready" ? "on" : engine.state === "starting" ? "busy" : "off"}` },
     h("span", { class: "engine-dot", "aria-hidden": "true" }),
     h(
       "div",
       { class: "engine-status-text" },
       h("b", null, engineState[engine.state] ?? engine.state),
       h("p", null, engine.state === "starting" ? `${engine.detail} · ${elapsed(engine.since)}` : engine.detail),
-      engineReady() && h("p", null, `${modelLabel(engine.models.music)} · 최대 5분`),
+      engine.state === "ready" && h("p", null, `${modelLabel(engine.models.music)} · 최대 5분`),
     ),
     h(
       "div",
       { class: "engine-status-actions" },
-      ["offline", "failed", "missing"].includes(engine.state) &&
-        h("button", { type: "button", class: "button primary small", disabled: engine.state === "missing", onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "켜는 중", async () => set({ engine: await api.startEngine() })) }, icon("power", 14), engine.owned && engine.state === "failed" ? "다시 켜기" : "켜기"),
-      engine.owned &&
-        ["ready", "starting", "failed"].includes(engine.state) &&
-        h("button", { type: "button", class: "button secondary small", disabled: Boolean(state.task), "data-tip": state.task ? "만드는 중에는 끌 수 없어요" : "엔진을 끄면 메모리를 돌려받아요", onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "끄는 중", async () => set({ engine: await api.stopEngine() })) }, "끄기"),
       h("button", { type: "button", class: "button ghost small", onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "확인 중", async () => set({ engine: await api.checkEngine() })) }, icon("refresh", 14), "다시 확인"),
     ),
   );
 
-  const autoStart = h("input", { type: "checkbox", checked: settings.engineAutoStart, onChange: (event: Event) => void save({ engineAutoStart: (event.target as HTMLInputElement).checked }) });
   const engineUrl = h("input", { class: "input mono-input", value: settings.engineBaseUrl, onChange: (event: Event) => void save({ engineBaseUrl: (event.target as HTMLInputElement).value }) });
-  const log = engine.log.length
-    ? h("details", { class: "disclosure" }, h("summary", null, "엔진 기록 최근 줄"), h("pre", { class: "log-view" }, engine.log.slice(-40).join("\n")))
-    : null;
 
   // ---- assistant ----
   const kinds: Array<{ kind: AssistantKind; title: string; body: string }> = [
@@ -148,12 +137,10 @@ export function renderSettings(): void {
       { class: "settings" },
       section(
         "음악 엔진",
-        "ACE-Step이 이 Mac 안에서 곡을 만들어요. 엔진이 켜져 있는 동안 모델이 메모리를 사용해요(XL turbo 약 26GB).",
+        "ACE-Step이 이 Mac 안에서 곡을 만들어요. 곡을 만들 때만 엔진을 켜서 모델을 올리고(약 1분), 다 만들면 바로 꺼서 메모리를 돌려줘요(XL turbo 약 26GB).",
         engineCard,
-        row("앱을 열 때 엔진 켜기", "끄면 곡을 만들 때 직접 켜야 해요.", h("label", { class: "switch" }, autoStart, h("span", null, settings.engineAutoStart ? "켬" : "끔"))),
-        row("엔진 주소", "음악 엔진과 AI 도우미를 끈 뒤 바꿀 수 있어요. 이 Mac 안의 주소만 쓸 수 있어요.", engineUrl),
+        row("엔진 주소", "곡을 만드는 중에는 바꿀 수 없어요. 이 Mac 안의 주소만 쓸 수 있어요.", engineUrl),
         row("엔진 기록", "엔진이 멈췄을 때 원인을 찾을 수 있어요.", h("button", { type: "button", class: "button ghost small", onClick: () => void api.reveal({ kind: "engine-log" }).catch((error) => toast(errorText(error), { tone: "error" })) }, icon("folder", 14), "Finder에서 보기")),
-        log,
       ),
       section(
         "AI 도우미",

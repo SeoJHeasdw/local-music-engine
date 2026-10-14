@@ -9,12 +9,13 @@ import os
 import tempfile
 import uuid
 import fcntl
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .lane import shared_lane
 from .models import validate_job_transition
 from .production_rules import draft_guidance, guided_prompt, normalize_selection, normalize_time_signature
 from .lyrics import is_instrumental_lyrics
@@ -203,15 +204,17 @@ class ProjectStore:
             self.save(project)
 
     @contextmanager
-    def generation_lock(self):
+    def generation_lock(self, *, lane: bool = True):
         """One generator per project, independent of short listening/edit transactions.
 
         flock ownership is released by the OS even after SIGKILL. Do not unlink the
         file: replacing its inode would allow a second owner to bypass the lock.
+        Inference also holds the machine's work lane first, so it never overlaps a
+        job of the service; ``lane=False`` is for manifest-only recovery.
         """
 
         self.load()  # A typo must not create an empty project directory.
-        with (self.root / ".generation.lock").open("a+b") as handle:
+        with shared_lane() if lane else nullcontext(), (self.root / ".generation.lock").open("a+b") as handle:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as error:

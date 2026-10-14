@@ -25,5 +25,5 @@ export async function unloadAssistant(assistant: Assistant, request: typeof fetc
   });
   if (!response.ok) throw new Error(`AI 도우미를 메모리에서 내리지 못했어요 (HTTP ${response.status}).`);
   const body = await response.json() as { done?: boolean };
-  if (body.done !== true || await resident()) throw new Error("AI 도우미가 아직 메모리에 있어요. 도우미를 내린 뒤 음악 엔진을 다시 켜세요.");
+  if (body.done !== true || await resident()) throw new Error("AI 도우미가 아직 메모리에 있어요. 도우미를 내린 뒤 다시 만들어 주세요.");
 }

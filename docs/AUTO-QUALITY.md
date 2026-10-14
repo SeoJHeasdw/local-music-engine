@@ -332,6 +332,8 @@ CLI가 사라지면 250 ms 간격의 watchdog이 worker와 bootstrap 자식 프�
 uv run python scripts/smoke_rhythm_quality.py --output-dir .runtime/rhythm-smoke-new
 ```
 
+손으로 켠 서버는 저절로 꺼지지 않으니 검사가 끝나면 끈다.
+
 ## 자동 검사가 하지 않는 것
 
 멜로디·화성·실제 박자표·마디 강세·가수 음색의 일관성, 감정 표현, 자연스러운 발음, 구간 수정 경계의 음악적

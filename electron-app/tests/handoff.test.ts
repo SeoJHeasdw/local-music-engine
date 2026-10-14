@@ -1,70 +1,65 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MemoryHandoff, type Ownership } from "../main/handoff.ts";
+import { MemoryHandoff } from "../main/handoff.ts";
 
-function engine(ownership: Ownership) {
+// running: how many more checks find a music engine holding memory (Infinity: it never leaves).
+function engine(running: number) {
   const events: string[] = [];
   return {
     events,
-    ownership: async () => ownership,
-    stop: async () => { events.push("stop"); ownership = "off"; },
-    start: async () => { events.push("start"); ownership = "owned"; },
+    running: async () => {
+      events.push("check");
+      return running-- > 0;
+    },
+    pause: async () => void events.push("wait"),
   };
 }
 
-test("an app-owned engine is stopped for the assistant call and restarted after", async () => {
-  const fake = engine("owned");
+test("with no music engine running the assistant is called at once", async () => {
+  const fake = engine(0);
   const handoff = new MemoryHandoff(fake);
-  const answer = await handoff.withEngineStopped(async () => {
+  const answer = await handoff.withEngineOff(async () => {
     fake.events.push("assistant");
     assert.equal(handoff.active(), true);
     return "draft";
   });
   assert.equal(answer, "draft");
-  assert.deepEqual(fake.events, ["stop", "assistant", "start"]);
+  assert.deepEqual(fake.events, ["check", "assistant"]);
   assert.equal(handoff.active(), false);
 });
 
-test("the engine comes back even when the assistant call fails", async () => {
-  const fake = engine("owned");
-  await assert.rejects(new MemoryHandoff(fake).withEngineStopped(async () => {
-    throw new Error("ollama down");
-  }), /ollama down/);
-  assert.deepEqual(fake.events, ["stop", "start"]);
+test("the assistant waits for a server whose run just ended to stop itself", async () => {
+  const fake = engine(2);
+  await new MemoryHandoff(fake).withEngineOff(async () => void fake.events.push("assistant"));
+  assert.deepEqual(fake.events, ["check", "wait", "check", "wait", "check", "assistant"]);
 });
 
-test("an engine the app does not own is never stopped and the assistant is not called", async () => {
-  const fake = engine("external");
+test("a music engine that keeps running is never shared with the assistant", async () => {
+  const fake = engine(Infinity);
   let called = false;
-  await assert.rejects(new MemoryHandoff(fake).withEngineStopped(async () => {
+  await assert.rejects(new MemoryHandoff(fake).withEngineOff(async () => {
     called = true;
-  }), /앱 밖에서 켠 음악 엔진/);
+  }), /음악 엔진이 아직 메모리를 쓰고 있어서/);
   assert.equal(called, false);
-  assert.deepEqual(fake.events, []);
 });
 
-test("with the engine off nothing is stopped or started", async () => {
-  const fake = engine("off");
-  await new MemoryHandoff(fake).withEngineStopped(async () => void fake.events.push("assistant"));
-  assert.deepEqual(fake.events, ["assistant"]);
-});
-
-test("concurrent assistant calls queue instead of overlapping, and start waits for them", async () => {
-  const fake = engine("off");
+test("concurrent assistant calls queue instead of overlapping, and a generation start waits for them", async () => {
+  const fake = engine(0);
   const handoff = new MemoryHandoff(fake);
+  const order: string[] = [];
   let finishFirst!: () => void;
-  const first = handoff.withEngineStopped(() => new Promise<void>((resolve) => {
-    fake.events.push("first:begin");
+  const first = handoff.withEngineOff(() => new Promise<void>((resolve) => {
+    order.push("first:begin");
     finishFirst = () => {
-      fake.events.push("first:end");
+      order.push("first:end");
       resolve();
     };
   }));
-  const second = handoff.withEngineStopped(async () => void fake.events.push("second"));
-  const engineStart = handoff.settled().then(() => void fake.events.push("engine may start"));
+  const second = handoff.withEngineOff(async () => void order.push("second"));
+  const generation = handoff.withEngineStarting(async () => void order.push("generation starts"));
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(fake.events, ["first:begin"]);
+  assert.deepEqual(order, ["first:begin"]);
   finishFirst();
-  await Promise.all([first, second, engineStart]);
-  assert.deepEqual(fake.events, ["first:begin", "first:end", "second", "engine may start"]);
+  await Promise.all([first, second, generation]);
+  assert.deepEqual(order, ["first:begin", "first:end", "second", "generation starts"]);
 });

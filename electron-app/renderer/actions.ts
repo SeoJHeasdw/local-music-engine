@@ -106,18 +106,11 @@ export async function refreshSongs(): Promise<void> {
   }
 }
 
-export async function startEngine(): Promise<void> {
-  try {
-    set({ engine: await api.startEngine() });
-  } catch (error) {
-    toast(errorText(error), { tone: "error" });
-  }
-}
-
-export function engineReady(): boolean {
-  const engine = get().engine;
-  return engine.engine === "ace-step" && engine.capabilities.text2music
-    && (engine.state === "ready" || engine.state === "external");
+// A run brings ACE up itself, so a song can be made while the engine rests. Only a
+// missing install or a running engine that cannot serve the request stops it; its
+// detail says why.
+export function engineUsable(): boolean {
+  return !["missing", "failed"].includes(get().engine.state);
 }
 
 export function songBusy(): boolean {

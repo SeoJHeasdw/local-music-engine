@@ -44,6 +44,10 @@ inherits `GenerationParams.dcw_enabled=True`. Upstream found that this distorts
 non-turbo checkpoints (ACE-Step issue #1259, fixed in #1282 on 2026-08-28 by defaulting
 DCW off unless the loaded model's `config.is_turbo`), and the Gradio UI already did so.
 The same rule applies here; turbo keeps DCW and its output is unchanged.
+
+6. Idle shutdown. A server a generation run started (`MUSIC_ENGINE_ACE_STOP_WHEN_IDLE=1`,
+see `local_music_engine/ace_runtime.py`) stops itself once nothing holds the machine's
+work lane, so an idle engine holds no model memory. A server started by hand keeps running.
 """
 
 from __future__ import annotations
@@ -237,6 +241,7 @@ def main() -> None:
     # This wrapper shares only the engine's stdlib auth/boundary code, not its venv.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     from local_music_engine.ace_auth import ensure_api_key
+    from local_music_engine.ace_runtime import IDLE_ENV, stop_when_idle
     from local_music_engine.ace_security import MusicApiGuard
 
     options = argparse.ArgumentParser(add_help=False)
@@ -247,6 +252,8 @@ def main() -> None:
         os.environ["MUSIC_ENGINE_ACE_API_KEY"] = supplied.api_key
     api_key = ensure_api_key()
     os.environ["ACESTEP_API_KEY"] = api_key
+    if os.environ.get(IDLE_ENV) == "1":
+        stop_when_idle()
     mlx_dit_dtype(0)  # reject an invalid setting before any model loads
     seed_lm_sampler_from_request()
     convert_decoder_on_load()

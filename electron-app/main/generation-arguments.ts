@@ -1,4 +1,4 @@
-import type { EngineStatus, Plan, Settings } from "../shared.ts";
+import type { Plan, Settings } from "../shared.ts";
 import { ACE_LM_MODEL } from "./settings-schema.ts";
 
 export function aceGenerationArgs(folder: string, seeds: string, settings: Settings): string[] {
@@ -21,9 +21,4 @@ export function requirePlanAction(plan: Pick<Plan, "action" | "range">): void {
   if (plan.action === "repaint" && range && Number.isFinite(range.startSeconds) && Number.isFinite(range.endSeconds)
     && range.startSeconds >= 0 && range.endSeconds > range.startSeconds) return;
   throw new Error(plan.action === "repaint" ? "고칠 구간을 파형에서 골라 주세요." : "알 수 없는 수정 방식이에요.");
-}
-
-export function aceReady(status: EngineStatus): boolean {
-  return status.engine === "ace-step" && status.capabilities.text2music
-    && (status.state === "ready" || status.state === "external");
 }

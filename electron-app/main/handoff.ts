@@ -1,13 +1,15 @@
 // Music generation and a local assistant can exceed the available memory together.
-// Serialize their residency and never stop an engine launched outside this app.
-
-export type Ownership = "owned" | "external" | "off";
+// ACE runs only while a song is being made, so an assistant call waits for it to be gone
+// and a generation starts only after the assistant's model is out of memory.
 
 export type HandoffEngine = {
-  ownership(): Promise<Ownership>;
-  stop(): Promise<unknown>;
-  start(): Promise<unknown>;
+  running(): Promise<boolean>;
+  pause(milliseconds: number): Promise<void>;
 };
+
+// A server whose run just ended stops itself within a few seconds.
+const ENGINE_EXIT_WAIT_MS = 10_000;
+const ENGINE_EXIT_POLL_MS = 1000;
 
 export class MemoryHandoff {
   private tail: Promise<void> = Promise.resolve();
@@ -19,7 +21,7 @@ export class MemoryHandoff {
     return this.assistantCalls > 0;
   }
 
-  // A point-in-time wait is useful for observers, but is not a lock for engine startup.
+  // A point-in-time wait is useful for observers, but is not a lock for a generation start.
   async settled(): Promise<void> {
     let pending: Promise<void>;
     do {
@@ -40,40 +42,29 @@ export class MemoryHandoff {
     }
   }
 
-  // Keep the same lock from checking an existing server through unloading the assistant,
-  // preparing files and spawning the music engine. An assistant cannot claim memory between these steps.
+  // Unloading the assistant and starting the run that loads ACE share one lock, so an
+  // assistant cannot claim memory between these steps.
   withEngineStarting<T>(start: () => Promise<T>): Promise<T> {
     return this.exclusive(start);
   }
 
-  // Run an assistant call with the app-owned engine stopped, then bring the engine back.
-  async withEngineStopped<T>(use: () => Promise<T>): Promise<T> {
+  // Run an assistant call only while no music engine holds memory.
+  async withEngineOff<T>(use: () => Promise<T>): Promise<T> {
     this.assistantCalls += 1;
-    let restart = false;
     try {
       return await this.exclusive(async () => {
-        const ownership = await this.engine.ownership();
-        if (ownership === "external") {
-          throw new Error(
-            "앱 밖에서 켠 음악 엔진이 메모리를 쓰고 있어서 AI 도우미를 부르지 않았어요. 그 엔진을 끄거나 설정에서 규칙 도우미를 고르세요.",
-          );
-        }
-        if (ownership === "owned") {
-          restart = true;
-          await this.engine.stop();
-        }
-        // A responding external server may have appeared while our process stopped,
-        // or the configured connection may have changed during an earlier app version.
-        // Recheck immediately before allowing the assistant to claim memory.
-        if (await this.engine.ownership() !== "off") {
-          throw new Error("음악 엔진이 아직 메모리를 쓰고 있어서 AI 도우미를 부르지 않았어요. 엔진을 끈 뒤 다시 시도하세요.");
+        for (let waited = 0; await this.engine.running(); waited += ENGINE_EXIT_POLL_MS) {
+          if (waited >= ENGINE_EXIT_WAIT_MS) {
+            throw new Error(
+              "음악 엔진이 아직 메모리를 쓰고 있어서 AI 도우미를 부르지 않았어요. 터미널에서 곡을 만드는 중이면 끝난 뒤, 터미널에서 직접 켠 엔진이면 그 엔진을 끈 뒤 다시 시도하세요.",
+            );
+          }
+          await this.engine.pause(ENGINE_EXIT_POLL_MS);
         }
         return use();
       });
     } finally {
       this.assistantCalls -= 1;
-      // The shared lock is released before restart; start must acquire it again.
-      if (restart) void this.engine.start().catch(() => undefined);
     }
   }
 }

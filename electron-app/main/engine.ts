@@ -1,13 +1,9 @@
-import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
-import { createWriteStream } from "node:fs";
-import { access, mkdir } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import path from "node:path";
-import { createRequire } from "node:module";
 import type { EngineStatus } from "../shared.ts";
-import { aceAuthHeaders, ensureAceApiKey } from "./ace-auth.ts";
-import { requireLoopbackUrl } from "./files.ts";
-import { MemoryHandoff, type Ownership } from "./handoff.ts";
-import { acePython, aceServer, aceStartScript, engineRoot } from "./paths.ts";
+import { aceAuthHeaders } from "./ace-auth.ts";
+import { MemoryHandoff } from "./handoff.ts";
+import { acePython, aceServer, engineRoot } from "./paths.ts";
 import { ACE_LM_MODEL, ACE_MAX_DURATION } from "./settings-schema.ts";
 
 type Health = {
@@ -23,101 +19,54 @@ type Health = {
 // ACE serves text-to-music and repaint once its DiT and LM are loaded. Cover stays a
 // CLI feature; the app does not offer it.
 const ACE_SERVICE = "ACE-Step API";
+const OFF_DETAIL = "곡을 만들 때 켜고, 다 만들면 꺼서 메모리를 돌려줘요.";
 
-type LogSink = { write(chunk: string): unknown; end(): unknown };
+// The generation run writes the log of the server it starts (src/local_music_engine/ace_runtime.py).
+export const aceLogFile = path.join(engineRoot, ".runtime", "logs", "ace-server.log");
+
 export type EngineDependencies = {
   fetch: typeof fetch;
   installed(): Promise<unknown>;
-  logFile(): string;
-  openLog(file: string): Promise<LogSink>;
-  spawn(command: string, args: string[], options: SpawnOptions): ChildProcess;
-  kill(child: ChildProcess, signal: NodeJS.Signals): void;
-  pause(milliseconds: number): Promise<void>;
-  ensureApiKey(): Promise<void>;
   authHeaders(): Promise<Record<string, string>>;
+  pause(milliseconds: number): Promise<void>;
 };
 
 const defaultDependencies: EngineDependencies = {
   fetch: (...args) => fetch(...args),
   installed: async () => { await access(acePython); await access(aceServer); },
-  logFile: () => {
-    // Lazy loading lets the manager run with injected OS dependencies in Node tests.
-    const { app } = createRequire(import.meta.url)("electron") as typeof import("electron");
-    return path.join(app.getPath("userData"), "logs", "ace-server.log");
-  },
-  openLog: async (file) => {
-    await mkdir(path.dirname(file), { recursive: true });
-    return createWriteStream(file, { flags: "a" });
-  },
-  spawn,
-  kill: killGroup,
-  pause: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  ensureApiKey: ensureAceApiKey,
   authHeaders: aceAuthHeaders,
+  pause: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 };
 
-export function aceLaunchAddress(baseUrl: string): { host: string; port: string } {
-  const url = new URL(requireLoopbackUrl(baseUrl, "음악 엔진"));
-  if (url.pathname !== "/") throw new Error("앱에서 켤 음악 엔진 주소에는 경로를 넣을 수 없어요.");
-  return { host: url.hostname.replace(/^\[|\]$/g, ""), port: url.port || "80" };
-}
-
-// The ACE server may already be running (started from a terminal). A responding server
-// is used as-is and never stopped by the app; only a server this app started is owned.
+// ACE runs only while a song is being made: the run (the CLI this app starts) brings it up
+// and the server stops itself when the run ends. The app watches it and never owns it.
 export class EngineManager {
-  private child: ChildProcess | null = null;
-  private ownedLaunchUrl: string | null = null;
-  private stopping = false;
-  private log: string[] = [];
-  private logStream: LogSink | null = null;
   private monitor: NodeJS.Timeout | null = null;
   private status: EngineStatus;
   private failures = 0;
-  private lastHealthyAt = 0;
-  private startInFlight: Promise<EngineStatus> | null = null;
-  private stopInFlight: Promise<EngineStatus> | null = null;
   private dependencies: EngineDependencies;
-  private lifecycle = 0;
-  private wantsEngine = false;
-  private disposed = false;
-  // Assistant LLM calls run with this engine stopped; see handoff.ts.
+  // Assistant LLM calls run only while no music engine holds memory; see handoff.ts.
   readonly handoff = new MemoryHandoff({
-    ownership: () => this.ownership(),
-    stop: async () => {
-      await this.stopOwned();
-      await this.check();
-    },
-    start: () => this.wantsEngine && !this.disposed ? this.start() : Promise.resolve(this.snapshot()),
+    running: async () => !["offline", "missing"].includes((await this.check()).state),
+    pause: (milliseconds) => this.dependencies.pause(milliseconds),
   });
 
   constructor(
     private baseUrl: () => string,
     private emit: (status: EngineStatus) => void,
     private model: () => string,
-    // Frees memory held by the assistant LLM before the engine loads its models.
-    private beforeStart: () => Promise<void> = async () => undefined,
     dependencies: Partial<EngineDependencies> = {},
   ) {
     this.dependencies = { ...defaultDependencies, ...dependencies };
-    this.status = this.make("checking", "엔진 상태를 확인하는 중", false);
+    this.status = this.make("checking", "엔진 상태를 확인하는 중");
   }
 
   snapshot(): EngineStatus {
-    return { ...this.status, log: [...this.log.slice(-60)] };
+    return { ...this.status };
   }
 
   logFile(): string {
-    return this.dependencies.logFile();
-  }
-
-  isReady(): boolean {
-    return this.status.state === "ready" || this.status.state === "external";
-  }
-
-  // Healthy within the last minute: let the engine CLI do its own health check instead
-  // of refusing a request because one poll was slow.
-  recentlyHealthy(): boolean {
-    return this.isReady() && Date.now() - this.lastHealthyAt < 60_000;
+    return aceLogFile;
   }
 
   private safeBaseUrl(): string {
@@ -128,17 +77,15 @@ export class EngineManager {
     }
   }
 
-  private make(state: EngineStatus["state"], detail: string, owned: boolean, health?: Health, displayUrl = this.safeBaseUrl()): EngineStatus {
+  private make(state: EngineStatus["state"], detail: string, health?: Health): EngineStatus {
     return {
       state,
       detail,
-      baseUrl: displayUrl,
-      owned,
+      baseUrl: this.safeBaseUrl(),
       engine: "ace-step",
       models: { music: health?.loaded_model ?? null, lm: health?.loaded_lm_model ?? null },
       capabilities: { text2music: health?.models_initialized === true, cover: false, repaint: health?.models_initialized === true, referenceAudio: false },
       maxDurationSeconds: ACE_MAX_DURATION,
-      log: [],
       since: this.status && this.status.state === state ? this.status.since : Date.now(),
     };
   }
@@ -148,7 +95,6 @@ export class EngineManager {
       next.state !== this.status.state ||
       next.detail !== this.status.detail ||
       next.baseUrl !== this.status.baseUrl ||
-      next.owned !== this.status.owned ||
       next.models.music !== this.status.models.music ||
       next.models.lm !== this.status.models.lm ||
       next.capabilities.text2music !== this.status.capabilities.text2music;
@@ -179,37 +125,25 @@ export class EngineManager {
     const health = await this.health(checkedUrl);
     // Ignore a poll for an address that changed while its response was in flight.
     if (checkedUrl !== this.baseUrl()) return this.snapshot();
-    const owned = Boolean(this.child && this.ownedLaunchUrl === checkedUrl);
     if (health) {
       this.failures = 0;
       const mismatch = this.modelMismatch(health);
-      if (mismatch) {
-        this.lastHealthyAt = 0;
-        this.set(this.make("failed", mismatch, owned, health));
-      } else if (health.status === "error" || health.stage === "failed") {
-        this.lastHealthyAt = 0;
-        const recovery = owned ? "다시 켜 보세요. 계속 실패하면 엔진 기록을 확인하세요."
-          : "앱 밖에서 켠 엔진을 끈 뒤 다시 켜 주세요.";
-        this.set(this.make("failed", `음악 모델을 불러오지 못했어요. ${recovery}`, owned, health));
-      } else if (!health.models_initialized) {
-        this.lastHealthyAt = 0;
-        this.set(this.make("starting", "모델을 메모리에 올리는 중", owned, health));
-      } else {
-        this.lastHealthyAt = Date.now();
-        this.set(this.make(owned ? "ready" : "external", owned ? "앱이 켠 ACE-Step" : "이미 켜져 있던 ACE-Step", owned, health));
-      }
-    } else if (this.child && !this.stopping) {
-      if (owned) this.set(this.make("starting", this.lastLogLine() || "엔진을 켜는 중", true));
-      else this.set(this.make("failed", "앱이 켠 엔진과 설정 주소가 달라요. 엔진을 끈 뒤 주소를 바꿔 주세요.", false));
-    } else if (this.handoff.active() && !this.child) {
-      this.set(this.make("offline", "AI 도우미가 답하는 동안 메모리를 비워 두려고 엔진을 잠시 껐어요. 끝나면 다시 켜요.", false));
-    } else if (this.status.state !== "failed" && this.status.state !== "missing") {
-      // A busy server can miss one poll; do not flap the whole UI on a single timeout.
-      this.failures += 1;
-      if (this.failures >= 3 || this.status.state === "checking") {
-        this.set(this.make("offline", "켜면 모델을 메모리에 올리는 동안 잠시 걸려요.", false));
-      }
+      if (mismatch) this.set(this.make("failed", mismatch, health));
+      else if (health.status === "error" || health.stage === "failed") {
+        this.set(this.make("failed", "음악 모델을 불러오지 못했어요. 엔진 기록을 확인하세요. 터미널에서 켠 엔진이면 그곳에서 끈 뒤 다시 만들어 보세요.", health));
+      } else if (!health.models_initialized) this.set(this.make("starting", "모델을 메모리에 올리는 중", health));
+      else this.set(this.make("ready", "곡을 만드는 동안 켜져 있어요. 다 만들면 저절로 꺼져요.", health));
+      return this.snapshot();
     }
+    try {
+      await this.dependencies.installed();
+    } catch {
+      this.set(this.make("missing", "ACE-Step이 아직 설치되지 않았어요. scripts/bootstrap_ace.sh로 설치해 주세요."));
+      return this.snapshot();
+    }
+    // A busy server can miss one poll; do not flap the whole UI on a single timeout.
+    this.failures += 1;
+    if (this.failures >= 3 || !["ready", "starting"].includes(this.status.state)) this.set(this.make("offline", OFF_DETAIL));
     return this.snapshot();
   }
 
@@ -218,208 +152,15 @@ export class EngineManager {
     this.monitor = setInterval(() => void this.check(), 8000);
   }
 
+  dispose(): void {
+    if (this.monitor) clearInterval(this.monitor);
+    this.monitor = null;
+  }
+
   private modelMismatch(health: Health): string | null {
     if (health.service !== ACE_SERVICE) return "다른 음악 엔진이 이 주소에 켜져 있어요. ACE-Step 주소를 확인하세요.";
     const loaded = [health.loaded_model, health.loaded_lm_model];
     if ((!loaded[0] || loaded[0] === this.model()) && (!loaded[1] || loaded[1] === ACE_LM_MODEL)) return null;
-    const restart = this.child ? "엔진을 껐다 켜면 설정한 모델로 바뀌어요." : "앱 밖에서 켠 엔진이라 그 엔진을 설정한 모델로 다시 켜야 해요.";
-    return `설정과 다른 모델이 켜져 있어요 (${loaded.filter(Boolean).join(" · ")}). ${restart}`;
-  }
-
-  private lastLogLine(): string {
-    for (let index = this.log.length - 1; index >= 0; index -= 1) {
-      const line = this.log[index].trim();
-      if (line) return line.length > 120 ? `${line.slice(0, 117)}…` : line;
-    }
-    return "";
-  }
-
-  private appendLog(chunk: string): void {
-    this.logStream?.write(chunk);
-    for (const line of chunk.split(/\r?\n|\r/)) {
-      if (line.trim()) this.log.push(line);
-    }
-    if (this.log.length > 400) this.log.splice(0, this.log.length - 400);
-  }
-
-  private async ownership(): Promise<Ownership> {
-    if (this.child && this.ownedLaunchUrl === this.baseUrl()) return "owned";
-    if (await this.health()) return "external";
-    return this.child ? "owned" : "off";
-  }
-
-  // Connection changes share the startup/assistant lock. In particular, an app-owned
-  // process at A must never become apparent ownership of an external process at B.
-  async withConnectionChange<T>(nextUrl: string, save: () => Promise<T>): Promise<T> {
-    const next = requireLoopbackUrl(nextUrl, "음악 엔진");
-    if (next === this.baseUrl()) return save();
-    const error = () => new Error("음악 엔진과 AI 도우미가 꺼진 뒤 주소를 바꿀 수 있어요. 앱 밖에서 켠 엔진은 그곳에서 먼저 꺼 주세요.");
-    if (this.startInFlight || this.stopInFlight || this.handoff.active()) throw error();
-    return this.handoff.withEngineStarting(async () => {
-      if (this.child || this.startInFlight || this.stopInFlight || this.handoff.active()) throw error();
-      if (await this.health()) throw error();
-      return save();
-    });
-  }
-
-  start(): Promise<EngineStatus> {
-    if (this.disposed) return Promise.resolve(this.snapshot());
-    this.wantsEngine = true;
-    if (!this.startInFlight) {
-      const lifecycle = this.lifecycle;
-      const pending = this.handoff.withEngineStarting(() => this.startOnce(lifecycle)).catch((error: unknown) => {
-        if (this.currentStartup(lifecycle)) {
-          this.set(this.make("failed", error instanceof Error ? error.message : "엔진을 켜지 못했어요.", false));
-        }
-        return this.snapshot();
-      }).finally(() => {
-        if (this.startInFlight === pending) this.startInFlight = null;
-      });
-      this.startInFlight = pending;
-    }
-    return this.startInFlight;
-  }
-
-  private currentStartup(lifecycle: number): boolean {
-    return !this.disposed && this.wantsEngine && lifecycle === this.lifecycle;
-  }
-
-  private async startOnce(lifecycle: number): Promise<EngineStatus> {
-    if (!this.currentStartup(lifecycle)) return this.snapshot();
-    // An explicit stop may still be waiting for the process to exit when Start arrives.
-    if (this.stopInFlight) await this.stopInFlight;
-    if (!this.currentStartup(lifecycle)) return this.snapshot();
-    const existing = await this.health();
-    if (!this.currentStartup(lifecycle)) return this.snapshot();
-    if (existing) {
-      if (this.child && this.ownedLaunchUrl === this.baseUrl()
-        && (existing.status === "error" || existing.stage === "failed")) {
-        await this.stopOwned();
-        if (!this.currentStartup(lifecycle)) return this.snapshot();
-      } else return this.check();
-    }
-    if (this.child) return this.snapshot();
-    try {
-      await this.dependencies.installed();
-    } catch {
-      if (this.currentStartup(lifecycle)) {
-        this.set(this.make("missing", "ACE-Step이 아직 설치되지 않았어요. scripts/bootstrap_ace.sh로 설치한 뒤 다시 켜 주세요.", false));
-      }
-      return this.snapshot();
-    }
-    if (!this.currentStartup(lifecycle)) return this.snapshot();
-    const launchUrl = this.baseUrl();
-    const { host, port } = aceLaunchAddress(launchUrl);
-    await this.beforeStart();
-    if (!this.currentStartup(lifecycle)) return this.snapshot();
-    await this.dependencies.ensureApiKey();
-    if (!this.currentStartup(lifecycle)) return this.snapshot();
-    const logStream = await this.dependencies.openLog(this.logFile());
-    if (!this.currentStartup(lifecycle)) {
-      logStream.end();
-      return this.snapshot();
-    }
-    this.logStream = logStream;
-    const model = this.model();
-    this.appendLog(`\n--- ${new Date().toISOString()} 앱에서 엔진 시작 (port ${port}, ${model}) ---\n`);
-    this.stopping = false;
-    const child = this.dependencies.spawn("/bin/bash", [aceStartScript], {
-      cwd: engineRoot,
-      env: {
-        ...process.env,
-        MUSIC_ENGINE_ACE_HOST: host,
-        MUSIC_ENGINE_ACE_PORT: port,
-        MUSIC_ENGINE_ACE_DIT_MODEL: model,
-        MUSIC_ENGINE_ACE_LM_MODEL: ACE_LM_MODEL,
-        PYTHONUNBUFFERED: "1",
-      },
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    this.child = child;
-    this.ownedLaunchUrl = launchUrl;
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => this.appendLog(chunk));
-    child.stderr?.on("data", (chunk: string) => this.appendLog(chunk));
-    child.once("exit", (code, signal) => {
-      if (this.child === child) {
-        this.child = null;
-        this.ownedLaunchUrl = null;
-      }
-      this.logStream?.end();
-      this.logStream = null;
-      if (this.stopping) {
-        this.set(this.make("offline", "켜면 모델을 메모리에 올리는 동안 잠시 걸려요.", false));
-      } else {
-        const reason = this.lastLogLine() || `종료 코드 ${signal ?? code}`;
-        this.set(this.make("failed", `엔진이 멈췄어요: ${reason}`, false));
-      }
-      this.stopping = false;
-    });
-    this.set(this.make("starting", "엔진을 켜는 중", true));
-    void this.waitUntilReady(child);
-    return this.snapshot();
-  }
-
-  private async waitUntilReady(child: ChildProcess): Promise<void> {
-    // The first start may need to download model weights, so there is no short deadline here;
-    // the log line shown in the UI tells the person what the server is doing.
-    while (this.child === child) {
-      const status = await this.check();
-      if (status.state === "ready" || status.state === "failed") return;
-      await this.dependencies.pause(1500);
-    }
-  }
-
-  stop(): Promise<EngineStatus> {
-    this.wantsEngine = false;
-    this.lifecycle += 1;
-    this.startInFlight = null;
-    if (!this.stopInFlight) {
-      const pending = this.stopOwned().finally(() => {
-        if (this.stopInFlight === pending) this.stopInFlight = null;
-      });
-      this.stopInFlight = pending;
-    }
-    return this.stopInFlight;
-  }
-
-  private async stopOwned(): Promise<EngineStatus> {
-    const child = this.child;
-    if (!child?.pid) return this.check();
-    this.stopping = true;
-    this.set(this.make("stopping", "앱이 켠 엔진을 끄는 중", true, undefined, this.ownedLaunchUrl ?? undefined));
-    this.dependencies.kill(child, "SIGTERM");
-    const timer = setTimeout(() => this.dependencies.kill(child, "SIGKILL"), 10_000);
-    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
-    clearTimeout(timer);
-    return this.snapshot();
-  }
-
-  // Called while the app quits; cannot await.
-  disposeOwned(): void {
-    this.disposed = true;
-    this.wantsEngine = false;
-    this.lifecycle += 1;
-    this.startInFlight = null;
-    if (this.monitor) clearInterval(this.monitor);
-    if (this.child) {
-      this.stopping = true;
-      this.dependencies.kill(this.child, "SIGTERM");
-    }
-  }
-}
-
-function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
-  try {
-    process.kill(-child.pid, signal);
-  } catch {
-    try {
-      child.kill(signal);
-    } catch {
-      // already gone
-    }
+    return `설정과 다른 모델이 켜져 있어요 (${loaded.filter(Boolean).join(" · ")}). 그 엔진이 꺼진 뒤 만들면 설정한 모델로 켜요.`;
   }
 }

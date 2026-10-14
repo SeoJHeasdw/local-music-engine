@@ -6,7 +6,7 @@
 `ace-step`은 `127.0.0.1:18001`의 `acestep-v15-xl-turbo`(LM `acestep-5Hz-lm-4B`), `minimax-music3`는
 `127.0.0.1:18002`의 `mlx-community/MiniMax-Music3-bf16`이다. 엔진·주소·모델을 적지 않은 요청은 ACE 값을
 쓰고, 서버가 올린 DiT·LM이 요청과 다르면 제출 전에 거부한다. `engine` 필드가 없는 저장된 요청은 ACE
-요청이다. ACE 서버·구간 수정·프로세스 소유는 아래 '현재 구현 범위'에 있다.
+요청이다. ACE 서버의 수명·구간 수정은 아래 '현재 구현 범위'에 있다.
 
 ## Music 3(이름으로 고를 때만)
 
@@ -28,17 +28,20 @@ Music 3는 `--engine minimax-music3`를 명시할 때만 쓴다. 모델과 실�
 
 ```text
 Electron renderer ─ 제한된 preload IPC ─ Electron main ─┬─ music-engine CLI (JSON 한 개 출력)
- (내 곡·새 곡·곡 화면·설정)                             ├─ ACE 서버 프로세스 소유·health 감시
+ (내 곡·새 곡·곡 화면·설정)                             ├─ ACE health 감시(켜고 끄지 않는다)
                                                         └─ music-artifact:// 토큰 스트리밍·파형
 music-engine CLI ─ workflow.py ─ ProjectStore + qc.py
                  ├ execution.py (추론·다운로드·QC와 짧은 기록 트랜잭션)
                  ├ jobs.py      (최초 요청 스냅샷·재개 계보·중단 복구)
                  ├ engines.py   (엔진 이름과 기본 주소·모델)
+                 ├ ace_runtime.py (일이 올 때 ACE를 켜고, 차선이 비면 ACE가 스스로 꺼진다)
                  ├ views.py      (status·library: 앱과 에이전트가 읽는 뷰)
                  ├ assistant.py  (피드백 → 수정안: 규칙 또는 loopback LLM)
                  └ drafting.py   (설명 → 제목·스타일·가사 초안)
                         ↓
                AceStepClient → ACE-Step REST API (loopback) → v0.1.8 native MLX
+
+music-engine serve ─ service/ (127.0.0.1:47833, arkAgent 엔진 계약 v0, 러너 스레드 하나)
 ```
 
 `workflow.py`가 응용 계층이다. Electron main은 IPC를 CLI 명령에 연결할 뿐 생성·검사·해석
@@ -54,16 +57,24 @@ token URL로만 전달되고 Range 요청을 스트림으로 응답한다.
 적용하지 않으며, 비동기 준비 후 다른 곡이 열렸으면 새 생성과 내보내기를 시작하지 않는다.
 초안은 필드별 직접 수정 이력을 확인해 도우미를 기다리며 쓴 내용을 보존한다.
 
-ACE 서버는 이미 응답하는 서버가 있으면 그대로 쓰고(외부 소유), 없으면 main이
-`scripts/start_ace_api.sh`를 별도 프로세스 그룹으로 띄워 소유한다. 앱 종료(⌘Q, SIGINT,
-SIGTERM) 때 CLI가 취소 상태를 저장할 시간을 준 뒤 소유한 서버만 끈다. 생성 작업은 앱에서
+ACE는 일이 있을 때만 켜져 있다(`ace_runtime.py`). 생성·커버·구간 수정·재개와 `draft --engine ace-step`은
+CLI의 `ManagedAceClient`로 ACE를 부른다. 첫 요청 때 주소에 응답하는 서버가 없으면 `scripts/start_ace_api.sh`를
+새 세션으로 띄우고(`MUSIC_ENGINE_ACE_STOP_WHEN_IDLE=1`, 기록은 `.runtime/logs/ace-server.log`) 모델이 올라올 때까지
+기다린다. 이 요청은 생성 차선을 쥔 채 일어난다. 그 서버의 런처는 1초마다 차선을 보고, 두 번 연속 비어 있으면
+`ace-start.lock`을 잡고 다시 확인한 뒤 SIGTERM으로 스스로 끈다(모델을 올리는 중이면 20초 뒤 강제 종료). 시작도
+같은 잠금 안에서 하므로 꺼지는 서버를 다시 쓰거나 서버 둘을 동시에 올리지 않는다. 생성이 강제 종료돼도 차선이
+풀리므로 서버가 남지 않는다. 손으로 켠 서버(그 환경 변수가 없는 서버)는 그대로 쓰고 끄지 않는다.
+
+앱은 ACE를 켜거나 끄지 않고 health만 본다(쉬는 중·켜는 중·켜짐·확인 필요·설치 필요). 생성 버튼은 엔진이 쉬는
+중에도 누를 수 있고, 첫 요청이 모델을 기다리는 동안 작업 막대는 "음악 엔진을 켜는 중"이다. 앱 종료(⌘Q, SIGINT,
+SIGTERM) 때 CLI가 취소 상태를 저장할 시간을 준다. 생성 작업은 앱에서
 한 번에 하나이며 시작 요청도 직렬화한다. 평가와 메모는 생성 중에도 즉시 `project.json`에
 저장한다. 설정은 앱 데이터 폴더의 `settings.json`에, 마지막으로 연 곡은 `state.json`에
 저장한다. 두 파일의 변경은 각각 직렬화하며 고유 임시 파일·fsync·원자 교체를 사용한다.
 
-엔진 시작 준비 전체와 AI 도우미 호출은 같은 메모리 소유권 잠금으로 직렬화한다. 사용자 종료는
-아직 실행 전인 시작 요청도 취소하고 도우미 종료 후 자동 재시작을 억제한다. Ollama 모델 해제는
-성공 응답과 잔류 모델 목록을 확인한 뒤에만 ACE 시작을 허용한다.
+생성 시작과 AI 도우미 호출은 같은 메모리 잠금으로 직렬화한다(`handoff.ts`). 생성은 Ollama 모델 해제를
+성공 응답과 잔류 모델 목록으로 확인한 뒤에만 CLI를 띄운다. 도우미는 음악 엔진이 응답하지 않을 때만 부르며,
+방금 끝난 생성의 서버가 꺼지기를 10초까지 기다리고 그래도 떠 있으면(손으로 켠 서버) 부르지 않는다.
 
 관리 서버는 비공개 인증 키를 `.runtime/ace-api-key`에 원자적으로 게시한다(권한 0600).
 CLI·Electron main·서버가 같은 키를 읽고 renderer에는 전달하지 않는다. upstream ASGI 앱을
@@ -101,6 +112,64 @@ ACE의 설치된 checkout은 수정하지 않으며 기존 외부 서버는 해�
 읽고 수정·저장하는 짧은 트랜잭션에만 사용한다. 추론, 다운로드, PCM QC는 정본 잠금 밖에서
 실행하므로 사람의 메모와 수정이 오래 대기하거나 다음 진행률 저장에 덮이지 않는다.
 프로세스 강제 종료 시 OS가 생성 잠금을 해제한다. 잠금 파일은 inode를 유지하도록 삭제하지 않는다.
+생성·구간 수정·커버·재개는 `.generation.lock`보다 먼저 기기 공용 생성 차선을 공유로 잡는다
+([작업 서비스](#작업-서비스)). `recover`는 정본만 고치므로 차선을 잡지 않는다.
+
+## 작업 서비스
+
+`music-engine serve`는 앱 없이 `127.0.0.1:47833`에서 arkAgent의 엔진 계약(`arkAgent/docs/ENGINE-CONTRACT.md`, v0)을
+제공한다. 표준 라이브러리 HTTP 서버이며 의존성을 더하지 않는다. 코드는 `src/local_music_engine/service/`
+(`server.py` API, `jobs.py` 작업 기록, `runner.py` 대기열, `recipes.py` 레시피)에 있다. 지금 레시피는 계약 점검
+`selftest`뿐이다. 서비스 프로세스는 모델 런타임을 올리지 않고 ACE 서버도 부르지 않는다.
+
+| 메서드·경로 | 내용 |
+| --- | --- |
+| `GET /api/health` | `{ok, engine: "music", version, contract: 0, busy, busyBy?, resident, currentJob, outputDir}` |
+| `GET /api/recipes` | `{recipes: [{name, label, paramsSchema, needsReview}]}`. 스키마는 JSON Schema 2020-12 |
+| `POST /api/jobs` | `{recipe, params}`를 검증해 대기열에 넣고 201로 작업 기록을 돌려준다. 입력 오류는 400(기록이 생기지 않는다), 종료 중이면 409 |
+| `GET /api/jobs/{id}` · `GET /api/jobs?limit=100` | 작업 기록, 최근 작업(최신이 먼저, 최대 500) |
+| `POST /api/jobs/{id}/cancel` | 대기 작업은 바로 `cancelled`, 실행 중이면 `cancelling` 뒤 `cancelled` |
+| `POST /api/jobs/{id}/assets/{assetId}/review` | `{status}`: `pending`·`approved`·`rejected`. 사람의 판단과 그때 파일의 `reviewedSha256`을 기록한다 |
+| `POST /api/jobs/{id}/findings/{findingId}/review` | `{status}`: `pending`·`cleared`. 사람이 그 자리를 확인했는지 기록한다 |
+
+Host가 `127.0.0.1`·`localhost`가 아니거나 Origin이 같은 출처가 아니거나 다른 사이트의 Fetch Metadata가
+붙은 요청은 403이다. Origin 없는 로컬 CLI·스크립트는 받는다. 오류 본문은 `{detail}`이다.
+
+`health.busy`는 이 엔진이 지금 기기 메모리를 쥐고 있는지다. 일 때문이든 상주 모델 때문이든 참이다. 순서대로 본다.
+
+1. 서비스가 실행 중인 작업이 있으면 `currentJob`이 그 ID다.
+2. 기록 없이 생성 차선을 쥔 쪽이 있으면 `busyBy: "lane:generation.lock"`이다. CLI나 앱(CLI를 띄운다)의
+   생성·구간 수정·커버·재개다.
+3. 일이 없는데 기본 주소(`127.0.0.1:18001`, `:18002`)에 음악 모델 서버가 떠 있으면 `busyBy: "ace-step:18001"`처럼
+   적고 `resident: true`다. 작업이 없어도 그 서버는 모델 메모리(ACE XL turbo 약 26GB)를 쥐고 있다. 일이 시작되면
+   `resident`는 거짓으로 돌아간다. 생성이 켠 ACE는 차선이 비면 스스로 꺼지므로 이 상태는 손으로 켠 서버이거나,
+   생성이 끝나고 꺼지기까지의 1–3초뿐이다. 계약의 "일이 없으면 모델을 쥐지 않는다"를 어기는 상태라 숨기지 않고
+   알린다. 다른 주소에 손으로 띄운 서버는 보지 못한다. 생성이 켠 서버는 주소와 관계없이 그동안 차선을 쥐므로 2번으로 보인다.
+
+생성 차선은 사용자·기기의 `~/Library/Caches/local-music-engine/generation.lock`(Mac, `MUSIC_ENGINE_LANE_LOCK`로 바꾼다)이다.
+CLI의 생성 경로는 공유로, 서비스 작업은 배타로 잡는다. 그래서 CLI 생성끼리는 전처럼 함께 돌고, 서비스 작업은
+어느 CLI 생성과도 겹치지 않는다. 서비스 작업은 차선을 얻을 때까지 `queued`로 기다린다. 서비스가 차선을 쥔 동안
+CLI 생성은 2초 기다린 뒤(health가 잠깐 잡아 보는 것을 넘기기 위해) `LaneBusy`로 거절되고 앱은 이유를 알린다.
+잠금은 프로세스가 죽으면 OS가 푼다.
+
+작업 기록은 `<출력 폴더>/jobs/<작업 ID>/job.json`(기본 `output/`)이고 곡의 `project.json`과 별개다. 형식은 계약을
+따른다: `id`, `recipe`, `title`, `params`(검증·정규화한 값), `state`, `createdAt`·`startedAt`·`finishedAt`,
+`stages[{name, label, state, startedAt, progress, detail, seconds, peakMemoryBytes}]`, `assets[]`, `findings[]`,
+`error`, `errorCode`, `logTail`. `dir`은 읽을 때 붙인다. 저장은 같은 폴더의 임시 파일을 fsync한 뒤 원자적으로 교체한다.
+한 출력 폴더는 서비스 하나만 쓴다(`.service.lock`). 두 번째 서비스는 시작하지 못한다.
+
+- 상태는 `queued → running → done | failed | cancelling → cancelled`, `queued → cancelled`다. 멈춤 기능이 없어 `paused`는
+  쓰지 않는다.
+- 서비스가 SIGINT·SIGTERM으로 멈추면 실행·대기 작업을 `failed` · `interrupted`로 닫고, 이미 취소 요청을 받은
+  작업만 `cancelled`로 닫는다. 다시 시작할 때 남은 `queued`·`running`도 같은 규칙으로 닫으며 다시 실행하지 않는다.
+  끝난 `selftest` 기록과 폴더는 이때 지운다.
+- `errorCode`: 레시피가 실행 중 드러낸 입력 문제는 `invalid_input`, Python `MemoryError`는 `out_of_memory`, 나머지는
+  `engine_error`다.
+- 에셋의 `review`는 사람만 바꾼다. 승인·거절할 때 파일의 SHA-256을 `reviewedSha256`에 묶고, 그 뒤 파일이 바뀌거나
+  사라지면 기록을 읽을 때 `pending`으로 보여 준다. 확인 항목(`findings`)의 `review`는 에셋 판단과 따로다.
+- `selftest`(`steps` 1–10 기본 2, `stepSeconds` 0–30 기본 0.5, `failAt`)는 서비스 프로세스 안에서 단계마다 기다리며
+  진행률을 쓴다. 단계 프로세스가 없어 `peakMemoryBytes`는 `null`이다. 0.5초 점검음 `selftest/check.wav` 하나와
+  표본 확인 항목 하나를 남긴다.
 
 ## 작업 상태
 

@@ -5,8 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { ACE_DEFAULT_MODEL, ACE_LM_MODEL, defaultSettings, normalizeSettings } from "../main/settings-schema.ts";
 import { loadAndMigrateSettings } from "../main/settings-storage.ts";
-import { aceGenerationArgs, aceReady, aceRepaintArgs, requirePlanAction } from "../main/generation-arguments.ts";
-import type { EngineStatus } from "../shared.ts";
+import { aceGenerationArgs, aceRepaintArgs, requirePlanAction } from "../main/generation-arguments.ts";
 
 const defaults = () => defaultSettings("/tmp/songs");
 
@@ -16,11 +15,11 @@ test("fresh preferences run ACE XL turbo with bounded five-minute generation", (
   assert.equal(settings.engine, "ace-step");
   assert.equal(settings.musicModel, "acestep-v15-xl-turbo");
   assert.equal(settings.engineBaseUrl, "http://127.0.0.1:18001");
-  assert.equal(settings.engineAutoStart, true);
   assert.equal(settings.defaultVersions, 1);
   assert.equal(settings.defaultDurationSeconds, 60);
   assert.equal(normalizeSettings({ ...settings, defaultDurationSeconds: 600 }, settings).defaultDurationSeconds, 300);
-  for (const key of ["ditModel", "lmModel", "aceBaseUrl", "aceAutoStart", "repaintStrength"]) assert.equal(key in settings, false);
+  // The engine runs only while a song is being made, so there is no start-with-the-app preference.
+  for (const key of ["ditModel", "lmModel", "aceBaseUrl", "aceAutoStart", "engineAutoStart", "repaintStrength"]) assert.equal(key in settings, false);
 });
 
 test("Music 3 preferences move to ACE XL on the ACE port and keep personal preferences", () => {
@@ -31,7 +30,7 @@ test("Music 3 preferences move to ACE XL on the ACE port and keep personal prefe
   const result = normalizeSettings(old, defaults());
   assert.equal(result.engineBaseUrl, "http://127.0.0.1:18001");
   assert.equal(result.musicModel, ACE_DEFAULT_MODEL);
-  assert.equal(result.engineAutoStart, false);
+  assert.equal("engineAutoStart" in result, false);
   assert.equal(result.projectsDir, old.projectsDir);
   assert.deepEqual(result.assistant, old.assistant);
   assert.equal(result.defaultVersions, 4);
@@ -45,7 +44,7 @@ test("first-generation ACE preferences keep their ACE address and start on XL", 
   const result = normalizeSettings({ aceBaseUrl: "http://127.0.0.1:18999", aceAutoStart: false, ditModel: "acestep-v15-turbo",
     repaintStrength: "light" }, defaults());
   assert.equal(result.engineBaseUrl, "http://127.0.0.1:18999");
-  assert.equal(result.engineAutoStart, false);
+  assert.equal("engineAutoStart" in result, false);
   assert.equal(result.musicModel, ACE_DEFAULT_MODEL);
   assert.equal(result.feedbackStrength, "light");
 });
@@ -98,8 +97,4 @@ test("plans are either whole-song regeneration or a valid range repaint", () => 
   assert.throws(() => requirePlanAction({ action: "repaint", range: { startSeconds: 3, endSeconds: 3 } }), /구간/);
   assert.throws(() => requirePlanAction({ action: "repaint", range: { startSeconds: -1, endSeconds: 3 } }), /구간/);
   assert.throws(() => requirePlanAction({ action: "regenerate", range: { startSeconds: 2, endSeconds: 3 } }), /수정 방식/);
-  const status = { engine: "ace-step", state: "ready", capabilities: { text2music: true } } as EngineStatus;
-  assert.equal(aceReady(status), true);
-  assert.equal(aceReady({ ...status, capabilities: { ...status.capabilities, text2music: false } }), false);
-  assert.equal(aceReady({ ...status, state: "starting" }), false);
 });

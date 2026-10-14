@@ -1,4 +1,4 @@
-import { api, applySong, engineReady, go, startEngine } from "../actions.ts";
+import { api, applySong, engineUsable, go } from "../actions.ts";
 import { byId, h, icon, mount } from "../dom.ts";
 import { clock, hasTag, lengthLabel, splitTags, toggleTag } from "../format.ts";
 import { beginSongOpen, finishSongOpen, get, set, type CreateDraft } from "../store.ts";
@@ -285,7 +285,7 @@ function blocker(draft: CreateDraft): string | null {
     return draftVisible(draft) ? "스타일을 적거나 장르 추천을 골라 주세요" : "먼저 AI 초안을 받거나 직접 써 주세요";
   }
   if (!draft.instrumental && !draft.lyrics.trim()) return "가사를 적거나 ‘연주곡’을 골라 주세요";
-  if (!engineReady()) return get().engine.state === "starting" ? "음악 엔진을 켜는 중이에요" : "음악 엔진이 꺼져 있어요";
+  if (!engineUsable()) return get().engine.detail;
   return null;
 }
 
@@ -765,7 +765,6 @@ export function syncCreate(): void {
   renderSendPreview(draft);
 
   const reason = blocker(draft);
-  const ready = engineReady();
   refs.createButton.disabled = Boolean(reason) || creating || planningSong;
   if (!refs.createButton.classList.contains("is-busy")) refs.createButton.textContent = `곡 만들기 · 버전 ${draft.versions}개`;
   const facts = [lengthLabel(draft.durationSeconds), ({ ko: "한국어 노래", en: "영어 노래", inst: "연주곡" } as const)[voice], preview.preset?.label].filter(Boolean).join(" · ");
@@ -773,7 +772,6 @@ export function syncCreate(): void {
     refs.bar,
     h("b", null, draft.title.trim() || (draft.description.trim() ? fallbackTitle(draft.description) : "새 곡")),
     h("span", { class: reason ? "create-bar-reason" : "hint" }, reason ? reason : `${facts} · ⌘ Enter`),
-    !ready && ["offline", "failed"].includes(state.engine.state) && h("button", { type: "button", class: "button small secondary", onClick: () => void startEngine() }, icon("power", 14), "엔진 켜기"),
   );
 }
 

@@ -11,7 +11,7 @@ export const ACE_MAX_DURATION = 300;
 export function defaultSettings(projectsDir: string): Settings {
   return {
     schemaVersion: 3, engine: "ace-step", projectsDir,
-    engineBaseUrl: ACE_BASE_URL, engineAutoStart: true, musicModel: ACE_DEFAULT_MODEL,
+    engineBaseUrl: ACE_BASE_URL, musicModel: ACE_DEFAULT_MODEL,
     defaultVersions: 1, defaultDurationSeconds: 60, feedbackStrength: "medium",
     assistant: { kind: "rules", baseUrl: "http://127.0.0.1:11434", model: "" }, lastExportDir: null,
   };
@@ -44,8 +44,6 @@ export function normalizeSettings(raw: Record<string, unknown>, base: Settings):
   return {
     schemaVersion: 3, engine: "ace-step", projectsDir,
     engineBaseUrl: url === undefined ? (current ? base.engineBaseUrl : ACE_BASE_URL) : requireLoopbackUrl(url, "음악 엔진"),
-    engineAutoStart: typeof raw.engineAutoStart === "boolean" ? raw.engineAutoStart
-      : typeof raw.aceAutoStart === "boolean" ? raw.aceAutoStart : base.engineAutoStart,
     // Only the listed checkpoints: another name could load a DiT this build never checked.
     // Upgrades start on XL, the version chosen by listening, whatever ran before.
     musicModel: current ? aceModel(raw.musicModel) ?? base.musicModel : ACE_DEFAULT_MODEL,

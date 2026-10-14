@@ -1,6 +1,5 @@
 import { constants } from "node:fs";
-import { link, mkdir, open, unlink } from "node:fs/promises";
-import { randomBytes, randomUUID } from "node:crypto";
+import { open } from "node:fs/promises";
 import path from "node:path";
 import { engineRoot } from "./paths.ts";
 
@@ -40,30 +39,4 @@ async function readKey(): Promise<string | null> {
 export async function aceAuthHeaders(): Promise<Record<string, string>> {
   const key = await readKey();
   return key === null ? {} : { Authorization: `Bearer ${key}` };
-}
-
-export async function ensureAceApiKey(): Promise<void> {
-  if (await readKey() !== null) return;
-  const destination = keyPath();
-  await mkdir(path.dirname(destination), { recursive: true });
-  const temporary = path.join(path.dirname(destination), `.ace-api-key-${randomUUID()}`);
-  try {
-    const handle = await open(temporary, "wx", 0o600);
-    try {
-      await handle.writeFile(`${randomBytes(32).toString("hex")}\n`, "ascii");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    try {
-      await link(temporary, destination);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    const directory = await open(path.dirname(destination), "r");
-    try { await directory.sync(); } finally { await directory.close(); }
-  } finally {
-    await unlink(temporary).catch(() => undefined);
-  }
-  if (await readKey() === null) throw new Error("음악 엔진 인증 파일을 준비하지 못했어요.");
 }

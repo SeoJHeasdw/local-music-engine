@@ -21,6 +21,10 @@ class AceApiError(RuntimeError):
     pass
 
 
+class AceUnavailable(AceApiError):
+    """Nothing answers at the engine's address."""
+
+
 def _require_loopback(base_url: str) -> str:
     parsed = urllib.parse.urlparse(base_url)
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
@@ -76,7 +80,7 @@ class AceStepClient:
             detail = error.read().decode("utf-8", errors="replace")
             raise AceApiError(f"{self.api_label} API HTTP {error.code}: {detail}") from error
         except urllib.error.URLError as error:
-            raise AceApiError(f"{self.api_label} API unavailable: {error.reason}") from error
+            raise AceUnavailable(f"{self.api_label} API unavailable: {error.reason}") from error
 
     def _json(
         self,

@@ -1,5 +1,5 @@
 import type { SongSummary } from "../../shared.ts";
-import { engineReady, go, navigateHistory, openSong, startEngine } from "../actions.ts";
+import { go, navigateHistory, openSong } from "../actions.ts";
 import { byId, h, icon, mount } from "../dom.ts";
 import { elapsed, modelLabel, relativeTime } from "../format.ts";
 import { canGoBack, canGoForward } from "../history.ts";
@@ -7,12 +7,10 @@ import { get, type View } from "../store.ts";
 
 const engineCopy: Record<string, { label: string; tone: string }> = {
   checking: { label: "확인 중", tone: "idle" },
-  offline: { label: "꺼져 있음", tone: "off" },
+  offline: { label: "쉬는 중", tone: "idle" },
   starting: { label: "켜는 중", tone: "busy" },
   ready: { label: "켜짐", tone: "on" },
-  external: { label: "켜짐", tone: "on" },
-  stopping: { label: "끄는 중", tone: "busy" },
-  failed: { label: "멈춤", tone: "off" },
+  failed: { label: "확인 필요", tone: "off" },
   missing: { label: "설치 필요", tone: "off" },
 };
 
@@ -53,7 +51,6 @@ export function renderSidebar(): void {
   const engine = state.engine;
   const copy = engineCopy[engine.state] ?? engineCopy.checking;
   const task = state.task;
-  const canStart = ["offline", "failed"].includes(engine.state);
   const recent = [...state.songs]
     .sort((a, b) => Date.parse(b.updatedAt ?? "") - Date.parse(a.updatedAt ?? "") || 0)
     .slice(0, RECENT_LIMIT);
@@ -109,7 +106,7 @@ export function renderSidebar(): void {
             null,
             engine.state === "starting"
               ? `${engine.detail} · ${elapsed(engine.since)}`
-              : engineReady() && engine.models.music
+              : engine.state === "ready" && engine.models.music
                 ? modelLabel(engine.models.music)
                 : ["failed", "missing"].includes(engine.state)
                   ? engine.detail
@@ -118,13 +115,6 @@ export function renderSidebar(): void {
         ),
         h("span", { class: "engine-gear" }, icon("settings", 16)),
       ),
-      canStart &&
-        h(
-          "button",
-          { type: "button", class: "button small primary block", onClick: () => void startEngine() },
-          icon("power", 14),
-          engine.owned && engine.state === "failed" ? "다시 켜기" : "엔진 켜기",
-        ),
     ),
   );
 }

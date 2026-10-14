@@ -43,6 +43,7 @@ yarn-error.log*
 
 # Generated audio / model artifacts
 artifacts/
+output/
 outputs/
 projects/
 exports/

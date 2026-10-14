@@ -157,3 +157,25 @@ test("a version whose played copy was not tidied counts as made, with resuming n
   assert.match(outcome.message, /재생본 정리를 마치지 못한 버전이 있어요\. 이어서 만들기/);
   assert.doesNotMatch(outcome.message, /실패했어요/);
 });
+
+test("while the run loads ACE for its first request the stage says the engine is starting", async () => {
+  const folder = await mkdtemp(path.join(tmpdir(), "music-task-"));
+  try {
+    await writeFile(path.join(folder, "project.json"), JSON.stringify({ jobs: [], candidates: [] }));
+    let engineOff = true;
+    const runner = new TaskRunner(
+      { emit: () => {}, versionsChanged: () => {}, finished: () => {}, engineOff: () => engineOff },
+      () => spawn(process.execPath, ["-e", "setTimeout(() => {}, 2000)"], { stdio: ["ignore", "pipe", "pipe"] }),
+      10,
+    );
+    runner.start({ ...spec, folder });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(runner.snapshot()?.stage, "음악 엔진을 켜는 중");
+    engineOff = false;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(runner.snapshot()?.stage, "준비하는 중");
+    await runner.shutdown();
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+});

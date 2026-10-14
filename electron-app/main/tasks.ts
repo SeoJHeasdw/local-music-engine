@@ -27,12 +27,15 @@ type RunningTask = {
   detail: string;
   done: number;
   resultShape: string;
+  engineStarting: boolean;
 };
 
 type Hooks = {
   emit(task: ActiveTask | null): void;
   versionsChanged(folder: string): void;
   finished(outcome: TaskOutcome, folder: string): void;
+  // True while ACE does not answer yet; a run's first request waits for its models.
+  engineOff?(): boolean;
 };
 
 type ManifestJob = {
@@ -117,7 +120,7 @@ export class TaskRunner {
       songId: task.spec.songId,
       songTitle: task.spec.songTitle,
       label: task.spec.label,
-      stage: task.cancelling ? "취소하는 중" : task.stage,
+      stage: task.cancelling ? "취소하는 중" : task.engineStarting ? "음악 엔진을 켜는 중" : task.stage,
       detail: task.detail,
       progress: task.progress,
       done: task.done,
@@ -144,6 +147,7 @@ export class TaskRunner {
       detail: "",
       done: 0,
       resultShape: "",
+      engineStarting: false,
     };
     this.active = task;
     this.hooks.emit(this.snapshot());
@@ -208,6 +212,8 @@ export class TaskRunner {
         task.detail = stageDetail(job.stage);
       }
     }
+    // Before its first request the run loads ACE's models; say so instead of "requesting".
+    task.engineStarting = ["준비하는 중", "엔진에 요청하는 중"].includes(task.stage) && Boolean(this.hooks.engineOff?.());
     const count = manifest.candidates.length;
     const resultShape = job && isQualityBatch(job) ? (job.resultRefs ?? []).join("|") : "";
     if ((task.candidateCount !== null && count > task.candidateCount) || (resultShape && resultShape !== task.resultShape)) this.hooks.versionsChanged(task.spec.folder);

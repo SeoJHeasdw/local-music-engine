@@ -1,5 +1,5 @@
 import type { Finding, Plan, ReviewStatus, Song, Strength, Version } from "../../shared.ts";
-import { activeVersion, api, applySongForContext, engineReady, go, refreshSong, songBusy, startEngine } from "../actions.ts";
+import { activeVersion, api, applySongForContext, engineUsable, go, refreshSong, songBusy } from "../actions.ts";
 import { byId, h, icon, mount, type Child } from "../dom.ts";
 import {
   clock,
@@ -442,8 +442,8 @@ function renderBanner(state: State, song: Song): void {
           job.error || job.failures?.length ? h("p", { class: "footnote" }, (job.error ?? job.failures?.[0]?.error ?? "").slice(0, 180)) : null,
         ),
         h("button", {
-          type: "button", class: "button small secondary", disabled: !engineReady() || Boolean(state.task),
-          "data-tip": !engineReady() ? "음악 엔진을 먼저 켜세요" : state.task ? "진행 중인 작업이 끝나면 이어 만들 수 있어요" : "",
+          type: "button", class: "button small secondary", disabled: !engineUsable() || Boolean(state.task),
+          "data-tip": !engineUsable() ? state.engine.detail : state.task ? "진행 중인 작업이 끝나면 이어 만들 수 있어요" : "",
           onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "이어서 만드는 중",
             async () => {
               const ticket = songTicket(song.songId);
@@ -746,7 +746,7 @@ function renderVersions(state: State, song: Song): void {
     const ready = t.roots.filter((item) => !isAutomaticAttempt(item.version)).length;
     for (let index = 0; index < remaining; index += 1) rows.push(placeholder(`버전 ${ready + index + 1}`, 0));
   }
-  const ready = engineReady();
+  const ready = engineUsable();
   const defaults = state.settings.defaultVersions;
   mount(
     els.versions,
@@ -755,7 +755,7 @@ function renderVersions(state: State, song: Song): void {
       { class: "card-head" },
       h("h2", null, "버전 ", h("span", { class: "count" }, String(song.versions.filter((version) => !isAutomaticAttempt(version)).length))),
       menu(
-        { label: "같은 설정으로 더 만들기", icon: "plus", className: `button ghost small${busy || !ready ? " is-disabled" : ""}`, tip: ready ? "지금 곡 설정 그대로 새 버전을 더 만들어요" : "음악 엔진을 켜야 만들 수 있어요" },
+        { label: "같은 설정으로 더 만들기", icon: "plus", className: `button ghost small${busy || !ready ? " is-disabled" : ""}`, tip: ready ? "지금 곡 설정 그대로 새 버전을 더 만들어요" : get().engine.detail },
         [1, 2, 4].map((count) => ({
           label: `${count}개 더 만들기${count === defaults ? " (기본)" : ""}`,
           disabled: busy || !ready,
@@ -892,7 +892,7 @@ function syncLyricsActions(): void {
   for (const button of lyricsActions) {
     if (button.classList.contains("is-busy")) continue;
     const reason = songBusy() ? "지금 작업이 끝난 뒤 만들 수 있어요"
-      : !engineReady() ? "음악 엔진을 켜야 만들 수 있어요"
+      : !engineUsable() ? get().engine.detail
         : button.dataset.needsRange === "true" ? "파형에서 바꾼 줄이 불리는 부분을 먼저 끌어서 고르세요"
           : !changed ? "가사를 바꾸면 만들 수 있어요" : "";
     button.disabled = Boolean(reason);
@@ -1395,7 +1395,7 @@ function renderPlan(state: State, song: Song): void {
     if (isPlanTicket(context) && get().plan) set({ plan: { ...get().plan!, ...change } });
   };
   const busy = songBusy();
-  const ready = engineReady();
+  const ready = engineUsable();
   const caption = h("textarea", {
     class: "input mono-input",
     rows: 4,
@@ -1438,7 +1438,7 @@ function renderPlan(state: State, song: Song): void {
             type: "button",
             class: "button primary",
             disabled: busy || !ready,
-            "data-tip": ready ? (busy ? "지금 작업이 끝난 뒤 만들 수 있어요" : "") : "음악 엔진을 켜야 만들 수 있어요",
+            "data-tip": ready ? (busy ? "지금 작업이 끝난 뒤 만들 수 있어요" : "") : get().engine.detail,
             onClick: (event: Event) =>
               void withBusy(event.currentTarget as HTMLButtonElement, "시작하는 중", async () => {
                 const applyingPlan = get().plan;
@@ -1455,7 +1455,6 @@ function renderPlan(state: State, song: Song): void {
           },
           "이대로 만들기",
         ),
-        !ready && ["offline", "failed"].includes(get().engine.state) && h("button", { type: "button", class: "button secondary", onClick: () => void startEngine() }, icon("power", 14), "엔진 켜기"),
         h("button", { type: "button", class: "button ghost", onClick: () => set({ plan: null }) }, "닫기"),
       ),
     ),
@@ -1513,7 +1512,7 @@ function openRegenerateSong(song: Song, version: Version, sourceName: string): v
   const style = h("textarea", { class: "input mono-input", rows: 3, maxlength: 1500, value: initialStyle, placeholder: "비워 두면 이 버전의 제작 규칙을 사용해요" });
   const lyrics = h("textarea", { class: "input lyrics-input", rows: 8, maxlength: 4096, value: initialLyrics });
   const versions = h("select", { class: "input", "aria-label": "새 버전 수" }, [1, 2, 3, 4].map((count) => h("option", { value: String(count), selected: count === 1 }, `${count}개`)));
-  const button = h("button", { type: "button", class: "button primary", disabled: !engineReady(), onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "준비하는 중", async () => {
+  const button = h("button", { type: "button", class: "button primary", disabled: !engineUsable(), onClick: (event: Event) => void withBusy(event.currentTarget as HTMLButtonElement, "준비하는 중", async () => {
     if (!isSongTicket(ticket)) throw new Error("열린 곡이 바뀌었어요. 현재 곡에서 다시 시도하세요.");
     const changedLyrics = lyrics.value.trim();
     if (!changedLyrics) { lyrics.focus(); throw new Error("가사를 적거나 [Instrumental]을 써 주세요."); }
@@ -1575,7 +1574,7 @@ function openSongSettings(song: Song): void {
         { class: "dialog-actions" },
         h("button", { type: "submit", value: "cancel", class: "button ghost" }, "취소"),
         h("button", { type: "submit", value: "save", class: "button secondary" }, "저장"),
-        h("button", { type: "submit", value: "generate", class: "button primary", disabled: !engineReady() }, `저장하고 버전 ${versions}개 만들기`),
+        h("button", { type: "submit", value: "generate", class: "button primary", disabled: !engineUsable() }, `저장하고 버전 ${versions}개 만들기`),
       ),
     ),
   );

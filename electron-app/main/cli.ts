@@ -46,12 +46,16 @@ export function humanizeError(raw: string): string {
   const message = raw.replace(/^error:\s*/i, "").replace(/^[A-Za-z]+Error:\s*/, "").trim();
   const table: Array<[RegExp, string]> = [
     [/project generation is already running/i, "이 곡을 다른 창이나 터미널에서 만드는 중이에요. 끝난 뒤 다시 시도하세요."],
+    [/music engine service is running a job/i, "음악 엔진 작업 서비스가 맡은 일을 하는 중이에요. 끝난 뒤 다시 시도하세요."],
     [/export output already exists/i, "같은 이름의 파일이 있어요. 이전 내보내기를 보존하도록 새 이름을 골라 주세요."],
     [/export output must be outside/i, "원본과 기록을 보존하도록 곡 폴더 밖에 내보내 주세요."],
-    [/Music3 API unavailable|ACE API unavailable|Connection refused|unhealthy (?:ACE|Music3)/i, "음악 엔진이 꺼져 있어요. 왼쪽 아래에서 엔진을 켠 뒤 다시 시도하세요."],
-    [/LLM not initialized|LLM init failed/i, "음악 엔진의 작사 모델이 준비되지 않았어요. 엔진을 다시 켜 보세요."],
+    // The run starts ACE itself (ace_runtime.py); these say why it could not.
+    [/ACE runtime is missing/i, "ACE-Step이 아직 설치되지 않았어요. scripts/bootstrap_ace.sh로 설치한 뒤 다시 시도하세요."],
+    [/ACE engine did not start|ACE engine failed to load|ACE engine did not finish loading/i, "음악 엔진을 켜지 못했어요. 설정의 엔진 기록을 확인한 뒤 다시 시도하세요."],
+    [/Music3 API unavailable|ACE API unavailable|Connection refused|unhealthy (?:ACE|Music3)/i, "음악 엔진과 연결이 끊겼어요. 설정의 엔진 기록을 확인한 뒤 다시 시도하세요."],
+    [/LLM not initialized|LLM init failed/i, "음악 엔진의 작사 모델이 준비되지 않았어요. 잠시 뒤 다시 시도하세요."],
     [/(?:ACE|Music3) task timed out/i, "엔진이 제한 시간 안에 곡을 끝내지 못했어요."],
-    [/ACE server has (?:DiT|LM) .* loaded, not the requested/i, "켜진 엔진의 음악 모델이 요청과 달라요. 엔진을 껐다 켜면 설정한 모델로 바뀌어요."],
+    [/ACE server has (?:DiT|LM) .* loaded, not the requested/i, "켜져 있는 음악 엔진의 모델이 요청과 달라요. 그 엔진이 꺼진 뒤 다시 시도하면 설정한 모델로 켜요."],
     [/cannot resume .*different engine|resume.*engine mismatch/i, "이전 음악 엔진에서 중단된 작업이에요. 기존 가사와 편곡으로 새 전체 버전을 만들 수 있어요."],
     [/project not found/i, "곡 폴더에서 project.json을 찾지 못했어요."],
     [/project already exists/i, "같은 폴더에 이미 곡이 있어요."],

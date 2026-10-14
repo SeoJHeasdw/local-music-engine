@@ -30,7 +30,7 @@ Hugging Face에서 받는다. 음원·가사·프로젝트·모델·로그는 Gi
 
 곡의 멜로디·구성은 4B 5Hz LM이 계획하고, DiT가 소리로 그린다. 설정에서 DiT를 고른다.
 
-| DiT | 특징 | 30초 곡 DiT 시간 | 엔진 상주 메모리 |
+| DiT | 특징 | 30초 곡 DiT 시간 | 켜져 있는 동안 메모리 |
 | --- | --- | --- | --- |
 | `acestep-v15-xl-turbo` (기본) | 같은 곡을 더 큰 모델로 그린다. 블라인드 청취에서 끊김이 적고 완성도가 높았다 | 13초 | 26.2GB |
 | `acestep-v15-turbo` | 더 빠르다. 블라인드 청취에서 더 멜로디컬했지만 렉·끊김이 있었다 | 7초 | 23.7GB |
@@ -41,13 +41,15 @@ MPS에 올리기 전에 MLX로 옮기고 행렬 가중치를 BF16으로 둬 이 
 SFT 계열(`acestep-v15-xl-sft`)은 같은 런처로 보컬이 나오지만 청취에서 음질이 깨져 쓰지 않는다.
 런처가 고친 내용과 근거는 `scripts/ace_api_server.py`의 docstring에 있다.
 
-앱은 `scripts/start_ace_api.sh`로 `127.0.0.1:18001` 서버를 켜고, 자기가 켠 서버만 종료한다.
-이미 켜 둔 ACE 서버는 외부 소유로 사용한다. 다른 엔진이나 설정과 다른 DiT·LM이 응답하면 준비된
-서버로 인정하지 않는다. 한 번에 한 곡을 계산한다.
+ACE는 곡을 만드는 동안에만 켜져 있다. 생성·커버·구간 수정·재개(앱도 이 CLI를 쓴다)는 `127.0.0.1:18001`에
+아무것도 없으면 `scripts/start_ace_api.sh`로 서버를 켜고 모델이 올라올 때까지 기다린 뒤 쓴다(XL에서 약 46초).
+그 서버는 기기 공용 생성 차선을 아무도 쥐지 않게 되면 1–2초 안에 스스로 꺼진다. 그래서 쉬는 동안 모델
+메모리를 쥐지 않고, 생성이 죽어도 서버가 남지 않는다. 손으로 켠 ACE 서버는 그대로 쓰고 끄지 않는다.
+다른 엔진이나 설정과 다른 DiT·LM이 응답하면 쓰지 않는다. 한 번에 한 곡을 계산한다. 서버 기록은
+`.runtime/logs/ace-server.log`에 남는다.
 
-큰 로컬 AI 도우미를 부를 때 앱은 자기가 켠 음악 엔진을 잠시 끄고, 답을 받으면 다시 켠다.
-외부에서 켠 서버는 임의로 종료하지 않는다. 곡을 만드는 중에는 도우미를 호출하지 않는다.
-CLI에서 큰 도우미를 부를 때는 엔진을 직접 끈다.
+큰 로컬 AI 도우미는 음악 엔진이 꺼져 있을 때만 부른다. 곡을 만든 직후라면 엔진이 꺼질 때까지 잠시 기다리고,
+손으로 켠 엔진이 떠 있으면 부르지 않는다. 곡을 만들기 전에는 도우미 모델을 메모리에서 내린다.
 
 인증 키는 `.runtime/ace-api-key`의 사용자 전용 파일(0600)로 main·CLI·서버가 공유한다.
 별도 키는 `MUSIC_ENGINE_ACE_API_KEY`, 키 파일은 `MUSIC_ENGINE_ACE_API_KEY_FILE`로 지정한다.
@@ -65,7 +67,7 @@ MiniMax Music 3 엔진 코드(`scripts/start_music3_api.sh`)는 남아 있지만
 | 내 곡 | 곡 목록과 검색, 상태·버전·길이, 다른 곡 폴더 열기, Finder에서 보기 |
 | 새 곡 만들기 | ① 원하는 곡을 말로(가사가 있으면 선택해서 함께 넣으면 AI는 제목·스타일만 채운다), 악기(선택)를 고르면 그 태그를 스타일에 함께 보낸다 → AI 초안 ② 제목·스타일 프롬프트·가사 다듬기(× 로 닫아도 쓴 내용은 남는다). 장르 추천·제작 규칙·BPM·전개 미리보기는 ‘세부 조정’, 실제로 보낼 값은 ‘엔진에 보낼 내용’에 접어 둔다 |
 | 곡 화면 | 위: 재생·파형·구간 선택·비교. ⌘ + 스크롤·두 손가락 벌리기·+/−로 최대 48배 확대하고 옆으로 밀거나 아래 전체 띠를 끌어 이동하며, 시작·끝을 0.01초 단위로 적거나 0.1초씩 옮긴다. 가운데: 버전 목록(듣기·좋아요·별로·최종본). 아래: 만든 프롬프트·가사·자동 검사·평가·메모 탭. 자동 검사 탭은 확인할 것만 시각·듣기 버튼과 함께 먼저 보여 주고 나머지 측정값은 접어 둔다. 가사 탭의 ‘가사 고치기’는 파형에서 고른 구간만 고친 가사로 다시 만들거나, 고친 가사로 새 전체 버전을 만든다(원래 버전은 남는다). 오른쪽: 고치기(곡 전체/구간 → 요청 문장이나 ‘악기 더하기·빼기’ → 수정안 → 만들기)와 고친 기록. 장르 추천 안내에서 온 악기는 여기서 뺄 수 없다고 표시한다 |
-| 설정 | 창 크기·최대화·전체 화면은 다음 실행 때 그대로 연다(처음엔 화면을 채운다). 사이드바 아래 음악 엔진 카드에서 연다(⌘,). ACE 상태·시작·종료·기록, DiT 선택, AI 도우미, 저장 위치와 생성 기본값 |
+| 설정 | 창 크기·최대화·전체 화면은 다음 실행 때 그대로 연다(처음엔 화면을 채운다). 사이드바 아래 음악 엔진 카드에서 연다(⌘,). ACE 상태(쉬는 중·켜는 중·켜짐)·기록, DiT 선택, AI 도우미, 저장 위치와 생성 기본값 |
 
 이전 설정(Music 3 또는 첫 ACE 판)은 최초 실행 때 ACE XL turbo로 옮기고 원본을 백업한다
 (`settings-before-ace-xl.json`). 저장 위치·AI 도우미·내보내기 위치와 기존 곡 데이터는 보존한다. 요청 길이
@@ -115,7 +117,8 @@ uv run music-engine library --dir projects
 ```
 
 `init`·`revise`·`draft`의 `--production-rules-json`으로 화면과 같은 규칙을 전달한다.
-CLI의 기본 엔진은 앱과 같은 ACE-Step XL turbo(`127.0.0.1:18001`, `acestep-v15-xl-turbo`)다. 서버가 다른
+CLI의 기본 엔진은 앱과 같은 ACE-Step XL turbo(`127.0.0.1:18001`, `acestep-v15-xl-turbo`)다. 생성 명령과
+`draft --engine ace-step`은 ACE가 꺼져 있으면 켜서 쓰고, 끝나면 ACE가 스스로 꺼진다. 서버가 다른
 DiT를 올렸으면 `--model`로 그 이름을 적는다.
 
 품질 기본값은 `--quality auto --quality-attempts 4`다. 버전마다 첫 생성과 재시도를 합쳐 최대 네 번이며,
@@ -171,6 +174,28 @@ uv run music-engine analyze-rhythm /absolute/path.wav --diagnostics --separation
 uv run music-engine inspect-rhythm projects/my-song --candidate-id <candidate-id> --separation-json separated-energy.json
 ```
 
+## 작업 서비스
+
+앱 없이 `127.0.0.1:47833`에서 일을 받는 로컬 서비스다. arkAgent와 스크립트가 같은 대기열에 일을 맡기며
+한 번에 하나만 실행한다. arkAgent의 엔진 계약(`arkAgent/docs/ENGINE-CONTRACT.md`) v0을 지킨다. 지금 받는 일은
+모델 없이 몇 초 안에 끝나는 계약 점검 `selftest`뿐이고, 곡 생성 레시피는 아직 없다.
+
+```bash
+uv run music-engine serve
+```
+
+```bash
+uv run --project ../arkAgent ark-engine-check http://127.0.0.1:47833
+```
+
+포트는 `--port`, 작업 기록을 둘 폴더는 `--output-dir`(기본 `output/`)로 바꾼다. 작업 기록은
+`output/jobs/<작업 ID>/job.json`에 남고, 끝난 `selftest` 기록은 서비스가 시작할 때 지운다. 서비스의 작업과
+CLI·앱의 생성(생성·구간 수정·커버·재개)은 동시에 돌지 않는다. 서비스가 일하는 동안 CLI·앱의 생성은 이유를
+알리며 거절되고, CLI·앱이 생성하는 동안 서비스에 넣은 작업은 대기한다. CLI 생성끼리는 전처럼 함께 돈다.
+손으로 켠 ACE·Music 3 서버가 기본 주소에 떠 있으면 작업이 없어도 `busy`이고 `resident: true`다. 쉬는 엔진은
+모델 메모리를 쥐지 않는다는 계약을 어기는 상태라 숨기지 않고 알린다. 생성이 켠 ACE는 끝나면 스스로 꺼진다.
+API와 기록은 [아키텍처](docs/ARCHITECTURE.md#작업-서비스)에 있다.
+
 ## 데이터와 검사
 
 - `project.json`은 같은 디렉터리의 임시 파일을 fsync한 뒤 원자적으로 교체한다.
@@ -196,6 +221,8 @@ npm run test:app
 npm run build:app
 ```
 
+작업 서비스의 계약은 서비스를 띄운 뒤 위의 `ark-engine-check`로 확인한다. `selftest`만 쓰므로 모델을 올리지 않는다.
+
 생성과 리듬 검사를 함께 실측하려면 기본 XL turbo 서버에서 새 30초 연주곡을 한 번 만든다.
 원본·정리본의 분석과 artifact 해시, 사람 청취 `unreviewed` 상태를 확인한다.
 
@@ -205,6 +232,7 @@ npm run build:app
 uv run python scripts/smoke_rhythm_quality.py --output-dir .runtime/rhythm-smoke-new
 ```
 
+실측 실행기는 ACE를 직접 부르므로 손으로 켠 서버를 쓴다. 그 서버는 저절로 꺼지지 않으니 끝나면 끈다.
 실제 추론은 모델 없는 계약·회귀 검사와 따로 실행한다. ACE의 다른 실측 실행기는
 `scripts/smoke_real_engine.py`와 `scripts/compare_production.py`, Music 3를 다시 준비했을 때의 실행기는
 `scripts/smoke_music3.py`와 `scripts/compare_music3_quality.py`다.

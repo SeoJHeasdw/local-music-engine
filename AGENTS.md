@@ -23,7 +23,11 @@ npm run check:app
 npm run test:app
 ```
 
-실제 추론 검사는 별도로 ACE 서버(`scripts/start_ace_api.sh`, 기본 DiT XL turbo)를 띄우고 수행한다.
-CLI의 기본 엔진·모델·주소가 이 서버다. Music 3 검사는 Music 3를 다시 준비한 뒤 `--engine minimax-music3`를
+작업 서비스의 계약은 `uv run music-engine serve`를 띄운 뒤
+`uv run --project ../arkAgent ark-engine-check http://127.0.0.1:47833`로 확인한다(모델을 올리지 않는다).
+
+실제 추론 검사는 CLI 생성으로 한다. CLI는 기본 DiT XL turbo로 ACE를 켜서 쓰고, 끝나면 ACE가 스스로 꺼진다.
+ACE를 직접 부르는 실측 스크립트는 `scripts/start_ace_api.sh`로 손으로 켠 서버를 쓰고, 끝나면 그 서버를 끈다.
+일이 없을 때 모델 메모리를 쥐지 않는다(arkAgent 엔진 계약). Music 3 검사는 Music 3를 다시 준비한 뒤 `--engine minimax-music3`를
 명시해서만 한다.
 실제 추론을 mock 검사로 대체했다고 기록하지 않는다.

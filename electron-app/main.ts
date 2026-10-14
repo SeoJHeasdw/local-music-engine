@@ -31,7 +31,7 @@ function shutdown(): void {
   if (shutdownStarted) return;
   shutdownStarted = true;
   void controller.tasks.shutdown().finally(() => {
-    controller.engine.disposeOwned();
+    controller.engine.dispose();
     quitting = true;
     // Cleanup is done, so leave directly. A second app.quit() is not enough: when the
     // first quit came from SIGTERM/SIGINT (Ctrl-C in app.sh), Electron forgets it was
@@ -123,7 +123,7 @@ if (!screenshotPath && !app.requestSingleInstanceLock()) {
   });
 }
 
-// Ctrl-C in the terminal that ran app.sh should clean up like ⌘Q, not orphan the engine.
+// Ctrl-C in the terminal that ran app.sh should clean up like ⌘Q: cancel the running generation.
 // On macOS Electron itself turns these signals into a quit (before-quit below); these
 // handlers cover platforms where Node receives the signal first.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
@@ -134,13 +134,12 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 
 app.whenReady().then(async () => {
   protocol.handle(ARTIFACT_SCHEME, handleArtifactRequest);
-  const settings = await loadSettings();
+  await loadSettings();
   const saved = (await loadAppState()).window;
   controller.register();
   createWindow(saved);
-  void controller.engine.check().then((status) => {
-    if (!screenshotPath && settings.engineAutoStart && status.state === "offline") void controller.engine.start();
-  });
+  // ACE is not started here: a generation run brings it up and it stops itself afterwards.
+  void controller.engine.check();
   controller.engine.startMonitoring();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) void loadAppState().then((state) => createWindow(state.window));

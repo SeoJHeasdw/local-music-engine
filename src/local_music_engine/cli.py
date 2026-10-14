@@ -14,9 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from . import assistant
+from .ace_runtime import managed_client_factory
 from .drafting import draft_song
 from .auto_quality import quality_policy
-from .jobs import recover_project
+from .jobs import frozen_batch_payloads, recover_project, resume_source
+from .lane import shared_lane
 from .production_rules import catalog as production_catalog, normalize_selection
 from .song_planning import prepare_song_plan, validate_song_plan_input
 from .storage import ProjectStore
@@ -288,6 +290,10 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose.add_argument("--evidence-candidate-id", help="verified source candidate originally measured by the explicit stem cache")
     diagnose.add_argument("--intent-json", type=Path, help="explicit source-bound expected rhythm sections")
 
+    serve = subparsers.add_parser("serve", help="run the job service (arkAgent engine contract) on 127.0.0.1 until stopped")
+    serve.add_argument("--port", type=int, default=47833)
+    serve.add_argument("--output-dir", type=Path, help="folder for service job records (jobs/); default: output/ in this checkout")
+
     return parser
 
 
@@ -330,6 +336,31 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
     plan["baseStylePrompt"] = candidate.get("baseStylePrompt", request.caption)
     plan["candidateId"] = args.candidate_id
     return plan
+
+
+def _source_models(path: Path, candidate_id: str | None) -> tuple[str, str]:
+    """DiT and LM a version was made with; ACE starts with them for edits of that version."""
+
+    try:
+        project = ProjectStore(path).load()
+        candidate = ProjectStore.find_by_id(project, "candidates", "candidateId",
+                                            candidate_id or project.get("selectedCandidateId"))
+        original = ProjectStore.find_by_id(project, "requests", "requestId", candidate["requestId"])["parameters"]
+        return original.get("model", ACE_DIT_MODEL), original.get("lm_model_path", DEFAULT_LM_MODEL)
+    except (KeyError, ValueError, TypeError, OSError):
+        # The run itself reports what is wrong with the project or version.
+        return ACE_DIT_MODEL, DEFAULT_LM_MODEL
+
+
+def _batch_models(path: Path, job_id: str | None) -> tuple[str, str]:
+    """DiT and LM a batch froze; resuming it starts ACE with them."""
+
+    try:
+        project = ProjectStore(path).load()
+        payload = frozen_batch_payloads(project, resume_source(project, job_id))[0]
+        return payload.get("model", ACE_DIT_MODEL), payload.get("lm_model_path", DEFAULT_LM_MODEL)
+    except (KeyError, ValueError, TypeError, IndexError, OSError):
+        return ACE_DIT_MODEL, DEFAULT_LM_MODEL
 
 
 def run(args: argparse.Namespace) -> Any:
@@ -402,14 +433,19 @@ def run(args: argparse.Namespace) -> Any:
             timeout_seconds=args.timeout_seconds,
             quality=quality_policy(args.quality, max_attempts=args.quality_attempts, repair_attempts=args.repair_attempts),
             engine=args.engine,
+            client_factory=managed_client_factory(model=args.model or ACE_DIT_MODEL, lm_model=args.lm_model)
+            if args.engine == ACE_ENGINE else None,
         )
     if args.command == "cover":
+        model, lm_model = _source_models(args.path, args.candidate_id)
         return cover_candidates(args.path, candidate_id=args.candidate_id, seeds=args.seeds,
                                 strength=args.strength, style_prompt=args.style, lyrics=args.lyrics,
                                 base_url=args.base_url, model=args.model, feedback=args.feedback_json,
                                 poll_seconds=args.poll_seconds, timeout_seconds=args.timeout_seconds,
-                                quality=quality_policy(args.quality, max_attempts=1), engine=args.engine)
+                                quality=quality_policy(args.quality, max_attempts=1), engine=args.engine,
+                                client_factory=managed_client_factory(model=args.model or model, lm_model=lm_model))
     if args.command == "resume":
+        model, lm_model = _batch_models(args.path, args.job_id)
         return resume_latest_batch(
             args.path,
             job_id=args.job_id,
@@ -417,6 +453,7 @@ def run(args: argparse.Namespace) -> Any:
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
             engine=args.engine,
+            client_factory=managed_client_factory(model=model, lm_model=lm_model) if args.engine == ACE_ENGINE else None,
         )
     if args.command == "recover":
         return recover_project(args.path)
@@ -461,6 +498,7 @@ def run(args: argparse.Namespace) -> Any:
         )
         return {"changed": revision is not None, "revision": revision}
     if args.command == "repaint":
+        model, lm_model = _source_models(args.path, args.candidate_id)
         return repaint_candidate(
             args.path,
             start_seconds=args.start,
@@ -478,19 +516,26 @@ def run(args: argparse.Namespace) -> Any:
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
             quality=quality_policy(args.quality, max_attempts=1),
+            client_factory=managed_client_factory(model=args.model or model, lm_model=lm_model),
         )
     if args.command == "plan":
         return _plan(args)
     if args.command == "draft":
-        return draft_song(
-            args.query,
-            instrumental=args.instrumental,
-            duration_seconds=args.duration,
-            base_url=args.base_url,
-            llm=_llm_config(args),
-            production_rules=args.production_rules_json,
-            vocal_language=args.vocal_language, engine=args.engine,
-        )
+        def draft(**engine_client: Any) -> Any:
+            return draft_song(
+                args.query,
+                instrumental=args.instrumental,
+                duration_seconds=args.duration,
+                base_url=args.base_url,
+                llm=_llm_config(args),
+                production_rules=args.production_rules_json,
+                vocal_language=args.vocal_language, engine=args.engine, **engine_client,
+            )
+        if args.engine != ACE_ENGINE:
+            return draft()
+        # Asking ACE's planner is engine work: it holds the lane and brings ACE up only for this draft.
+        with shared_lane():
+            return draft(client_factory=managed_client_factory(model=ACE_DIT_MODEL, lm_model=DEFAULT_LM_MODEL))
     if args.command == "assistant":
         if args.action == "rules":
             return {"rules": assistant.catalog()}
@@ -532,6 +577,10 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "serve":
+            # Long-running: prints one JSON document once it listens, then serves until SIGINT/SIGTERM.
+            from .service.server import serve
+            raise SystemExit(serve(port=args.port, output_dir=args.output_dir))
         _print(run(args))
     except KeyboardInterrupt:
         print("cancelled by user", file=sys.stderr)
