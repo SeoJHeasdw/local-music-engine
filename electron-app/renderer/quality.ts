@@ -14,16 +14,39 @@ export function listeningPoints(findings: Finding[]): Finding[] {
     .sort((a, b) => (a.startSeconds ?? Infinity) - (b.startSeconds ?? Infinity));
 }
 
+// A missing section already has its own row with the place to play; it is not said twice.
+const placedReasons = new Set(["written_section_missing"]);
+const lyricPlaces = new Set(["lyric_lines_missing", "lyric_lines_unclear"]);
+
 /** What the automatic check still holds against this version, one sentence each. */
-export function remainingProblems(quality: AutomaticQuality): string[] {
-  const reasons = [...new Set(quality.retryReasons.map(qualityRetryReason))];
-  return reasons.length || quality.lyrics.status !== "warning" ? reasons : [lyricQualityText(quality)];
+export function remainingProblems(quality: AutomaticQuality, findings: Finding[] = []): string[] {
+  const placed = findings.some((finding) => lyricPlaces.has(finding.check));
+  const reasons = [...new Set(quality.retryReasons.filter((reason) => !(placed && placedReasons.has(reason))).map(qualityRetryReason))];
+  if (!reasons.length && !placed && quality.lyrics.status === "warning") reasons.push(lyricQualityText(quality));
+  if (quality.finishingError) reasons.push("재생본 정리를 마치지 못해 정리 전 음원이에요. 위의 '이어서 만들기'를 누르면 정리만 다시 해요.");
+  return reasons;
 }
 
 // Counts only what the checks panel can show the listener: a problem in words or a place
 // to play. A version whose only notes are section changes has nothing to check.
 export function checkCount(version: Pick<Version, "quality" | "findings">): number {
-  return (version.quality ? remainingProblems(version.quality).length : 0) + listeningPoints(version.findings).length;
+  return (version.quality ? remainingProblems(version.quality, version.findings).length : 0) + listeningPoints(version.findings).length;
+}
+
+/** For an edit: what is known about the audio outside the edited stretch. */
+export function editSpliceText(version: Pick<Version, "splice" | "editRange" | "quality">): string | null {
+  const splice = version.splice;
+  if (!splice || !version.editRange) return null;
+  const changed = splice.changedRange;
+  if (!splice.applied || !changed) return "엔진이 만든 그대로예요. 고른 구간 밖의 소리도 조금 달라졌을 수 있으니 원본과 비교해 들어 보세요.";
+  const seconds = (value: number) => Number(value.toFixed(2)).toString();
+  const span = `${seconds(changed.startSeconds)}–${seconds(changed.endSeconds)}초`;
+  const repair = version.quality?.repair;
+  if (repair?.accepted) {
+    const lines = `"${repair.firstLine}"${repair.lineCount > 1 ? ` 등 ${repair.lineCount}줄` : ""}`;
+    return `처음 만든 음원에서 들리지 않던 가사(${lines})를 넣으려고 ${span}만 다시 만들었고, 다시 받아써서 불린 것을 확인했어요. 그 밖은 처음 만든 소리와 샘플 하나까지 같아요. 위의 '비교 버전'으로 고치기 전을 들을 수 있어요.`;
+  }
+  return `${span}만 새로 만든 소리예요. 그 밖은 고치기 전 버전과 샘플 하나까지 같아요.`;
 }
 
 export function qualityLabel(version: Pick<Version, "quality" | "findings">): { label: string; tone: string } | null {
@@ -52,6 +75,7 @@ const reasons: Record<string, string> = {
   large_korean_transcript_error: "인식한 한글 가사에 차이가 많아요.",
   large_english_transcript_error: "인식한 영어 가사에 차이가 많아요.",
   written_chorus_occurrence_missing: "작성한 후렴이 일부 빠진 것으로 보여요.",
+  written_section_missing: "작성한 구절 하나가 통째로 들리지 않아요.",
   sustained_clipping: "소리가 지속적으로 찌그러질 가능성이 있어요.",
   duration_mismatch: "요청한 곡 길이와 크게 달라요.",
   digital_silence: "음원 전체에 소리가 거의 없어요.",

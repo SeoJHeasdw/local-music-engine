@@ -48,6 +48,8 @@ MODEL_FILES = (
 SEPARATOR_CHUNK_SECONDS = 20.0
 SEPARATOR_CONTEXT_SECONDS = 0.5
 ACTIVITY_WINDOW_SECONDS = 0.25
+VOCAL_ONSET_MINIMUM_SECONDS = 1.0
+VOCAL_ONSET_LEAD_SECONDS = 1.0
 MAX_AUDIO_SECONDS = 610.0
 PARENT_PID_ENV = "MUSIC_ENGINE_QUALITY_PARENT_PID"
 
@@ -467,21 +469,33 @@ def clean_segments(raw: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                                                "minimumCharacters": 10}}
 
 
-def transcribe(audio: Path) -> dict[str, Any]:
+def vocal_onset(summary: dict[str, Any]) -> float:
+    """Where sustained singing first starts, or 0 when that was not measured."""
+    for region in summary.get("vocalActivityRegions") or []:
+        if region["endSeconds"] - region["startSeconds"] >= VOCAL_ONSET_MINIMUM_SECONDS:
+            return float(region["startSeconds"])
+    return 0.0
+
+
+def transcribe(audio: Path, *, start: float = 0.0, end: float | None = None, language: str | None = None) -> dict[str, Any]:
     import mlx_whisper
 
     # The expected lyrics are deliberately absent. No network is needed to load
     # a verified local checkpoint. Mixed-language lyrics are not forced to Korean.
+    # The recognizer reads fixed 30-second windows. Over an instrumental intro the
+    # first window can fill with invented syllables and lose the verse that follows,
+    # so the first window starts where the singing does.
     log("Transcribing original mix locally with MLX Whisper")
+    clip = [max(0.0, start)] if end is None else [max(0.0, start), end]
     output = mlx_whisper.transcribe(str(audio), path_or_hf_repo=str(WHISPER_DIRECTORY),
-                                    task="transcribe", language=None, initial_prompt=None,
+                                    task="transcribe", language=language, initial_prompt=None,
                                     condition_on_previous_text=False, temperature=0.0,
-                                    word_timestamps=False, verbose=None)
+                                    word_timestamps=False, verbose=None, clip_timestamps=clip)
     segments, confidence = clean_segments(output.get("segments"))
     return {"available": True, "text": str(output.get("text") or "").strip(),
             "segments": segments, "language": str(output.get("language") or "unknown"),
             **confidence, "transcriptionInput": "original mix", "windowSeconds": 30,
-            "independentVotes": 1, "expectedLyricsProvided": False}
+            "windowAnchorSeconds": clip[0], "independentVotes": 1, "expectedLyricsProvided": False}
 
 
 def _analyze_unlocked(audio: Path) -> dict[str, Any]:
@@ -494,6 +508,7 @@ def _analyze_unlocked(audio: Path) -> dict[str, Any]:
     result["loudness"] = loudness(audio)
     ready = readiness(verify_hashes=True)
     if not ready["available"]:
+        result["setupRequired"] = True
         result["separation"] = {"status": "unavailable", "reason": "Quality models require setup"}
         result["errors"].append("Quality models are missing or have a checksum mismatch; run bootstrap_quality.sh")
         return result
@@ -519,7 +534,8 @@ def _analyze_unlocked(audio: Path) -> dict[str, Any]:
         result["separation"] = {"status": "unknown", "reason": type(error).__name__}
         result["errors"].append(f"Vocal analysis unavailable: {type(error).__name__}")
     try:
-        result.update(transcribe(audio))
+        onset = vocal_onset(result["separation"]) if result["separation"].get("status") == "measured" else 0.0
+        result.update(transcribe(audio, start=max(0.0, onset - VOCAL_ONSET_LEAD_SECONDS)), vocalOnsetSeconds=onset)
     except Exception as error:
         log(f"Transcription unavailable: {type(error).__name__}: {error}")
         result["errors"].append(f"Transcription unavailable: {type(error).__name__}")
@@ -533,6 +549,21 @@ def analyze(audio: Path) -> dict[str, Any]:
     # A second CLI/worker therefore waits without another copy of either model.
     with analysis_lock():
         return _analyze_unlocked(audio)
+
+
+def transcribe_span(audio: Path, start: float, end: float, language: str | None) -> dict[str, Any]:
+    """Read one stretch again from its own start, without the separator."""
+    if not audio.is_absolute() or not audio.is_file():
+        raise ValueError("--audio must name an existing absolute audio file")
+    if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end <= MAX_AUDIO_SECONDS):
+        raise ValueError("--start and --end must satisfy 0 <= start < end within the supported length")
+    with analysis_lock():
+        if not readiness(verify_hashes=True)["available"]:
+            raise ValueError("Verified recognizer weights are unavailable; prepare the quality environment first")
+        os.environ.update(HF_HUB_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1",
+                          HF_HOME=str(RUNTIME / "huggingface"), TOKENIZERS_PARALLELISM="false")
+        return {"backend": WORKER_VERSION, "startSeconds": start, "endSeconds": end,
+                **transcribe(audio, start=start, end=end, language=language)}
 
 
 def separate_only(audio: Path) -> dict[str, Any]:
@@ -559,6 +590,11 @@ def main(argv: list[str] | None = None) -> int:
     separator.add_argument("--audio", required=True, type=Path)
     measurement = commands.add_parser("measure")
     measurement.add_argument("--audio", required=True, type=Path)
+    reader = commands.add_parser("transcribe")
+    reader.add_argument("--audio", required=True, type=Path)
+    reader.add_argument("--start", required=True, type=float)
+    reader.add_argument("--end", required=True, type=float)
+    reader.add_argument("--language")
     arguments = parser.parse_args(argv)
     try:
         # Third-party import/model output is always stderr. The sole stdout item
@@ -576,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
                 result = {"loudness": loudness(arguments.audio), "backend": WORKER_VERSION}
             elif arguments.command == "separate":
                 result = separate_only(arguments.audio)
+            elif arguments.command == "transcribe":
+                result = transcribe_span(arguments.audio, arguments.start, arguments.end, arguments.language)
             else:
                 result = analyze(arguments.audio)
         print(json.dumps(result, ensure_ascii=False, allow_nan=False), flush=True)

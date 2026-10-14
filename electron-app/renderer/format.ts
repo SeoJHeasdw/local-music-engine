@@ -78,7 +78,9 @@ export function versionTree(song: Song): { roots: VersionNode[]; flat: VersionNo
     // available in history, rather than turning every result into a nested edit.
     const source = version.parentId ? versions.get(version.parentId) : undefined;
     const parentId = version.quality?.processing ? source?.parentId : version.parentId;
-    const parent = parentId ? byId.get(parentId) : undefined;
+    // A take whose unsung lines were repainted during generation is the requested version itself.
+    const repaired = Boolean(version.quality?.repair) && !isAutomaticAttempt(version);
+    const parent = parentId && !repaired ? byId.get(parentId) : undefined;
     if (!parent) {
       const automatic = isAutomaticAttempt(version);
       if (!automatic) fullIndex += 1;
@@ -108,7 +110,8 @@ export function versionTree(song: Song): { roots: VersionNode[]; flat: VersionNo
   for (const node of flat) {
     const group = node.version.quality?.groupId;
     if (isAutomaticAttempt(node.version) && group && preferredNames.has(group)) {
-      node.name = `${preferredNames.get(group)} · 시도 ${node.version.quality?.attempt ?? 1} · ${node.version.quality?.processing ? "정리본" : "원본"}`;
+      const repair = node.version.quality?.repair;
+      node.name = `${preferredNames.get(group)} · 시도 ${node.version.quality?.attempt ?? 1}${repair ? ` · 가사 보정 ${repair.attempt}` : ""} · ${node.version.quality?.processing ? "정리본" : "원본"}`;
       node.short = node.name;
     }
   }
@@ -262,6 +265,22 @@ export function findingCopy(finding: Finding): { label: string; message: string;
         message: warning ? "곡 중간에 소리 전체가 순간적으로 끊겼다 돌아와요. 끊김이 들리는지 확인해 주세요."
           : "관측한 무음 구간 전체가 선언한 쉼 계획에 들어 있어요. 오류가 없거나 청취가 승인됐다는 뜻은 아니에요.",
         value: Number.isFinite(observed.dropDurationSeconds) ? `${observed.dropDurationSeconds.toFixed(2)}초` : null };
+    case "lyric_lines_missing":
+    case "lyric_lines_unclear": {
+      const count = Number(finding.observed.lineCount) || 1;
+      const first = String(finding.observed.firstLine ?? "").trim();
+      const lines = first ? `"${first}"${count > 1 ? ` 등 ${count}줄` : ""}` : `가사 ${count}줄`;
+      return {
+        label: finding.check === "lyric_lines_missing" ? `가사 ${count}줄이 들리지 않아요` : `가사 ${count}줄 인식 안 됨`,
+        message: finding.check === "lyric_lines_missing"
+          ? `이 구간을 세 번 다시 받아써도 나오지 않은 가사: ${lines}. 부르지 않았는지 들어 보세요.`
+          : `이 구간에서 인식하지 못한 가사: ${lines}. 다시 받아쓰지 못해 확정하지 않았어요. 불렀는지 들어 보세요.`,
+        value: typeof finding.observed.section === "string" ? finding.observed.section : null,
+      };
+    }
+    case "clipping_suspected":
+      return { label: "소리 찌그러짐 의심", message: "가장 큰 소리의 꼭대기가 잘린 모양이 일부 있어요. 큰 소리에서 지직거리는지 들어 보세요.",
+        value: Number.isFinite(observed.flatTopSampleFraction) ? `전체의 ${(observed.flatTopSampleFraction * 100).toFixed(2)}%` : null };
     default:
       return { label: finding.check, message: finding.message, value: null };
   }

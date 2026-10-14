@@ -151,6 +151,31 @@ def test_transcribe_does_not_supply_expected_lyrics(monkeypatch, tmp_path):
     assert result["reliable"]
 
 
+def test_the_first_recognizer_window_starts_where_sustained_singing_does(monkeypatch, tmp_path):
+    regions = [{"startSeconds": 2.0, "endSeconds": 2.5}, {"startSeconds": 7.5, "endSeconds": 30.0}]
+    assert worker.vocal_onset({"vocalActivityRegions": regions}) == 7.5  # a half-second blip is not the verse
+    assert worker.vocal_onset({"vocalActivityRegions": []}) == worker.vocal_onset({}) == 0.0
+    seen = []
+
+    class Recognizer:
+        @staticmethod
+        def transcribe(audio, **arguments):
+            seen.append((arguments["clip_timestamps"], arguments["language"], arguments["initial_prompt"]))
+            return {"text": "바람이 불어오는 이 밤", "language": "ko", "segments": [segment()]}
+    monkeypatch.setitem(sys.modules, "mlx_whisper", Recognizer())
+    assert worker.transcribe(tmp_path / "song.wav", start=6.5)["windowAnchorSeconds"] == 6.5
+    assert worker.transcribe(tmp_path / "song.wav", start=12.0, end=40.0, language="ko")["windowAnchorSeconds"] == 12.0
+    assert seen == [([6.5], None, None), ([12.0, 40.0], "ko", None)]
+
+
+@pytest.mark.parametrize("start,end", [(-1.0, 5.0), (5.0, 5.0), (0.0, float("inf")), (0.0, 9999.0)])
+def test_a_second_reading_needs_a_valid_span_before_any_model_work(tmp_path, start, end):
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"not read")
+    with pytest.raises(ValueError):
+        worker.transcribe_span(audio, start, end, None)
+
+
 def test_direct_worker_detects_reparenting_but_nested_setup_checks_pid():
     calls = []
     check_pid = lambda pid, signal: calls.append((pid, signal))

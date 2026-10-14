@@ -46,7 +46,8 @@ def test_repaint_inspector_failure_retains_usable_edited_audio_without_retry(tmp
         client_factory=FakeAceClient, quality=quality_policy(max_attempts=1), quality_backend=Reports(error=True), engine="ace-step")
     winner = store.find_by_id(store.load(), "candidates", "candidateId", result["candidateId"])
     assert FakeAceClient.submitted == [1, 8]
-    assert winner["quality"]["status"] == "unknown" and winner["quality"]["retryReasons"] == []
+    assert winner["quality"]["lyrics"]["status"] == "unknown" and winner["quality"]["retryReasons"] == []
+    assert winner["quality"]["inspectionErrors"][0]["stage"] == "lyrics"
     assert winner["quality"].get("processing") and winner["humanReview"]["status"] == "unreviewed"
 
 

@@ -24,6 +24,8 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore", DeprecationWarning)
     import audioop
 
+import numpy as np
+
 
 class AudioQualityError(ValueError):
     """An audio file or requested processing policy is invalid."""
@@ -35,6 +37,13 @@ class AudioQualityPolicy:
     near_full_scale: float = 0.999
     clipping_run_seconds: float = 0.002
     clipping_sample_fraction: float = 0.001
+    # Flat tops are measured at the file's own peak: the engine scales its output to
+    # -1 dBFS, so a clipped waveform no longer reaches full scale.
+    flat_top_level: float = 0.999
+    flat_top_sample_fraction: float = 0.001
+    flat_top_warning_fraction: float = 0.0001
+    flat_top_pile_up_ratio: float = 8.0
+    flat_top_minimum_peak: float = 0.05
     digital_silence_amplitude: float = 0.0001
     dc_warning_amplitude: float = 0.01
     boundary_warning_amplitude: float = 0.02
@@ -56,7 +65,9 @@ class AudioQualityPolicy:
                 raise AudioQualityError(f"{name} must be positive")
         if not 0.001 <= self.window_seconds <= 1:
             raise AudioQualityError("window_seconds must be between 0.001 and 1")
-        for name in ("near_full_scale", "clipping_sample_fraction", "digital_silence_amplitude", "dc_warning_amplitude", "boundary_warning_amplitude", "stereo_mono_ratio_warning", "stereo_warning_active_fraction", "active_window_rms", "duration_warning_fraction", "duration_retry_fraction"):
+        if self.flat_top_pile_up_ratio < 1 or self.flat_top_warning_fraction > self.flat_top_sample_fraction:
+            raise AudioQualityError("flat-top thresholds are inconsistent")
+        for name in ("near_full_scale", "clipping_sample_fraction", "flat_top_level", "flat_top_sample_fraction", "flat_top_warning_fraction", "flat_top_minimum_peak", "digital_silence_amplitude", "dc_warning_amplitude", "boundary_warning_amplitude", "stereo_mono_ratio_warning", "stereo_warning_active_fraction", "active_window_rms", "duration_warning_fraction", "duration_retry_fraction"):
             if not 0 < getattr(self, name) <= 1:
                 raise AudioQualityError(f"{name} must be in (0, 1]")
         if not -1 <= self.stereo_correlation_warning < 0:
@@ -130,6 +141,56 @@ def _chunks(audio: wave.Wave_read, frames_per_chunk: int, channels: int, width: 
 
 def _db(amplitude: float) -> float | None:
     return 20 * math.log10(amplitude) if amplitude > 0 else None
+
+
+def _flat_tops(path: Path | str, *, peak: int, level: float) -> dict[str, float]:
+    """Measure waveform tops cut flat at the file's own peak, whatever that peak is.
+
+    A hard-clipped signal keeps its flat tops when it is later scaled down, so the rail
+    is taken from the decoded peak instead of full scale. Samples count when at least
+    three in a row sit at that rail with one polarity. ``pileUpRatio`` compares the rail
+    with the equally wide band just below it: a smooth loud crest fills both, a cut one
+    piles up on the rail. Memory is bounded by one chunk, as in the main pass.
+    """
+
+    rail = max(1, math.floor(peak * level))
+    below = max(1, math.floor(peak * (2 * level - 1)))
+    at_rail = under_rail = flat = longest = 0
+    with wave.open(str(path), "rb") as audio:
+        channels, width, _rate, frames = _metadata(audio)
+        carried = [(0, 0)] * channels  # polarity and length of the run reaching the chunk end
+
+        def close(length: int) -> None:
+            nonlocal flat, longest
+            if length >= 3:
+                flat += length
+                longest = max(longest, length)
+
+        for values, chunk_frames in _chunks(audio, 65_536, channels, width):
+            data = np.frombuffer(values, dtype=values.typecode).reshape(chunk_frames, channels)
+            magnitude = np.abs(data.astype(np.int64))
+            at_rail += int((magnitude >= rail).sum())
+            under_rail += int(((magnitude >= below) & (magnitude < rail)).sum())
+            for channel in range(channels):
+                column = data[:, channel]
+                polarity = np.where(column >= rail, 1, np.where(column <= -rail, -1, 0))
+                starts = np.concatenate(([0], np.flatnonzero(np.diff(polarity)) + 1))
+                lengths = np.diff(np.concatenate((starts, [chunk_frames])))
+                sign, pending = carried[channel]
+                for index, (start, length) in enumerate(zip(starts.tolist(), lengths.tolist())):
+                    current = int(polarity[start])
+                    if index == 0 and current == sign:
+                        length += pending
+                    elif index == 0:
+                        close(pending)
+                    if start + lengths[index] == chunk_frames:
+                        carried[channel] = (current, length if current else 0)
+                    elif current:
+                        close(length)
+        for _sign, pending in carried:
+            close(pending)
+    return {"flatTopSampleFraction": flat / (frames * channels), "longestFlatTopSamples": longest,
+            "flatTopPileUpRatio": at_rail / max(1, under_rail)}
 
 
 def analyze_audio_quality(
@@ -255,7 +316,14 @@ def analyze_audio_quality(
         correlation = max(-1.0, min(1.0, covariance / math.sqrt(variances[0] * variances[1]))) if min(variances) > 0 else None
         energy = (squares[0] + squares[1]) / 2
         mono_ratio = math.sqrt(max(0, (squares[0] + squares[1] + 2 * stereo_cross_sum) / 4) / energy) if energy else None
+    flat = {"flatTopSampleFraction": 0.0, "longestFlatTopSamples": 0, "flatTopPileUpRatio": 0.0}
+    if peak >= policy.flat_top_minimum_peak:
+        try:
+            flat = _flat_tops(path, peak=round(peak * maximum), level=policy.flat_top_level)
+        except (OSError, wave.Error, EOFError) as error:
+            raise AudioQualityError(f"WAV quality analysis failed: {error}") from error
     metrics: dict[str, Any] = {
+        **flat,
         "frames": frames, "sampleRate": rate, "channels": channels, "sampleWidthBytes": width,
         "durationSeconds": duration, "peak": peak, "rms": rms, "rmsDbfs": _db(rms),
         "crestFactorDb": 20 * math.log10(peak / rms) if rms and peak else None,
@@ -288,8 +356,15 @@ def analyze_audio_quality(
     if silent:
         add("digital_silence", "error", "The entire output is at or below near-digital silence.", {"peak": peak}, {"maximumAmplitude": policy.digital_silence_amplitude}, retry=True, penalty=100)
     sustained = longest_rail_seconds >= policy.clipping_run_seconds and max(longest_runs) >= 3 and rail_fraction >= policy.clipping_sample_fraction
-    if sustained:
-        add("sustained_clipping", "error", "Repeated same-polarity samples remain at full scale; lowering gain cannot restore the lost waveform.", {"sampleFraction": rail_fraction, "longestRunSeconds": longest_rail_seconds}, {"minimumRunSeconds": policy.clipping_run_seconds, "minimumSampleFraction": policy.clipping_sample_fraction, "amplitudeAtOrAbove": policy.near_full_scale}, retry=True, penalty=60)
+    piled_up = flat["flatTopPileUpRatio"] >= policy.flat_top_pile_up_ratio
+    flat_observed = {"flatTopSampleFraction": flat["flatTopSampleFraction"], "longestFlatTopSamples": flat["longestFlatTopSamples"],
+                     "flatTopPileUpRatio": flat["flatTopPileUpRatio"], "peak": peak}
+    flat_threshold = {"amplitudeAtOrAboveFractionOfPeak": policy.flat_top_level, "minimumRunSamples": 3,
+                      "minimumPileUpRatio": policy.flat_top_pile_up_ratio}
+    if sustained or (piled_up and flat["flatTopSampleFraction"] >= policy.flat_top_sample_fraction):
+        add("sustained_clipping", "error", "The waveform's tops are cut flat; lowering gain cannot restore the lost waveform.", {"sampleFraction": rail_fraction, "longestRunSeconds": longest_rail_seconds, **flat_observed}, {"minimumRunSeconds": policy.clipping_run_seconds, "minimumSampleFraction": policy.clipping_sample_fraction, "amplitudeAtOrAbove": policy.near_full_scale, **flat_threshold, "minimumFlatTopSampleFraction": policy.flat_top_sample_fraction}, retry=True, penalty=60)
+    elif piled_up and flat["flatTopSampleFraction"] >= policy.flat_top_warning_fraction:
+        add("clipping_suspected", "warning", "Some waveform tops are cut flat at the file's peak; listen for distortion on the loudest hits.", flat_observed, {**flat_threshold, "minimumFlatTopSampleFraction": policy.flat_top_warning_fraction}, penalty=20)
     elif peak >= policy.near_full_scale:
         add("full_scale_peak", "info", "Full-scale peaks were observed without sustained clipping evidence.", {"peak": peak, "longestRunSeconds": longest_rail_seconds}, {"sustainedRunSeconds": policy.clipping_run_seconds})
     dc = max(abs(value) for value in channel_means)

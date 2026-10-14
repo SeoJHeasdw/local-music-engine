@@ -197,3 +197,65 @@ def test_audio_only_backend_does_not_report_a_lyric_match(tmp_path: Path, monkey
     assert report["available"] is False and report["reliable"] is False
     assert report["text"] == "" and report["segments"] == []
     assert report["loudness"]["truePeakDbtp"] == -3
+
+
+def install(runtime: Path, **marker) -> None:
+    (runtime / ".venv/bin").mkdir(parents=True, exist_ok=True)
+    (runtime / ".venv/bin/python").write_text("")
+    pinned = quality_backend.hashlib.sha256((quality_backend.ROOT / "scripts/quality-requirements.txt").read_bytes()).hexdigest()
+    (runtime / "ready.json").write_text(json.dumps({"available": True, "backend": quality_backend.WORKER_VERSION,
+                                                    "requirementsSha256": pinned, **marker}))
+
+
+@pytest.mark.parametrize("marker,usable", [({}, True), ({"available": False}, False), ({"backend": "local-quality-v0"}, False),
+                                           ({"requirementsSha256": "0" * 64}, False)])
+def test_a_stale_or_unusable_ready_marker_is_not_readiness(tmp_path: Path, monkeypatch, marker, usable) -> None:
+    monkeypatch.setattr(quality_backend, "RUNTIME", tmp_path)
+    install(tmp_path, **marker)
+    assert LocalQualityBackend.installed() is usable
+    setups = []
+    backend = LocalQualityBackend()
+    monkeypatch.setattr(backend, "_run", lambda command, **kwargs: setups.append(command) or install(tmp_path))
+    assert backend.prepare() is True
+    assert len(setups) == (0 if usable else 1)  # an unusable marker is repaired instead of trusted
+    assert LocalQualityBackend(auto_setup=False).prepare() is True
+
+
+def test_the_worker_version_matches_the_marker_the_worker_writes() -> None:
+    script = (quality_backend.ROOT / "scripts/quality_worker.py").read_text(encoding="utf-8")
+    assert f'WORKER_VERSION = "{quality_backend.WORKER_VERSION}"' in script
+
+
+def test_models_lost_after_setup_are_restored_once_and_the_audio_is_read_again(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(quality_backend, "RUNTIME", tmp_path)
+    install(tmp_path)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command[1].rsplit("/", 1)[-1] if command[0] == "/bin/bash" else command[2])
+        if calls[-1] == "analyze":
+            return ({"available": False, "setupRequired": True, "segments": []} if calls.count("analyze") == 1
+                    else {"available": True, "reliable": True, "text": "가사", "segments": []})
+        return None
+
+    backend = LocalQualityBackend()
+    monkeypatch.setattr(backend, "_run", run)
+    assert backend.analyze(tmp_path / "audio.wav")["available"] is True
+    assert calls == ["analyze", "bootstrap_quality.sh", "analyze"]
+
+
+def test_a_second_reading_names_its_span_and_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(quality_backend, "RUNTIME", tmp_path)
+    backend = LocalQualityBackend(auto_setup=False)
+    assert backend.transcribe_span(tmp_path / "audio.wav", start_seconds=1, end_seconds=9)["available"] is False
+    install(tmp_path)
+    commands = []
+    monkeypatch.setattr(backend, "_run", lambda command, **kwargs: commands.append(command[2:]) or {"available": True, "segments": []})
+    assert backend.transcribe_span(tmp_path / "audio.wav", start_seconds=7.5, end_seconds=38.25, language="en")["available"] is True
+    assert commands == [["transcribe", "--audio", str(tmp_path / "audio.wav"), "--start", "7.500", "--end", "38.250", "--language", "en"]]
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("worker crashed")
+
+    monkeypatch.setattr(backend, "_run", broken)
+    assert "RuntimeError" in backend.transcribe_span(tmp_path / "audio.wav", start_seconds=1, end_seconds=9)["error"]

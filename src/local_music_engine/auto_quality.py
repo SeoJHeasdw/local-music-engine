@@ -6,6 +6,7 @@ import re
 import math
 import secrets
 import unicodedata
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
@@ -13,7 +14,7 @@ from typing import Any, Callable
 from .audio_quality import AudioFinishPolicy, analyze_audio_quality, finish_audio
 from .execution import execute_candidate
 from .jobs import ACTIVE_STATUSES, batch_lineage, cleanup_export_outputs, validate_seed
-from .lyric_quality import assess_lyric_suitability, evaluate_lyric_transcript
+from .lyric_quality import assess_lyric_suitability, evaluate_lyric_transcript, reread_requests, reread_starts
 from .qc import artifact_and_findings
 from .quality_backend import AudioOnlyBackend, LocalQualityBackend
 from .storage import ProjectStore, fingerprint, new_id, utc_now
@@ -27,16 +28,50 @@ from .rhythm_inspection import attach_diagnostics
 QUALITY_VERSION = "music-quality-v1"
 
 
-def quality_policy(mode: str = "auto", *, max_attempts: int = 4) -> dict[str, Any] | None:
+# One unsung stretch is repainted at most this many times, gentlest first.
+REPAIR_STRENGTHS = ("medium", "strong", "strong")
+_REPAIR_MINIMUM_SECONDS = 4.0
+_REPAIR_MAXIMUM_SECONDS = 60.0
+_REPAIR_SYLLABLES_PER_SECOND = 4.0   # the planning rate above which lyrics are flagged as dense
+
+
+def quality_policy(mode: str = "auto", *, max_attempts: int = 4, repair_attempts: int = 0) -> dict[str, Any] | None:
+    """Repairing unsung lines is opt-in: in the first listening test the repaired opening sang
+    the lines, but its new melody did not suit the song and the original was preferred."""
     if mode == "off":
         return None
     if mode not in {"auto", "audio"}:
         raise ValueError("quality mode must be auto, audio or off")
     if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or not 1 <= max_attempts <= 4:
         raise ValueError("quality attempts must be between 1 and 4, including the first generation")
+    if isinstance(repair_attempts, bool) or not isinstance(repair_attempts, int) or not 0 <= repair_attempts <= len(REPAIR_STRENGTHS):
+        raise ValueError(f"repair attempts must be between 0 and {len(REPAIR_STRENGTHS)}")
     return {"enabled": True, "version": QUALITY_VERSION, "maxAttempts": max_attempts,
             "lyrics": mode == "auto", "finishAudio": True, "autoSetup": True,
-            "rhythmVersion": RHYTHM_VERSION, "diagnosticsVersion": DIAGNOSTICS_VERSION, "engineMetas": True}
+            "rhythmVersion": RHYTHM_VERSION, "diagnosticsVersion": DIAGNOSTICS_VERSION, "engineMetas": True,
+            # Repair is driven by what the lyric reader hears, so it needs that reader.
+            "repairAttempts": repair_attempts if mode == "auto" else 0}
+
+
+_ARRANGEMENT_LOOP = re.compile(
+    r"\b(?:chord|drum|beat|piano|guitar|bass|synth|sample|melody|melodic|vocal|riff|percussion|keys|pad|arpeggio)s?[- ]loops?\b"
+    r"|(?:코드|드럼|비트|피아노|기타|베이스|신스|샘플|멜로디)\s*루프", re.IGNORECASE)
+
+
+def _own_style(payload: dict[str, Any]) -> str:
+    """The person's own style words, where loop, cut and rap intent is read.
+
+    The prompt sent to the engine also carries preset and rule captions. The default
+    rule "repeating chord loop" describes harmony and is not a request for loop audio,
+    and neither is an instrument loop the person names themselves.
+    """
+
+    rules = payload.get("productionRules")
+    text = rules["baseStylePrompt"] if rules else payload.get("sourceStylePrompt", payload["prompt"])
+    # A feedback round can hand back the previous effective caption as the base style.
+    for caption in (rules or {}).get("appliedCaptions", []):
+        text = re.sub(re.escape(caption), " ", text, flags=re.IGNORECASE)
+    return _ARRANGEMENT_LOOP.sub(" ", text)
 
 
 def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -73,9 +108,7 @@ def prepare_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if normalized != model_lyrics and not changes:
         changes.append("unicode_and_newlines_normalized")
     instrumental = is_instrumental_lyrics(normalized)
-    # Loop/cut/rap intent belongs to the person's own style. Music 3's rendered
-    # caption also carries preset prose (e.g. "chord loop") that is not that intent.
-    caption = payload.get("sourceStylePrompt", payload["prompt"]) if payload.get("engine") == "minimax-music3" else payload["prompt"]
+    caption = _own_style(payload)
     loop_or_cut = bool(re.search(r"\b(loop|loopable|seamless|hard cut|abrupt ending)\b|반복용|루프|갑자기.*끝", caption, re.I))
     if not instrumental and not loop_or_cut and len(normalized) <= 4084 and not re.search(r"\[(outro|ending|end)\b", normalized, re.I):
         normalized = normalized.rstrip() + "\n\n[Outro]"
@@ -138,6 +171,22 @@ def make_quality_plan(payloads: list[dict[str, Any]], policy: dict[str, Any]) ->
     return plan
 
 
+def make_repair_seeds(plan: list[list[dict[str, Any]]], policy: dict[str, Any]) -> list[list[int]]:
+    """Seeds for each version's repair repaints, fixed with the batch like its retries."""
+
+    used = {payload["seed"] for group in plan for payload in group}
+    seeds = []
+    for _ in plan:
+        group = []
+        while len(group) < policy["repairAttempts"]:
+            seed = secrets.randbelow(2**32)
+            if seed not in used:
+                used.add(seed)
+                group.append(seed)
+        seeds.append(group)
+    return seeds
+
+
 def validate_quality_plan(parameters: dict[str, Any]) -> None:
     policy, plan, seeds = parameters.get("qualityPolicy"), parameters.get("qualityPlan"), parameters.get("seeds")
     if (not isinstance(policy, dict) or policy.get("version") != QUALITY_VERSION
@@ -165,6 +214,15 @@ def validate_quality_plan(parameters: dict[str, Any]) -> None:
                 raise ValueError("automatic quality retries must keep the original frozen inputs")
     if parameters.get("frozenPayloads") != [group[0] for group in plan]:
         raise ValueError("automatic quality plan does not match the batch snapshot")
+    repairs = policy.get("repairAttempts") or 0
+    if repairs:
+        repair_seeds = parameters.get("repairSeeds")
+        if (isinstance(repairs, bool) or not isinstance(repairs, int) or not 1 <= repairs <= len(REPAIR_STRENGTHS)
+                or not isinstance(repair_seeds, list) or len(repair_seeds) != len(plan)
+                or any(not isinstance(group, list) or len(group) != repairs for group in repair_seeds)):
+            raise ValueError("automatic repair attempts exceed the saved budget")
+        for group in repair_seeds:
+            all_seeds.extend(validate_seed(seed) for seed in group)
     if len(set(all_seeds)) != len(all_seeds):
         raise ValueError("automatic quality attempt seeds must be unique")
 
@@ -179,13 +237,35 @@ def _candidate(store: ProjectStore, candidate_id: str) -> tuple[dict[str, Any], 
     return candidate, artifact, store.resolve_artifact(artifact)
 
 
+# Level and tone change at every section boundary and a pulse can be read at half or
+# double speed, so these are measurements. The app's "확인할 것" list leaves out the same set.
+STRUCTURE_OBSERVATIONS = frozenset({"loudness_shift", "spectral_shift", "tempo_ambiguity"})
+
+
+def listening_points(report: dict[str, Any]) -> int:
+    """How many places or problems this report tells the listener to check."""
+
+    findings = [finding for part in ("audio", "rhythm", "engine", "lyrics")
+                for finding in (report.get(part) or {}).get("findings", [])]
+    return sum(finding.get("severity") in {"warning", "error"} and finding.get("check") not in STRUCTURE_OBSERVATIONS
+               for finding in findings)
+
+
 def _quality_rank(report: dict[str, Any]) -> tuple[float, ...]:
+    """Order attempts of one request; it does not predict which one a listener prefers.
+
+    An attempt whose lyrics could not be read ranks above one measured as badly sung,
+    and below every attempt that was read. Among attempts that pass, fewer places to
+    check comes before a small difference in the transcript.
+    """
+
     audio = report.get("audio", {})
     lyrics = report.get("lyrics", {})
     known = lyrics.get("status") in {"pass", "warning"}
     return (float(not audio.get("retryEligible", False)),
             float(lyrics.get("status") in {"pass", "not_applicable"}),
             float(not report.get("retryReasons")),
+            -float(listening_points(report)),
             float(lyrics.get("orderedCoverage") or 0) if known else 0,
             float(audio.get("technicalScore", 0)))
 
@@ -261,6 +341,109 @@ def _engine_metas(store: ProjectStore, candidate_id: str) -> Any:
     return job["remoteResult"].get("metas") if job else None
 
 
+def _read_lyrics(written: str, observation: dict[str, Any], *, backend: Any, path: Path,
+                 duration_seconds: float, failed: Callable[[str, Exception], None]) -> dict[str, Any]:
+    """Compare the reading with the written lyrics, reading barely-heard sections again.
+
+    A section is called missing only when readings begun at other points of that
+    stretch, off the first pass's 30-second grid, still do not find it.
+    """
+
+    report = evaluate_lyric_transcript(written, observation, duration_seconds=duration_seconds)
+    reread = getattr(backend, "transcribe_span", None)
+    spans = reread_requests(report) if report["sttReliable"] and reread is not None else []
+    if not spans:
+        return report
+    readings = []
+    for span_start, span_end in spans:
+        end = min(span_end, duration_seconds)
+        for start in reread_starts(span_start, end, anchor=observation.get("windowAnchorSeconds")):
+            try:
+                readings.append({"startSeconds": start, "endSeconds": end,
+                                 "transcription": reread(path, start_seconds=start, end_seconds=end,
+                                                         language=observation.get("language"))})
+            except Exception as error:
+                failed("lyrics_reread", error)
+    return evaluate_lyric_transcript(written, observation, duration_seconds=duration_seconds, rereads=readings)
+
+
+def repair_target(report: dict[str, Any], *, duration_seconds: float) -> dict[str, Any] | None:
+    """The first unsung stretch a repaint could plausibly fill, with the range to repaint.
+
+    Only lines that three readings did not find qualify. The range is the part of their
+    stretch where no sustained singing was measured, when that part is long enough to
+    sing them in; otherwise the whole stretch between the sung lines on each side. A
+    stretch with no room for the words, or covering most of the song, is left alone.
+    """
+
+    lyrics = report.get("lyrics") or {}
+    if not lyrics.get("sttReliable") or (report.get("audio") or {}).get("retryEligible"):
+        return None
+    regions = ((report.get("observation") or {}).get("separation") or {}).get("vocalActivityRegions") or []
+    longest = min(_REPAIR_MAXIMUM_SECONDS, duration_seconds / 2)
+    for run in lyrics.get("unheardLines", []):
+        if not run.get("rereadConfirmed"):
+            continue
+        start, end = run["searchSpanSeconds"]
+        sung = sorted((max(start, region["startSeconds"]), min(end, region["endSeconds"])) for region in regions
+                      if region["endSeconds"] - region["startSeconds"] >= 1.0 and region["endSeconds"] > start and region["startSeconds"] < end)
+        gaps, cursor = [], start
+        for first, last in sung:
+            if first > cursor:
+                gaps.append((cursor, first))
+            cursor = max(cursor, last)
+        if end > cursor:
+            gaps.append((cursor, end))
+        quiet = max(gaps, key=lambda gap: gap[1] - gap[0], default=None)
+        if quiet and quiet[1] - quiet[0] >= max(_REPAIR_MINIMUM_SECONDS, run["syllables"] / _REPAIR_SYLLABLES_PER_SECOND):
+            # Stop just short of the next sung line so its opening stays the original's.
+            chosen = (quiet[0], quiet[1] - 0.25 if quiet[1] < end else quiet[1])
+        elif end - start >= max(_REPAIR_MINIMUM_SECONDS, run["spanSyllables"] / _REPAIR_SYLLABLES_PER_SECOND):
+            chosen = (start, end)
+        else:
+            continue
+        if chosen[1] - chosen[0] <= longest:
+            return {"section": run["section"], "occurrence": run["occurrence"], "lineCount": run["lineCount"],
+                    "firstLine": run["firstLine"], "range": {"startSeconds": round(chosen[0], 2), "endSeconds": round(chosen[1], 2)}}
+    return None
+
+
+def repair_verdict(before: dict[str, Any], after: dict[str, Any], splice: dict[str, Any] | None) -> list[str]:
+    """Why a repainted stretch is not taken; empty when it is.
+
+    It is taken only when the rest of the song is still the original's own samples, more
+    of the written words are heard, nothing is unheard in the new stretch, and no check
+    reports something in or around that stretch that the original did not have. The
+    rest of the song is the same samples, so what the checks say about it is not the
+    repaint's doing and is left out of the comparison.
+    """
+
+    if not (splice or {}).get("applied"):
+        return ["rest_of_song_not_preserved"]
+    reasons = []
+    lyrics = after.get("lyrics") or {}
+    if not lyrics.get("sttReliable"):
+        reasons.append("lyrics_not_readable")
+    elif (lyrics.get("matchedUnits") or 0) <= ((before.get("lyrics") or {}).get("matchedUnits") or 0):
+        reasons.append("no_more_words_heard")
+    changed = splice["changedRange"]
+    if any(finding["startSeconds"] < changed["endSeconds"] and finding["endSeconds"] > changed["startSeconds"]
+           for finding in lyrics.get("findings", [])):
+        reasons.append("lines_still_unheard")
+    if set(after.get("retryReasons") or []) - set(before.get("retryReasons") or []):
+        reasons.append("new_regeneration_reason")
+
+    def places(report: dict[str, Any]) -> Counter:
+        def near(finding: dict[str, Any]) -> bool:  # a finding without a time is about the whole song
+            start, end = finding.get("startSeconds"), finding.get("endSeconds")
+            return start is None or end is None or (start < changed["endSeconds"] + 1.0 and end > changed["startSeconds"] - 1.0)
+        return Counter(finding["check"] for part in ("audio", "rhythm", "engine") for finding in (report.get(part) or {}).get("findings", [])
+                       if finding.get("severity") in {"warning", "error"} and finding["check"] not in STRUCTURE_OBSERVATIONS and near(finding))
+
+    reasons.extend(f"new_place_to_check:{check}" for check in sorted((places(after) - places(before))))
+    return reasons
+
+
 def _assessment_status(audio: dict[str, Any], lyrics: dict[str, Any], rhythm: dict[str, Any] | None,
                        reasons: list[str], engine: dict[str, Any] | None = None) -> str:
     if (reasons or audio.get("automaticStatus") == "needs_review"
@@ -297,26 +480,42 @@ def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str
             batch["stage"] = name
 
     try:
+        # Without the PCM measurement there is no report. Every later inspector is
+        # optional evidence: its failure is recorded and leaves the others standing.
         audio = analyze_audio_quality(path, requested_duration_seconds=context["payload"]["audio_duration"])
+        inspection_errors: list[dict[str, str]] = []
+
+        def failed(name: str, error: Exception) -> None:
+            inspection_errors.append({"stage": name, "error": f"{type(error).__name__}: {error}"})
+
         rhythm = None
         if policy.get("rhythmVersion") == RHYTHM_VERSION:
             stage("quality_rhythm")
             rhythm = _measure_rhythm(path, context["payload"], artifact["sha256"])
         original_lyrics = context["payload"].get("qualityPreparation", {}).get("lyricsOriginal", context["payload"]["lyrics"])
         preflight = assess_lyric_suitability(original_lyrics, context["payload"]["audio_duration"], bpm=context["payload"].get("bpm"))
-        if preflight["instrumental"]:
-            observation = {"available": False, "reliable": False, "text": "", "segments": [],
-                           "loudness": backend.measure_loudness(path) if hasattr(backend, "measure_loudness") else {"status": "unknown"}}
-        else:
-            stage("quality_lyrics")
-            observation = backend.analyze(path, progress=lambda message: stage("quality_lyrics: " + message))
+        unavailable = {"available": False, "reliable": False, "text": "", "segments": [], "loudness": {"status": "unknown"}}
+        try:
+            if preflight["instrumental"]:
+                observation = {**unavailable, "loudness": backend.measure_loudness(path) if hasattr(backend, "measure_loudness") else {"status": "unknown"}}
+            else:
+                stage("quality_lyrics")
+                observation = backend.analyze(path, progress=lambda message: stage("quality_lyrics: " + message))
+        except Exception as error:
+            failed("lyrics", error)
+            observation = {**unavailable, "error": inspection_errors[-1]["error"]}
         if rhythm is not None and policy.get("diagnosticsVersion") in DIAGNOSTICS_VERSIONS:
             stage("quality_rhythm")
-            rhythm = attach_diagnostics(rhythm, path, duration_seconds=artifact["audio"]["durationSeconds"],
-                source_sha256=artifact["sha256"], separation=observation.get("separation"),
-                style_prompt=context["payload"].get("sourceStylePrompt", context["payload"].get("prompt", "")),
-                diagnostics_version=policy["diagnosticsVersion"])
-        lyrics = evaluate_lyric_transcript(original_lyrics, observation, duration_seconds=artifact["audio"]["durationSeconds"])
+            try:
+                rhythm = attach_diagnostics(rhythm, path, duration_seconds=artifact["audio"]["durationSeconds"],
+                    source_sha256=artifact["sha256"], separation=observation.get("separation"),
+                    style_prompt=context["payload"].get("sourceStylePrompt", context["payload"].get("prompt", "")),
+                    diagnostics_version=policy["diagnosticsVersion"])
+            except Exception as error:
+                failed("rhythm_diagnostics", error)
+                rhythm = {**rhythm, "status": "unknown", "diagnosticsError": inspection_errors[-1]["error"]}
+        lyrics = _read_lyrics(original_lyrics, observation, backend=backend, path=path,
+                              duration_seconds=artifact["audio"]["durationSeconds"], failed=failed)
         reasons = [finding["check"] for finding in audio["findings"] if finding.get("retryEligible")]
         reasons.extend(lyrics.get("retryReasons", []))
         # A dropped request field repeats for every seed, so this never asks for a retry.
@@ -334,10 +533,13 @@ def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str
             report["scope"] = "technical_integrity_transcript_match_and_rhythm_observations"
         if engine is not None:
             report["engine"] = engine
+        if inspection_errors:
+            report["inspectionErrors"] = inspection_errors
         with store.transaction() as project:
             current = store.find_by_id(project, "candidates", "candidateId", candidate_id)
             current["quality"] = report
-            for finding in [*audio["findings"], *(rhythm or {}).get("findings", []), *(engine or {}).get("findings", [])]:
+            for finding in [*audio["findings"], *(rhythm or {}).get("findings", []), *(engine or {}).get("findings", []),
+                            *lyrics.get("findings", [])]:
                 record = {**finding, "severity": "failure" if finding["severity"] == "error" else finding["severity"],
                           "findingId": new_id("finding"), "artifactId": artifact["artifactId"], "createdAt": utc_now()}
                 project["findings"].append(record)
@@ -395,13 +597,19 @@ def finalize_candidate(store: ProjectStore, candidate_id: str, *, batch_id: str)
         loudness = candidate["quality"].get("observation", {}).get("loudness", {})
         true_peak = loudness.get("truePeakDbtp")
         ceiling = 0.98
-        if (loudness.get("status") in {"measured", "inconclusive"} and not isinstance(true_peak, bool)
+        spliced = bool((source_artifact.get("splice") or {}).get("applied"))
+        if spliced:
+            # An edit keeps the level of the version it edits: outside the changed stretch it
+            # holds that version's own samples, and the new stretch is already under its peak.
+            pass
+        elif (loudness.get("status") in {"measured", "inconclusive"} and not isinstance(true_peak, bool)
                 and isinstance(true_peak, (int, float)) and math.isfinite(true_peak) and -1 < true_peak <= 12):
             # Linear attenuation only: use measured inter-sample headroom, never
             # compress or boost music to chase a fixed loudness target.
             sample_peak = candidate["quality"]["audio"]["metrics"]["peak"]
             ceiling = min(ceiling, max(0.001, sample_peak * 10 ** ((-1 - true_peak) / 20)))
-        processing = finish_audio(source, destination, policy=AudioFinishPolicy(peak_ceiling=ceiling), on_staged=staged)
+        finishing = AudioFinishPolicy(peak_ceiling=ceiling, dc_correction_amplitude=1.0) if spliced else AudioFinishPolicy(peak_ceiling=ceiling)
+        processing = finish_audio(source, destination, policy=finishing, on_staged=staged)
         artifact, findings = artifact_and_findings(path=destination, project_relative_path=relative,
                                                  artifact_kind="finished-audio", created_by_job_id=job["jobId"],
                                                  requested_duration_seconds=source_artifact["audio"]["durationSeconds"])
@@ -425,9 +633,12 @@ def finalize_candidate(store: ProjectStore, candidate_id: str, *, batch_id: str)
             report["summary"] = _assessment_summary(report["status"], instrumental=report["lyrics"].get("status") == "not_applicable")
             findings.extend({**finding, "findingId": new_id("finding"), "artifactId": artifact["artifactId"],
                              "createdAt": utc_now()} for finding in report["rhythm"].get("findings", []))
-        # The finished file is the same performance; it keeps the engine's own account of it.
+        # The finished file is the same performance; it keeps the engine's own account of it
+        # and what was heard of its lyrics.
         findings.extend({**finding, "findingId": new_id("finding"), "artifactId": artifact["artifactId"],
-                         "createdAt": utc_now()} for finding in (report.get("engine") or {}).get("findings", []))
+                         "createdAt": utc_now()}
+                        for part in ("engine", "lyrics") for finding in (report.get(part) or {}).get("findings", []))
+        report.pop("finishingError", None)
         report["processing"] = {**processing["processing"], "sourceCandidateId": candidate_id,
                                 "sourceArtifactId": source_artifact["artifactId"], "existingClippingRepaired": False,
                                 "outputQuality": processing["outputQuality"]}
@@ -518,7 +729,7 @@ def finish_single_edit(store: ProjectStore, candidate_id: str, *, job_id: str,
 
 def run_quality_batch(store: ProjectStore, *, batch_id: str, client: Any, poll_seconds: float,
                       timeout_seconds: float, backend: Any | None = None) -> dict[str, Any]:
-    from .workflow import _api_payload, _append_request, _require_loaded_models
+    from .workflow import _api_payload, _append_request, _require_loaded_models, frozen_repaint
     project = store.load()
     batch = store.find_by_id(project, "jobs", "jobId", batch_id)
     policy = batch["parameters"]["qualityPolicy"]
@@ -536,6 +747,112 @@ def run_quality_batch(store: ProjectStore, *, batch_id: str, client: Any, poll_s
             current.setdefault("attemptFailures", []).append(entry)
             if fatal and not any(record["seed"] == str(seed) for record in current["failures"]):
                 current["failures"].append(entry)
+
+    def finish(candidate_id: str, seed: int) -> tuple[str, str | None]:
+        """The finished copy, or the verified original with the reason finishing failed."""
+        try:
+            return finalize_candidate(store, candidate_id, batch_id=batch_id), None
+        except Exception as error:
+            # The batch ends ``partial`` so a resume can repeat only this step.
+            failure(seed, error, stage="audio_finishing", fatal=True)
+            _candidate(store, candidate_id)  # Never fall back to a damaged original.
+            return candidate_id, f"{type(error).__name__}: {error}"
+
+    def server_may_still_be_working(error: Exception) -> bool:
+        # A timeout may leave remote inference running. Do not add more work automatically.
+        return isinstance(error, TimeoutError) or any(term in str(error) for term in
+            ("API unavailable", "API HTTP", "unhealthy ACE", "unhealthy Music 3", "Music 3 server", "not the requested"))
+
+    def repair(slot: int, source_id: str, report: dict[str, Any], payload: dict[str, Any], seed: int) -> tuple[str, dict[str, Any]]:
+        """Repaint a stretch whose written lines went unsung; keep the first take that verifiably sings them.
+
+        This edits the chosen take instead of drawing another song: the rest of it stays
+        sample-identical, and a take that does not pass ``repair_verdict`` is kept only
+        as history. Each numbered attempt is frozen with the batch and consumed once.
+        """
+        nonlocal stop_submissions
+        seeds = (batch["parameters"].get("repairSeeds") or [[]] * len(plan))[slot][:policy.get("repairAttempts") or 0]
+        if not seeds or payload.get("engine") == "minimax-music3" or payload.get("task_type") != "text2music":
+            return source_id, report
+        _, source_artifact, _ = _candidate(store, source_id)
+        target = repair_target(report, duration_seconds=source_artifact["audio"]["durationSeconds"])
+        if target is None:
+            return source_id, report
+        for number, repair_seed in enumerate(seeds, 1):
+            strength = REPAIR_STRENGTHS[number - 1]
+            current_project = store.load()
+            frozen, source_path, duration, edit_range = frozen_repaint(
+                store, current_project, parent_id=source_id, start_seconds=target["range"]["startSeconds"],
+                end_seconds=target["range"]["endSeconds"], seed=repair_seed, strength=strength)
+            requests = {record["requestId"]: record for record in current_project["requests"]}
+            jobs = {record["jobId"]: record for record in current_project["jobs"]}
+            artifacts = {record["artifactId"]: record for record in current_project["artifacts"]}
+            consumed = [job["jobId"] for job in current_project["jobs"] if job["kind"] == "repaint-candidate"
+                        and job.get("parentJobId") in lineage and job["parameters"].get("qualitySlot") == slot
+                        and job["parameters"].get("repairAttempt") == number]
+            existing = next((candidate["candidateId"] for candidate in reversed(current_project["candidates"])
+                             if artifacts[candidate["artifactId"]].get("createdByJobId") in consumed
+                             and jobs[artifacts[candidate["artifactId"]]["createdByJobId"]]["status"] == "succeeded"
+                             and fingerprint(requests[candidate["requestId"]]["parameters"]) == fingerprint(frozen)
+                             and store.verify_artifact(artifacts[candidate["artifactId"]])[0]), None)
+            metadata = {"attempt": report["attempt"], "maxAttempts": policy["maxAttempts"], "originalSeed": seed,
+                        "groupId": report["groupId"], "preferred": False, "complete": False, "status": "unknown",
+                        "summary": "자동 검사를 진행하고 있어요.",
+                        "repair": {"ofCandidateId": source_id, "attempt": number, "maxAttempts": len(seeds), "strength": strength, **target}}
+            if existing:
+                repaired_id = existing
+            else:
+                if consumed:
+                    continue  # Interrupted/failed submission still consumes its frozen attempt.
+                if stop_submissions:
+                    break
+                try:
+                    health = client.health()
+                    _require_loaded_models(health, frozen)
+                    with store.transaction() as project:
+                        request = _append_request(project, frozen, adapter_info=health)
+                        job = store.append_job(project, kind="repaint-candidate", parameters={
+                            "requestId": request["requestId"], "seed": repair_seed, "parentCandidateId": source_id,
+                            "strength": strength, "qualitySlot": slot, "repairAttempt": number}, parent_job_id=batch_id)
+                        store.transition_job(job, "running", stage="submitting")
+                        store.find_by_id(project, "jobs", "jobId", batch_id)["stage"] = "quality_repair"
+                    repaired_id = execute_candidate(store, client, request=request, job_id=job["jobId"],
+                        api_payload=_api_payload(frozen), poll_seconds=poll_seconds, timeout_seconds=timeout_seconds,
+                        source=source_path, parent_candidate_id=source_id, edit_range=edit_range,
+                        context_range={"startSeconds": 0.0, "endSeconds": duration}, quality_context=metadata)
+                except Exception as error:
+                    failure(seed, error, stage="local_repair")
+                    if server_may_still_be_working(error):
+                        stop_submissions = True
+                        break
+                    continue
+            # Read against the same written lyrics as the take being repaired.
+            written = {"qualityPreparation": payload["qualityPreparation"]} if payload.get("qualityPreparation") else {}
+            try:
+                repaired = assess_candidate(store, repaired_id, policy=policy, backend=backend, batch_id=batch_id,
+                                            context={"payload": {**frozen, **written}, "metadata": metadata})
+            except Exception as error:
+                failure(seed, error, stage="quality_inspection")
+                continue
+            rejected = repair_verdict(report, repaired, _candidate(store, repaired_id)[1].get("splice"))
+            outcome = {**metadata["repair"], "accepted": not rejected, "rejectedBecause": rejected}
+            with store.transaction() as project:
+                store.find_by_id(project, "candidates", "candidateId", repaired_id)["quality"]["repair"] = outcome
+                attempted = store.find_by_id(project, "jobs", "jobId", batch_id).setdefault("attemptCandidateIds", [])
+                if repaired_id not in attempted:
+                    attempted.append(repaired_id)
+            if not rejected:
+                return repaired_id, {**repaired, "repair": outcome}
+        return source_id, report
+
+    def publish(project: dict[str, Any], final_id: str, *, finishing_error: str | None) -> dict[str, Any]:
+        winner = store.find_by_id(project, "candidates", "candidateId", final_id)
+        for previous in project["candidates"]:
+            if previous.get("quality", {}).get("groupId") == winner["quality"]["groupId"]:
+                previous["quality"]["preferred"] = previous["candidateId"] == final_id
+        if finishing_error:
+            winner["quality"]["finishingError"] = finishing_error
+        return winner
 
     try:
         for slot, attempts in enumerate(plan):
@@ -560,23 +877,41 @@ def run_quality_batch(store: ProjectStore, *, batch_id: str, client: Any, poll_s
                 source_artifact = store.find_by_id(current_project, "artifacts", "artifactId", source["artifactId"])
                 source_job = jobs.get(source_artifact.get("createdByJobId"))
                 source_request = store.find_by_id(current_project, "requests", "requestId", source["requestId"])
-                matches_request = (source_job and source_job.get("parentJobId") in lineage
-                    and source_job["kind"] == "generate-candidate" and source_job["status"] == "succeeded"
-                    and source_job["parameters"].get("qualitySlot") == slot
+                # The winner is either one of the frozen attempts or an accepted repair of one.
+                generated = (source_job and source_job["kind"] == "generate-candidate"
                     and source_job["parameters"].get("qualityAttempt") == attempt_number
                     and fingerprint(source_request["parameters"]) == fingerprint(attempts[attempt_number - 1]))
+                repaired = (source_job and source_job["kind"] == "repaint-candidate"
+                    and isinstance(source_job["parameters"].get("repairAttempt"), int)
+                    and (source.get("quality", {}).get("repair") or {}).get("accepted") is True)
+                matches_request = (source_job and source_job.get("parentJobId") in lineage
+                    and source_job["status"] == "succeeded" and source_job["parameters"].get("qualitySlot") == slot
+                    and (generated or repaired))
                 if (matches_request and job and job.get("parentJobId") in lineage and job["status"] == "succeeded"
                         and store.verify_artifact(artifact)[0]):
                     completed = candidate["candidateId"]
                     break
             if completed:
+                final_id = completed
+                finishing_error = None
+                if policy.get("finishAudio") and not candidate["quality"].get("processing"):
+                    # An earlier run kept this checked original because finishing failed.
+                    # Do only that missing step; the audio and its checks are reused.
+                    final_id, finishing_error = finish(completed, original_seed)
                 with store.transaction() as project:
+                    if final_id != completed:
+                        publish(project, final_id, finishing_error=None)
+                        store.find_by_id(project, "candidates", "candidateId", completed)["quality"].pop("finishingError", None)
+                    elif finishing_error:
+                        store.find_by_id(project, "candidates", "candidateId", completed)["quality"]["finishingError"] = finishing_error
                     current = store.find_by_id(project, "jobs", "jobId", batch_id)
-                    current["resultRefs"].append(completed)
-                    current["reusedCandidateIds"].append(completed)
+                    current["resultRefs"].append(final_id)
                     current["progress"] = (slot + 1) / len(plan)
-                    current["stage"] = "reused quality-checked version"
-                reused.append(completed)
+                    if final_id == completed:
+                        current["reusedCandidateIds"].append(completed)
+                        current["stage"] = "reused quality-checked version"
+                if final_id == completed:
+                    reused.append(completed)
                 continue
             scored = []
             for attempt, payload in enumerate(attempts, 1):
@@ -624,9 +959,7 @@ def run_quality_batch(store: ProjectStore, *, batch_id: str, client: Any, poll_s
                             quality_context=metadata)
                     except Exception as error:
                         failure(original_seed, error, stage="generation")
-                        # A timeout may leave remote inference running. Do not add more work automatically.
-                        if isinstance(error, TimeoutError) or any(term in str(error) for term in
-                            ("API unavailable", "API HTTP", "unhealthy ACE", "unhealthy Music 3", "Music 3 server", "not the requested")):
+                        if server_may_still_be_working(error):
                             stop_submissions = True
                             break
                         continue
@@ -641,6 +974,8 @@ def run_quality_batch(store: ProjectStore, *, batch_id: str, client: Any, poll_s
                               "audio": {"technicalScore": 0}, "lyrics": {"status": "unknown"}, "score": None}
                     with store.transaction() as project:
                         store.find_by_id(project, "candidates", "candidateId", candidate_id)["quality"] = report
+                for item in report.get("inspectionErrors", []):
+                    failure(original_seed, RuntimeError(item["error"]), stage="quality_inspection:" + item["stage"])
                 scored.append((candidate_id, report, existing is not None))
                 with store.transaction() as project:
                     current = store.find_by_id(project, "jobs", "jobId", batch_id)
@@ -652,17 +987,15 @@ def run_quality_batch(store: ProjectStore, *, batch_id: str, client: Any, poll_s
                 failure(original_seed, RuntimeError("No usable audio remains within the four-attempt budget"), stage="attempt_budget", fatal=True)
                 continue
             chosen, report, was_reused = max(scored, key=lambda item: _quality_rank(item[1]))
-            try:
-                final_id = finalize_candidate(store, chosen, batch_id=batch_id) if policy.get("finishAudio") else chosen
-            except Exception as error:
-                failure(original_seed, error, stage="audio_finishing")
-                _candidate(store, chosen)  # Never fall back to a damaged original.
-                final_id = chosen
+            final_id, finishing_error = finish(chosen, original_seed) if policy.get("finishAudio") else (chosen, None)
+            if not finishing_error:
+                # Repair edits the finished take, exactly as a listener's own edit of it would.
+                unrepaired = store.find_by_id(store.load(), "candidates", "candidateId", final_id)["quality"]
+                repaired_id, _ = repair(slot, final_id, unrepaired, attempts[0], original_seed)
+                if repaired_id != final_id:
+                    final_id, finishing_error = finish(repaired_id, original_seed) if policy.get("finishAudio") else (repaired_id, None)
             with store.transaction() as project:
-                winner = store.find_by_id(project, "candidates", "candidateId", final_id)
-                for previous in project["candidates"]:
-                    if previous.get("quality", {}).get("groupId") == winner["quality"]["groupId"]:
-                        previous["quality"]["preferred"] = previous["candidateId"] == final_id
+                winner = publish(project, final_id, finishing_error=finishing_error)
                 winner["quality"]["attemptsUsed"] = len({job["parameters"].get("qualityAttempt") for job in project["jobs"]
                     if job["kind"] == "generate-candidate" and job.get("parentJobId") in lineage
                     and job["parameters"].get("qualitySlot") == slot})

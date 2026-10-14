@@ -182,9 +182,26 @@ export type AutomaticQuality = {
     [key: string]: unknown;
   };
   processing: Record<string, unknown> | null;
+  /** Why the played copy could not be tidied; this version is then the checked original. */
+  finishingError?: string;
+  /** Set on a take whose unsung lines were repainted during generation, and on each such attempt. */
+  repair?: {
+    ofCandidateId: string; attempt: number; maxAttempts: number; strength?: string;
+    section: string; lineCount: number; firstLine: string; range: TimeRange;
+    accepted?: boolean; rejectedBecause?: string[];
+  };
   preparation?: { requestedDurationSeconds?: number; effectiveDurationSeconds?: number; changes?: string[] };
   observation?: { loudness?: Record<string, unknown>; separation?: Record<string, unknown>; [key: string]: unknown };
   rhythm?: RhythmQuality | null;
+};
+
+export type EditSplice = {
+  /** true: every sample outside ``changedRange`` is the edited version's own. */
+  applied: boolean;
+  reason?: string | null;
+  changedRange?: TimeRange | null;
+  gainDb?: number | null;
+  peakReductionDb?: number | null;
 };
 
 export type Version = {
@@ -211,6 +228,8 @@ export type Version = {
   audioUrl: string | null;
   waveform: number[];
   quality?: AutomaticQuality | null;
+  /** How an edit was joined to the version it edits. */
+  splice?: EditSplice | null;
   recommended?: boolean;
   baseStylePrompt?: string;
   productionRules?: ProductionSnapshot | null;
@@ -267,7 +286,7 @@ export type JobView = {
   succeeded?: number;
   failed?: number;
   reused?: number;
-  failures?: Array<{ seed: string; error: string }>;
+  failures?: Array<{ seed: string; error: string; stage?: string }>;
   parentCandidateId?: string;
   candidateId?: string;
   resumeOfJobId?: string | null;

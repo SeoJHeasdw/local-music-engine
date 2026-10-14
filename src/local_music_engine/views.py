@@ -21,6 +21,15 @@ def _artifact_path(store: ProjectStore, artifact: dict[str, Any]) -> Path | None
         return None
 
 
+def _edit_splice(artifacts: dict[str, dict[str, Any]], candidate: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any] | None:
+    """How an edit was joined to its source; a finished copy reports its source's record."""
+
+    splice = artifact.get("splice") or artifacts.get(artifact.get("sourceArtifactId") or "", {}).get("splice")
+    if not candidate.get("editRange") or not isinstance(splice, dict):
+        return None
+    return {key: splice.get(key) for key in ("applied", "reason", "changedRange", "gainDb", "peakReductionDb")}
+
+
 def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[str, Any]]:
     """One row per candidate, with the exact inputs its request froze.
 
@@ -62,6 +71,7 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
                 "taskType": parameters.get("task_type"),
                 "parentCandidateId": candidate.get("parentCandidateId"),
                 "editRange": candidate.get("editRange"),
+                "splice": _edit_splice(artifacts, candidate, artifact),
                 "durationSeconds": artifact.get("audio", {}).get("durationSeconds"),
                 "artifactValid": valid,
                 "artifactValidation": reason,

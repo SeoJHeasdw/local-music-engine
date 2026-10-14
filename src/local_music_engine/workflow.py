@@ -12,12 +12,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .ace_adapter import AceApiError, AceStepClient
+from .edit_splice import played_tempo
 from .execution import execute_candidate
 from .jobs import (ACTIVE_STATUSES, cleanup_export_outputs, frozen_batch_payloads, recover_export_jobs, recover_jobs,
                    reusable_candidates, resume_source, validate_seed)
 from .qc import artifact_and_findings, inspect_wav
 from .storage import ProjectStore, fingerprint, new_id, sha256_file, utc_now
-from .auto_quality import finish_single_edit, make_quality_plan, run_quality_batch, validate_quality_plan
+from .auto_quality import finish_single_edit, make_quality_plan, make_repair_seeds, run_quality_batch, validate_quality_plan
 from .production_rules import editable_style, freeze_guidance, guided_prompt, normalize_selection, normalize_time_signature
 from .song_planning import prepare_song_plan
 from .engines import (ACE_BASE_URL, ACE_DIT_MODEL, ACE_ENGINE, DEFAULT_ENGINE, ENGINES, MAX_DURATION_SECONDS, MUSIC3_ENGINE,
@@ -549,6 +550,8 @@ def generate_candidates(
                 plan = make_quality_plan(payloads, quality)
                 batch["parameters"].update(qualityPolicy=deepcopy(quality), qualityPlan=plan,
                                            qualityRootJobId=batch["jobId"], frozenPayloads=[group[0] for group in plan])
+                if quality.get("repairAttempts"):
+                    batch["parameters"]["repairSeeds"] = make_repair_seeds(plan, quality)
             if feedback:
                 record = _append_feedback(project, feedback, job_id=batch["jobId"])
                 batch["parameters"]["feedbackId"] = record["feedbackId"]
@@ -615,7 +618,7 @@ def cover_candidates(
             frozen.update(audio_cover_strength=float(strength), coverSource=deepcopy(reference))
             payloads.append(frozen)
         # Source-conditioned edits get one check per request, without random retries.
-        policy = {**deepcopy(quality), "maxAttempts": 1} if quality and quality.get("enabled") else None
+        policy = {**deepcopy(quality), "maxAttempts": 1, "repairAttempts": 0} if quality and quality.get("enabled") else None
         with store.transaction() as project:
             recover_jobs(store, project)
             parameters = {"taskType": "cover", "seeds": seed_list, "model": payloads[0]["model"],
@@ -677,6 +680,59 @@ def resume_latest_batch(
                           client=client, poll_seconds=poll_seconds, timeout_seconds=timeout_seconds)
 
 
+def frozen_repaint(
+    store: ProjectStore, project: dict[str, Any], *, parent_id: str, start_seconds: float, end_seconds: float, seed: int,
+    instruction: str | None = None, style_prompt: str | None = None, lyrics: str | None = None,
+    strength: str | None = None, model: str | None = None, lm_model: str | None = None,
+) -> tuple[dict[str, Any], Path, float, dict[str, float]]:
+    """Freeze a repaint of one verified version: its request, source file, length and range."""
+
+    parent = store.find_by_id(project, "candidates", "candidateId", parent_id)
+    parent_artifact = store.find_by_id(project, "artifacts", "artifactId", parent["artifactId"])
+    valid, reason = store.verify_artifact(parent_artifact)
+    if not valid:
+        raise ValueError(reason)
+    source = store.resolve_artifact(parent_artifact)
+    duration = inspect_wav(source)["durationSeconds"]
+    if end_seconds > duration:
+        raise ValueError(f"repaint end exceeds audio duration {duration:.3f}s")
+    # Editing an old version follows that version's lyrics/style/metas. Project
+    # defaults may have changed since then and must not leak into this revision.
+    original = store.find_by_id(project, "requests", "requestId", parent["requestId"])["parameters"]
+    source_rules = original.get("productionRules")
+    if source_rules and style_prompt is not None:
+        style_prompt = editable_style(style_prompt, original)
+    source_inputs = {
+        "stylePrompt": source_rules["baseStylePrompt"] if source_rules else original["prompt"],
+        "lyricsNormalized": original.get("songPlan", {}).get("lyricsOriginal", original["lyrics"]),
+        "targetDurationSeconds": duration, "structure": original.get("project_structure"),
+    }
+    for field, api_field in _META_FIELDS:
+        source_inputs[field] = source_rules.get("inputMetas", {}).get(field) if source_rules else original.get(api_field)
+    if lyrics is not None:
+        source_inputs["lyricsNormalized"] = lyrics.replace("\r\n", "\n").replace("\r", "\n")
+    edit_range = {"startSeconds": float(start_seconds), "endSeconds": float(end_seconds)}
+    frozen = _frozen_generation_payload(
+        {"inputs": source_inputs}, seed=seed,
+        model=model or original.get("model", ACE_DIT_MODEL),
+        lm_model=lm_model or original.get("lm_model_path", DEFAULT_LM_MODEL),
+        task_type="repaint", parent_artifact_sha256=parent_artifact["sha256"],
+        edit_range=edit_range, instruction=instruction,
+        style_prompt=style_prompt.strip() if style_prompt is not None else None,
+        repaint_strength=REPAINT_STRENGTHS[strength] if strength else None,
+        production_rules_snapshot=source_rules, engine=ACE_ENGINE,
+    )
+    if isinstance(frozen.get("bpm"), (int, float)) and not isinstance(frozen["bpm"], bool):
+        # The edit must meet the song's own beat at both ends. A song that drifted from its
+        # requested BPM is repainted at the tempo it actually plays, measured next to the edit.
+        tempo = played_tempo(source, requested_bpm=float(frozen["bpm"]), start_seconds=edit_range["startSeconds"],
+                             end_seconds=edit_range["endSeconds"])
+        frozen["playedTempo"] = tempo
+        if tempo.get("follow"):
+            frozen["bpm"] = round(tempo["playedBpm"])
+    return frozen, source, duration, edit_range
+
+
 def repaint_candidate(
     project_root: Path | str,
     *,
@@ -717,41 +773,9 @@ def repaint_candidate(
         parent_id = candidate_id or project.get("selectedCandidateId")
         if not parent_id:
             raise ValueError("select a candidate or pass --candidate-id")
-        parent = store.find_by_id(project, "candidates", "candidateId", parent_id)
-        parent_artifact = store.find_by_id(project, "artifacts", "artifactId", parent["artifactId"])
-        valid, reason = store.verify_artifact(parent_artifact)
-        if not valid:
-            raise ValueError(reason)
-        source = store.resolve_artifact(parent_artifact)
-        duration = inspect_wav(source)["durationSeconds"]
-        if end_seconds > duration:
-            raise ValueError(f"repaint end exceeds audio duration {duration:.3f}s")
-        # Editing an old version follows that version's lyrics/style/metas. Project
-        # defaults may have changed since then and must not leak into this revision.
-        original = store.find_by_id(project, "requests", "requestId", parent["requestId"])["parameters"]
-        source_rules = original.get("productionRules")
-        if source_rules and style_prompt is not None:
-            style_prompt = editable_style(style_prompt, original)
-        source_inputs = {
-            "stylePrompt": source_rules["baseStylePrompt"] if source_rules else original["prompt"],
-            "lyricsNormalized": original.get("songPlan", {}).get("lyricsOriginal", original["lyrics"]),
-            "targetDurationSeconds": duration, "structure": original.get("project_structure"),
-        }
-        for field, api_field in _META_FIELDS:
-            source_inputs[field] = source_rules.get("inputMetas", {}).get(field) if source_rules else original.get(api_field)
-        if lyrics is not None:
-            source_inputs["lyricsNormalized"] = lyrics.replace("\r\n", "\n").replace("\r", "\n")
-        edit_range = {"startSeconds": float(start_seconds), "endSeconds": float(end_seconds)}
-        frozen = _frozen_generation_payload(
-            {"inputs": source_inputs}, seed=seed,
-            model=model or original.get("model", ACE_DIT_MODEL),
-            lm_model=lm_model or original.get("lm_model_path", DEFAULT_LM_MODEL),
-            task_type="repaint", parent_artifact_sha256=parent_artifact["sha256"],
-            edit_range=edit_range, instruction=instruction,
-            style_prompt=style_prompt.strip() if style_prompt is not None else None,
-            repaint_strength=REPAINT_STRENGTHS[strength] if strength else None,
-            production_rules_snapshot=source_rules, engine=ACE_ENGINE,
-        )
+        frozen, source, duration, edit_range = frozen_repaint(
+            store, project, parent_id=parent_id, start_seconds=start_seconds, end_seconds=end_seconds, seed=seed,
+            instruction=instruction, style_prompt=style_prompt, lyrics=lyrics, strength=strength, model=model, lm_model=lm_model)
         adapter_info = client.health()
         _require_loaded_models(adapter_info, frozen)
         with store.transaction() as project:

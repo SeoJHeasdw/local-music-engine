@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import signal
@@ -13,6 +14,7 @@ from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / ".runtime" / "quality"
+WORKER_VERSION = "local-quality-v1"  # scripts/quality_worker.py writes this into ready.json
 TERMINATE_GRACE_SECONDS = 0.5
 KILL_DRAIN_SECONDS = 1.0
 
@@ -57,8 +59,24 @@ class LocalQualityBackend:
         self.auto_setup = auto_setup
         self.setup_error: str | None = None
 
-    def prepare(self, progress: Callable[[str], None] | None = None) -> bool:
-        if (RUNTIME / "ready.json").is_file() and (RUNTIME / ".venv/bin/python").is_file():
+    @staticmethod
+    def installed() -> bool:
+        """The marker must describe this worker and these pinned packages, and say it is usable.
+
+        A marker left by an older setup, or one written when a model was missing, is
+        not readiness: setup runs again instead of leaving every lyric check unknown.
+        """
+
+        try:
+            ready = json.loads((RUNTIME / "ready.json").read_text(encoding="utf-8"))
+            pinned = hashlib.sha256((ROOT / "scripts" / "quality-requirements.txt").read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            return False
+        return (isinstance(ready, dict) and ready.get("available") is True and ready.get("backend") == WORKER_VERSION
+                and ready.get("requirementsSha256") == pinned and (RUNTIME / ".venv/bin/python").is_file())
+
+    def prepare(self, progress: Callable[[str], None] | None = None, *, repair: bool = False) -> bool:
+        if self.installed() and not repair:
             return True
         if not self.auto_setup:
             self.setup_error = "Local lyric inspection is not installed"
@@ -71,24 +89,44 @@ class LocalQualityBackend:
             setup_progress = (lambda message: progress("quality_setup: " + message)) if progress else None
             self._run(["/bin/bash", str(ROOT / "scripts/bootstrap_quality.sh")], timeout=1800, progress=setup_progress,
                       json_output=False)
-            return (RUNTIME / "ready.json").is_file()
+            if not self.installed():
+                self.setup_error = "Local lyric inspection setup finished without a usable environment"
+            return self.setup_error is None
         except Exception as error:
             self.setup_error = f"{type(error).__name__}: {error}"
             return False
+
+    def _worker(self, command: str, audio: Path, *extra: str, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+        report = self._run([str(RUNTIME / ".venv/bin/python"), str(ROOT / "scripts/quality_worker.py"),
+                            command, "--audio", str(audio), *extra], timeout=1800, progress=progress)
+        if not isinstance(report, dict):
+            raise ValueError("Local analysis returned an invalid report")
+        return report
 
     def analyze(self, audio: Path, *, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
         if not self.prepare(progress):
             return {"available": False, "reliable": False, "text": "", "segments": [], "loudness": self.measure_loudness(audio),
                     "error": self.setup_error or "Local lyric inspection is unavailable"}
         try:
-            report = self._run([str(RUNTIME / ".venv/bin/python"), str(ROOT / "scripts/quality_worker.py"),
-                                "analyze", "--audio", str(audio)], timeout=1800, progress=progress)
-            if not isinstance(report, dict):
-                raise ValueError("Local analysis returned an invalid report")
+            report = self._worker("analyze", audio, progress=progress)
+            # Weights deleted or damaged after setup: restore them once, then read again.
+            if report.get("setupRequired") and self.prepare(progress, repair=True):
+                report = self._worker("analyze", audio, progress=progress)
             return report
         except Exception as error:
             return {"available": False, "reliable": False, "text": "", "segments": [], "loudness": self.measure_loudness(audio),
                     "error": f"{type(error).__name__}: {error}"}
+
+    def transcribe_span(self, audio: Path, *, start_seconds: float, end_seconds: float, language: str | None = None,
+                        progress: Callable[[str], None] | None = None) -> dict[str, Any]:
+        """A second reading of one stretch, starting its recognizer window at that stretch."""
+        if not self.installed():
+            return {"available": False, "reliable": False, "text": "", "segments": [], "error": "Local lyric inspection is unavailable"}
+        try:
+            return self._worker("transcribe", audio, "--start", f"{start_seconds:.3f}", "--end", f"{end_seconds:.3f}",
+                                *(["--language", language] if language and language != "unknown" else []), progress=progress)
+        except Exception as error:
+            return {"available": False, "reliable": False, "text": "", "segments": [], "error": f"{type(error).__name__}: {error}"}
 
     @staticmethod
     def measure_loudness(audio: Path) -> dict[str, Any]:

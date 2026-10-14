@@ -4,7 +4,7 @@ import unicodedata
 import pytest
 
 from local_music_engine.lyric_quality import (
-    assess_lyric_suitability, evaluate_lyric_transcript, parse_lyric_sections,
+    assess_lyric_suitability, evaluate_lyric_transcript, parse_lyric_sections, reread_requests, reread_starts,
 )
 
 
@@ -196,3 +196,116 @@ def test_alignment_and_text_limits_return_unknown_instead_of_unbounded_work():
     assert "stt_alignment_exceeds_diagnostic_limit" in result["reliabilityReasons"]
     too_long = evaluate_lyric_transcript("가사", trustworthy("나" * 24_001))
     assert too_long["status"] == "unknown" and too_long["koreanCER"] is None
+
+
+VERSE = ("silver morning carries quiet rivers\nunder open skies tonight we wander\n"
+         "every corner hums a little louder\nfootsteps keeping time with distant thunder")
+BRIDGE = "paper lanterns drifting over sleeping harbour\nwater slowly turning golden again"
+CHORUS = "hold me closer when the neon fades away\nand never let the midnight take our song\nwe belong to every colour of the dawn"
+SONG = f"[Verse]\n{VERSE}\n[Chorus]\n{CHORUS}\n[Bridge]\n{BRIDGE}\n[Chorus]\n{CHORUS}"
+
+
+def heard(*lines, anchor=0.0):
+    """Whisper-style segments: (start, end, text)."""
+    return {"available": True, "reliable": True, "windowAnchorSeconds": anchor, "text": " ".join(text for _, _, text in lines),
+            "segments": [{"start": start, "end": end, "text": text, "avg_logprob": -0.2, "no_speech_prob": 0.01}
+                         for start, end, text in lines]}
+
+
+def again(start, end, *lines):
+    return {"startSeconds": start, "endSeconds": end, "transcription": heard(*lines)}
+
+
+FIRST_READING = heard((8, 14, "oh oh oh"), (30, 40, CHORUS), (40, 48, BRIDGE), (48, 58, CHORUS))
+
+
+def test_a_whole_missing_verse_is_not_hidden_by_a_well_sung_chorus():
+    result = evaluate_lyric_transcript(SONG, FIRST_READING, duration_seconds=60)
+    assert result["orderedCoverage"] > 0.65 and result["englishWER"] < 0.75  # the totals alone ask for nothing
+    assert result["sectionCoverage"][0]["orderedCoverage"] == 0 and result["status"] == "warning"
+    # One reading is not proof: the place is named for the listener, nothing is regenerated.
+    [finding] = result["findings"]
+    assert (finding["check"], finding["retryEligible"], finding["startSeconds"], finding["endSeconds"]) == ("lyric_lines_unclear", False, 0.0, 30.0)
+    assert finding["observed"]["lineCount"] == 4 and finding["observed"]["firstLine"] == "silver morning carries quiet rivers"
+    assert result["retryReasons"] == [] and reread_requests(result) == [(0.0, 40.0)]
+
+
+def test_another_reading_that_hears_the_verse_replaces_the_first():
+    result = evaluate_lyric_transcript(SONG, FIRST_READING, duration_seconds=60,
+                                       rereads=[again(6.0, 40.0, (7.5, 14, VERSE), (30, 40, CHORUS))])
+    assert result["status"] == "pass" and result["findings"] == [] and result["retryReasons"] == []
+    assert result["sectionCoverage"][0]["orderedCoverage"] == 1 and result["unheardLines"] == []
+    assert result["rereads"][0]["adopted"] and result["rereads"][0]["matchedUnitsAfter"] > result["rereads"][0]["matchedUnitsBefore"]
+    assert [segment["text"] for segment in result["segments"]][:2] == [VERSE, CHORUS]
+
+
+def test_a_verse_no_reading_finds_is_missing_and_may_regenerate():
+    twice = [again(6.0, 40.0, (30, 40, CHORUS)), again(12.0, 40.0, (30, 40, CHORUS))]
+    once = evaluate_lyric_transcript(SONG, FIRST_READING, duration_seconds=60, rereads=twice[:1])
+    assert once["findings"][0]["check"] == "lyric_lines_unclear" and once["retryReasons"] == []  # one more reading is not enough
+    result = evaluate_lyric_transcript(SONG, FIRST_READING, duration_seconds=60, rereads=twice)
+    [finding] = result["findings"]
+    assert finding["check"] == "lyric_lines_missing" and finding["retryEligible"] and finding["observed"]["wholeSection"]
+    assert finding["observed"]["furtherReadings"] == "still_not_heard" and result["unheardLines"][0]["rereadConfirmed"]
+    assert result["retryReasons"] == ["written_section_missing"] and result["retryEligible"]
+    assert reread_requests(result) == []  # nothing left to read again
+
+
+@pytest.mark.parametrize("second", [
+    {"available": False, "error": "recognizer unavailable", "segments": []},
+    # Low recognizer confidence in another reading settles nothing.
+    {"available": True, "segments": [{"start": 8, "end": 14, "text": "la la", "avg_logprob": -2.0, "no_speech_prob": 0.9}]},
+])
+def test_unusable_further_readings_confirm_nothing(second):
+    rereads = [{"startSeconds": start, "endSeconds": 40.0, "transcription": second} for start in (6.0, 12.0)]
+    result = evaluate_lyric_transcript(SONG, FIRST_READING, duration_seconds=60, rereads=rereads)
+    assert result["findings"][0]["check"] == "lyric_lines_unclear" and result["retryReasons"] == []
+    assert result["status"] == "warning" and not any(item["adopted"] for item in result["rereads"])
+
+
+def test_the_same_window_read_again_is_not_another_opinion():
+    same = [again(0.0, 40.0, (30, 40, CHORUS)), again(0.5, 40.0, (30, 40, CHORUS))]
+    result = evaluate_lyric_transcript(SONG, FIRST_READING, duration_seconds=60, rereads=same)
+    assert [item["independent"] for item in result["rereads"]] == [False, False]
+    assert result["findings"][0]["check"] == "lyric_lines_unclear" and "written_section_missing" not in result["retryReasons"]
+    assert reread_starts(0.0, 40.0, anchor=0.0) == [6.667, 13.333]  # so the first pass's own window is not asked for again
+    assert reread_starts(12.0, 30.0, anchor=0.0) == [12.0, 15.0, 18.0]
+    assert reread_starts(57.0, 60.0, anchor=0.0) == [57.0, 57.5, 58.0] and reread_starts(59.0, 60.0, anchor=0.0) == []
+
+
+def test_two_unsung_lines_are_named_without_calling_the_section_missing():
+    lines = VERSE.split("\n")
+    sung = "\n".join(lines[:2])  # the verse's second pair of lines was never sung
+    rest = (16, 24, CHORUS), (24, 30, BRIDGE), (30, 40, CHORUS)
+    result = evaluate_lyric_transcript(SONG, heard((0, 16, sung), *rest), duration_seconds=45,
+                                       rereads=[again(3.0, 24.0, (3, 16, sung), rest[0]), again(6.0, 24.0, (6, 16, lines[1]), rest[0])])
+    [finding] = result["findings"]
+    assert finding["check"] == "lyric_lines_missing" and not finding["retryEligible"]
+    assert finding["observed"]["lineCount"] == 2 and finding["observed"]["firstLine"] == lines[2]
+    assert not finding["observed"]["wholeSection"] and 0.4 < result["sectionCoverage"][0]["orderedCoverage"] < 0.6
+    assert result["retryReasons"] == [] and result["status"] == "warning"
+
+
+def test_a_short_missing_section_is_a_place_to_repair_not_a_reason_for_another_song():
+    lyrics = f"[Verse]\n{VERSE}\n[Chorus]\n{CHORUS}\n[Outro]\nlet me stay till the neon fades"
+    reading = heard((0, 16, VERSE), (16, 26, CHORUS))
+    rereads = [again(start, 30.0, (16, 26, CHORUS)) for start in (16.0, 18.0, 20.0)]
+    result = evaluate_lyric_transcript(lyrics, reading, duration_seconds=30, rereads=rereads)
+    [finding] = result["findings"]
+    assert (finding["check"], finding["observed"]["section"], finding["observed"]["lineCount"]) == ("lyric_lines_missing", "Outro", 1)
+    assert result["sectionCoverage"][2]["orderedCoverage"] == 0 and result["retryReasons"] == [] and not finding["retryEligible"]
+
+
+def test_a_garbled_but_sung_section_and_a_short_tag_line_are_not_called_unheard():
+    garbled = ("silver morning carried quite reverse\nunder open sky tonight be wonder\n"
+               "every corner comes a little lower\nfootstep keeping time with this and under")  # misheard words, every line present
+    result = evaluate_lyric_transcript(SONG, heard((5, 12, garbled), (12, 24, CHORUS), (24, 30, BRIDGE), (30, 42, CHORUS)), duration_seconds=45)
+    assert result["findings"] == [] and result["sectionCoverage"][0]["orderedCoverage"] < 0.7
+    short = evaluate_lyric_transcript(f"[Verse]\n{VERSE}\n[Outro]\nfades away", heard((5, 12, VERSE)), duration_seconds=20)
+    assert short["findings"] == [] and short["status"] == "pass"
+
+
+def test_overlapping_stretches_are_read_once():
+    result = evaluate_lyric_transcript(SONG, heard((30, 40, CHORUS), (48, 58, CHORUS)), duration_seconds=60)
+    assert [item["observed"]["section"] for item in result["findings"]] == ["Verse", "Bridge"]
+    assert reread_requests(result) == [(0.0, 58.0)]

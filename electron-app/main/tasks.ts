@@ -56,6 +56,7 @@ export function stageText(raw: string | undefined): string {
   if (stage.includes("quality_rhythm")) return "박자와 구간별 소리 변화를 확인하는 중";
   if (stage.includes("quality_lyrics")) return "가사가 빠지거나 달라졌는지 확인하는 중";
   if (stage.includes("quality_retry")) return "확실한 문제가 있어 다시 만드는 중";
+  if (stage.includes("quality_repair")) return "들리지 않은 가사가 있어 그 구간만 다시 만드는 중";
   if (stage.includes("finalizing")) return "추천할 재생본을 정리하는 중";
   if (!stage || stage === "queued" || stage.includes("preparing")) return "준비하는 중";
   if (stage.includes("submitting")) return "엔진에 요청하는 중";
@@ -64,6 +65,7 @@ export function stageText(raw: string | undefined): string {
   if (stage.includes("planning song and vocals")) return "선율과 노래 흐름을 만드는 중";
   if (stage.includes("rendering audio")) return "목소리와 반주를 만드는 중";
   if (stage.includes("saving audio")) return "음원을 저장하는 중";
+  if (stage.includes("restoring audio")) return "고른 구간 밖을 원래 소리 그대로 되돌리는 중";
   if (stage.includes("verified") || stage.includes("checking audio")) return "파일을 확인하는 중";
   if (stage.includes("cancel")) return "취소하는 중";
   return "곡을 만드는 중";
@@ -236,7 +238,10 @@ export class TaskRunner {
       : typeof result.candidateId === "string"
         ? [result.candidateId]
         : [];
-    const failures = Array.isArray(result.failures) ? result.failures.length : 0;
+    const failed = Array.isArray(result.failures) ? result.failures as Array<{ stage?: string }> : [];
+    // A version whose played copy could not be tidied was still made; resuming repeats only that step.
+    const unfinished = failed.filter((item) => item.stage === "audio_finishing").length;
+    const failures = failed.length - unfinished;
     const reused = Array.isArray(result.reusedCandidateIds) ? result.reusedCandidateIds.length : 0;
     const recommendedVersionId = typeof result.recommendedCandidateId === "string" && newVersionIds.includes(result.recommendedCandidateId)
       ? result.recommendedCandidateId : null;
@@ -251,6 +256,7 @@ export class TaskRunner {
       ? `기존 버전 ${reused}개를 확인하고 새 버전 ${newVersionIds.length}개를 만들었어요.`
       : `버전 ${newVersionIds.length}개를 만들었어요.`;
     if (!cancelled && code === 0 && recommendedVersionId) message += " 자동 확인 후 추천본을 골랐어요.";
+    if (!cancelled && code === 0 && unfinished) message += " 재생본 정리를 마치지 못한 버전이 있어요. 이어서 만들기를 누르면 정리만 다시 해요.";
 
     this.active = null;
     this.hooks.emit(null);

@@ -47,6 +47,7 @@ type RawCandidate = {
   createdAt: string | null;
   path: string;
   quality?: Partial<AutomaticQuality> | null;
+  splice?: Version["splice"];
   recommended?: boolean;
   baseStylePrompt?: string | null;
   productionRules?: ProductionSnapshot | null;
@@ -324,7 +325,9 @@ export async function loadSong(folder: string, read: typeof runCli = runCli): Pr
         versionPaths.set(candidate.candidateId, candidate.path);
         return {
           id: candidate.candidateId,
-          kind: candidate.coverSource || candidate.taskType === "cover" ? "cover" : candidate.taskType === "repaint" || candidate.editRange ? "edit" : "full",
+          // A take repaired while it was being made is that take, not an edit the listener asked for.
+          kind: candidate.coverSource || candidate.taskType === "cover" ? "cover"
+            : candidate.quality?.repair ? "full" : candidate.taskType === "repaint" || candidate.editRange ? "edit" : "full",
           parentId: candidate.parentCandidateId,
           editRange: candidate.editRange,
           seed: candidate.seed,
@@ -346,6 +349,7 @@ export async function loadSong(folder: string, read: typeof runCli = runCli): Pr
           audioUrl: candidate.artifactValid ? audioUrlFor(candidate.path) : null,
           waveform: candidate.artifactValid ? await wavPeaks(candidate.path) : [],
           quality: qualityFromStatus(candidate.quality),
+          splice: candidate.splice ?? null,
           recommended: Boolean(candidate.recommended || raw.recommendedCandidateId === candidate.candidateId),
           baseStylePrompt: candidate.baseStylePrompt ?? undefined,
           productionRules: candidate.productionRules ?? null,

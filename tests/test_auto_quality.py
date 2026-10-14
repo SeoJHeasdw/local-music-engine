@@ -6,13 +6,16 @@ import signal
 import subprocess
 import sys
 import time
+import wave
 
 import pytest
 
-from local_music_engine.auto_quality import compare_engine_metas, prepare_payload, quality_policy
+from local_music_engine import auto_quality
+from local_music_engine.auto_quality import _quality_rank, compare_engine_metas, listening_points, prepare_payload, quality_policy
 from local_music_engine.jobs import recover_project
 from local_music_engine.storage import ProjectStore
-from local_music_engine.workflow import export_selected, generate_candidates, resume_latest_batch, revise_inputs
+from local_music_engine.workflow import (_frozen_generation_payload, export_selected, generate_candidates, resume_latest_batch,
+                                         revise_inputs)
 from test_workflow import FakeAceClient
 
 LYRICS = "[Verse]\n창가에 작은 별빛\n고요한 밤이 감싸\n[Chorus]\n함께 걸어가 내 곁에\n새로운 아침 올 때까지"
@@ -134,8 +137,99 @@ def test_inspector_failure_is_unknown_and_cannot_cause_repeated_generation(song)
     result = generate(song, backend=Reports(error=True))
     assert len(FakeAceClient.submitted) == 1
     winner = song.find_by_id(song.load(), "candidates", "candidateId", result["candidateIds"][0])
-    assert winner["quality"]["status"] == "unknown"
+    assert winner["quality"]["lyrics"]["status"] == "unknown"
     assert winner["quality"]["retryReasons"] == []
+    # The failed inspector is named, and what the PCM check measured stays in the report.
+    assert winner["quality"]["inspectionErrors"] == [{"stage": "lyrics", "error": "RuntimeError: inspector failed"}]
+    assert winner["quality"]["audio"]["metrics"]["durationSeconds"] == 10
+    assert result["status"] == "succeeded" and result["failures"] == []
+
+
+class SilentClient(FakeAceClient):
+    def download(self, file_path, destination):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(destination), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(8000)
+            output.writeframes(bytes(2 * 8000 * 10))
+
+
+def test_a_failed_inspector_does_not_erase_a_measured_audio_defect(song):
+    result = generate_candidates(song.root, seeds=[1], client_factory=SilentClient, quality=quality_policy(),
+                                 quality_backend=Reports(error=True), engine="ace-step")
+    assert len(FakeAceClient.submitted) == 4  # silence is measured without the inspector, so it still regenerates
+    winner = song.find_by_id(song.load(), "candidates", "candidateId", result["candidateIds"][0])
+    assert winner["quality"]["retryReasons"] == ["digital_silence"]
+    assert winner["quality"]["status"] == "attention"
+
+
+def test_attempts_with_fewer_places_to_check_rank_first_and_unread_lyrics_rank_between():
+    read = {"audio": {"retryEligible": False, "technicalScore": 100, "findings": []},
+            "lyrics": {"status": "pass", "orderedCoverage": 0.9}, "retryReasons": []}
+    flagged = {**read, "rhythm": {"findings": [{"check": "mix_dropout_suspected", "severity": "warning"}]}}
+    section_change = {**read, "rhythm": {"findings": [{"check": "loudness_shift", "severity": "warning"},
+                                                      {"check": "tempo_ambiguity", "severity": "warning"}]}}
+    assert listening_points(flagged) == 1 and listening_points(section_change) == 0
+    assert _quality_rank(read) > _quality_rank(flagged)
+    assert _quality_rank(read) == _quality_rank(section_change)
+    # A slightly better transcript does not outweigh a measured dropout.
+    assert _quality_rank(read) > _quality_rank({**flagged, "lyrics": {"status": "pass", "orderedCoverage": 0.99}})
+    unread = {**read, "lyrics": {"status": "unknown"}}
+    badly_sung = {**read, "lyrics": {"status": "warning", "orderedCoverage": 0.4}, "retryReasons": ["low_ordered_lyric_coverage"]}
+    assert _quality_rank(read) > _quality_rank(unread) > _quality_rank(badly_sung)
+
+
+def test_finishing_failure_is_reported_and_resume_repeats_only_that_step(song, monkeypatch):
+    original = auto_quality.finish_audio
+    calls = []
+
+    def fail_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("disk hiccup")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(auto_quality, "finish_audio", fail_once)
+    backend = Reports()
+    first = generate(song, backend=backend)
+    assert first["status"] == "partial"
+    assert first["failures"] == [{"seed": "1", "stage": "audio_finishing", "error": "OSError: disk hiccup"}]
+    kept = song.find_by_id(song.load(), "candidates", "candidateId", first["candidateIds"][0])
+    assert kept["quality"]["processing"] is None and kept["quality"]["preferred"] is True
+    assert kept["quality"]["finishingError"] == "OSError: disk hiccup"
+
+    again = resume_latest_batch(song.root, client_factory=FakeAceClient, quality_backend=backend, engine="ace-step")
+    assert again["status"] == "succeeded" and again["failures"] == []
+    assert len(FakeAceClient.submitted) == backend.calls == 1  # neither generated nor inspected again
+    project = song.load()
+    finished = song.find_by_id(project, "candidates", "candidateId", again["candidateIds"][0])
+    assert again["newCandidateIds"] == [finished["candidateId"]] and again["reusedCandidateIds"] == []
+    assert finished["parentCandidateId"] == kept["candidateId"] and finished["quality"]["processing"]
+    assert "finishingError" not in finished["quality"]
+    raw = song.find_by_id(project, "candidates", "candidateId", kept["candidateId"])
+    assert raw["quality"]["preferred"] is False and "finishingError" not in raw["quality"]
+    assert project["recommendedCandidateId"] == finished["candidateId"]
+
+
+@pytest.mark.parametrize("rules", [[], ["steady-groove", "repeated-harmony", "focused-arrangement", "clear-vocal",
+                                        "clean-production", "simple-structure"]])
+def test_the_default_chord_loop_rule_is_not_a_request_for_loop_audio(tmp_path, rules):
+    dense = "[Verse]\n" + "가나다라마바사 " * 50
+    store = ProjectStore.initialize(tmp_path / "song", title="밀도", lyrics=dense, style_prompt="Korean pop",
+                                    target_duration_seconds=10, production_rules={"version": 1, "presetId": "upbeat-pop", "ruleIds": rules})
+    payload = _frozen_generation_payload(store.load(), seed=1, model="acestep-v15-xl-turbo", lm_model="acestep-5Hz-lm-4B")
+    assert ("chord loop" in payload["prompt"]) == bool(rules)
+    prepared = prepare_payload(payload)
+    assert prepared["audio_duration"] == 80
+    assert {"outro_structure_tag_added", "duration_extended_for_dense_lyrics"} <= set(prepared["qualityPreparation"]["changes"])
+
+
+@pytest.mark.parametrize("style,loops", [("warm piano chord loop, Korean pop", False), ("피아노 루프, 발라드", False),
+                                         ("seamless loop for a game menu", True), ("게임 배경 루프", True)])
+def test_only_a_request_for_loop_audio_skips_the_outro(style, loops):
+    prepared = prepare_payload({"lyrics": LYRICS, "prompt": style, "audio_duration": 30, "seed": 1})
+    assert ("[Outro]" not in prepared["lyrics"]) == loops
 
 
 def test_finished_resume_needs_no_engine_or_inspector_even_if_raw_backup_is_missing(song):
@@ -453,3 +547,49 @@ def test_sigkill_after_finished_success_commit_preserves_output_cleans_anchor_an
     assert not list((song.root / "artifacts/finished").glob(".*.tmp"))
     assert not any(job["status"] in {"queued", "running", "cancelling"} for job in project["jobs"])
     assert {candidate["humanReview"]["status"] for candidate in project["candidates"]} == {"unreviewed"}
+
+
+VERSE_LINES = "silver morning carries quiet rivers\nunder open skies tonight we wander\npaper lanterns drift on sleeping water"
+CHORUS_LINES = "hold me closer when the neon fades away"
+SECTIONS = f"[Verse]\n{VERSE_LINES}\n[Chorus]\n{CHORUS_LINES}"
+
+
+class SeveralReadings:
+    """The first pass loses the verse to its opening window; further readings settle it."""
+
+    def __init__(self, later_hear_verse):
+        self.later_hear_verse, self.spans = later_hear_verse, []
+
+    @staticmethod
+    def reading(*lines):
+        return {"available": True, "reliable": True, "language": "en", "loudness": {"status": "unknown"},
+                "text": " ".join(text for _, _, text in lines),
+                "segments": [{"start": start, "end": end, "text": text, "avg_logprob": -0.1, "no_speech_prob": 0.0} for start, end, text in lines]}
+
+    def analyze(self, audio, *, progress=None):
+        return {**self.reading((0.5, 3.0, "oh oh oh"), (5.0, 9.5, CHORUS_LINES)), "windowAnchorSeconds": 0.0}
+
+    def transcribe_span(self, audio, *, start_seconds, end_seconds, language=None):
+        self.spans.append((start_seconds, end_seconds, language))
+        verse = [(1.0, 4.5, VERSE_LINES)] if self.later_hear_verse else []
+        return self.reading(*verse, (5.0, 9.5, CHORUS_LINES))
+
+
+@pytest.mark.parametrize("later_hear_verse", [True, False])
+def test_a_verse_lost_by_the_first_reading_is_read_again_before_any_regeneration(tmp_path, later_hear_verse):
+    FakeAceClient.submitted = []
+    store = ProjectStore.initialize(tmp_path / "song", title="재확인", lyrics=SECTIONS, style_prompt="pop", target_duration_seconds=10)
+    backend = SeveralReadings(later_hear_verse)
+    result = generate(store, backend=backend)
+    project = store.load()
+    winner = store.find_by_id(project, "candidates", "candidateId", result["candidateIds"][0])
+    assert backend.spans[:3] == [(0.0, 9.5, "en"), (1.583, 9.5, "en"), (3.167, 9.5, "en")]  # three other starting points
+    if later_hear_verse:
+        assert len(FakeAceClient.submitted) == 1 and winner["quality"]["lyrics"]["status"] == "pass"
+        assert winner["quality"]["lyrics"]["rereads"][0]["adopted"]
+    else:
+        assert len(FakeAceClient.submitted) == 4  # every attempt was heard without its verse, three times over
+        assert "written_section_missing" in winner["quality"]["retryReasons"]
+        checks = [store.find_by_id(project, "findings", "findingId", item) for item in winner["findingIds"]]
+        missing = [item for item in checks if item["check"] == "lyric_lines_missing"]
+        assert len(missing) == 1 and missing[0]["startSeconds"] == 0.0 and missing[0]["observed"]["section"] == "Verse"

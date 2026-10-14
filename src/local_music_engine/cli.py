@@ -136,6 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
                           help="automatic checks and bounded regeneration; audio skips local lyric STT")
     generate.add_argument("--quality-attempts", type=int, choices=range(1, 5), default=4,
                           help="maximum total generation attempts per requested version, including the first")
+    generate.add_argument("--repair-attempts", type=int, choices=range(0, 4), default=0,
+                          help="repaint a stretch whose written lines were not sung, up to this many times (off by default)")
     generate.add_argument("--style", help="revise the project style prompt first")
     generate.add_argument("--lyrics", help="revise the project lyrics first")
     generate.add_argument("--bpm", type=int, help="revise bpm first; 0 clears it")
@@ -398,7 +400,7 @@ def run(args: argparse.Namespace) -> Any:
             source_candidate_id=args.source_candidate_id,
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_seconds,
-            quality=quality_policy(args.quality, max_attempts=args.quality_attempts),
+            quality=quality_policy(args.quality, max_attempts=args.quality_attempts, repair_attempts=args.repair_attempts),
             engine=args.engine,
         )
     if args.command == "cover":

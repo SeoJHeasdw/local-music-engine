@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ActiveTask, AutomaticQuality, Finding, RhythmDiagnostics, RhythmQuality, Song, TaskOutcome, Version } from "../shared.ts";
 import { findingCopy, versionSourceParent, versionTree } from "../renderer/format.ts";
-import { audioQualityText, checkCount, isAutomaticAttempt, listeningPoints, lyricQualityText, processingText, qualityLabel, remainingProblems, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText, TaskListeningFocus } from "../renderer/quality.ts";
+import { audioQualityText, checkCount, editSpliceText, isAutomaticAttempt, listeningPoints, lyricQualityText, processingText, qualityLabel, remainingProblems, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText, TaskListeningFocus } from "../renderer/quality.ts";
 
 const quality = (change: Partial<AutomaticQuality> = {}): AutomaticQuality => ({
   status: "passed", summary: "자동 검사 통과", groupId: "batch-slot", attempt: 1, maxAttempts: 4,
@@ -393,4 +393,63 @@ test("gradual tempo change, unsupported audio and clean repetition each get an h
   // Earlier diagnosis versions never show the row.
   const older = rhythmDiagnosticChecks(quality({ rhythm: rhythm({ diagnostics: diagnostics({ version: "rhythm-diagnostics-v3" }) }) }));
   assert.ok(older.every((check) => !check.label.includes("타격 시각")));
+});
+
+test("unsung lines are one row that names the line and the place, not a second sentence about the lyrics", () => {
+  const lines = (check: string): Finding => ({ findingId: check, check, severity: "warning", message: "", threshold: {},
+    observed: { section: "Verse 1", lineCount: 2, firstLine: "Your window glows above the street", matchedUnits: 0, expectedUnits: 12 },
+    startSeconds: 0, endSeconds: 18.46 });
+  const missing = findingCopy(lines("lyric_lines_missing"));
+  assert.equal(missing.label, "가사 2줄이 들리지 않아요");
+  assert.match(missing.message, /"Your window glows above the street" 등 2줄/);
+  assert.equal(missing.value, "Verse 1");
+  assert.match(findingCopy(lines("lyric_lines_unclear")).message, /확정하지 않았어요/);
+  assert.equal(findingCopy({ ...lines("lyric_lines_missing"), observed: { lineCount: 1, firstLine: "Let me stay" } }).label, "가사 1줄이 들리지 않아요");
+
+  const warned = quality({ status: "attention", lyrics: { status: "warning", orderedCoverage: 0.91 } });
+  assert.deepEqual(remainingProblems(warned), [lyricQualityText(warned)]);
+  assert.deepEqual(remainingProblems(warned, [lines("lyric_lines_missing")]), []);
+  assert.deepEqual(qualityLabel({ quality: warned, findings: [lines("lyric_lines_missing")] }), { label: "확인할 것 1개", tone: "warn" });
+  // A whole missing section is the same row; a different reason is still said.
+  const whole = quality({ status: "attention", lyrics: { status: "warning" }, retryReasons: ["written_section_missing", "duration_mismatch"] });
+  assert.deepEqual(remainingProblems(whole, [lines("lyric_lines_missing")]), ["요청한 곡 길이와 크게 달라요."]);
+  assert.deepEqual(remainingProblems(whole), ["작성한 구절 하나가 통째로 들리지 않아요.", "요청한 곡 길이와 크게 달라요."]);
+  assert.match(findingCopy({ ...lines("clipping_suspected"), observed: { flatTopSampleFraction: 0.0004 } }).value!, /0\.04%/);
+});
+
+test("an untidied played copy is something to act on, and an edit says what stayed the same", () => {
+  const unfinished = quality({ preferred: true, finishingError: "OSError: disk full" });
+  assert.match(remainingProblems(unfinished)[0]!, /이어서 만들기/);
+  assert.deepEqual(qualityLabel({ quality: unfinished, findings: [] }), { label: "확인할 것 1개", tone: "warn" });
+
+  const edit = { editRange: { startSeconds: 41, endSeconds: 58 } };
+  assert.equal(editSpliceText({ ...edit, splice: { applied: true, changedRange: { startSeconds: 40.99, endSeconds: 58.01 } } }),
+    "40.99–58.01초만 새로 만든 소리예요. 그 밖은 고치기 전 버전과 샘플 하나까지 같아요.");
+  assert.match(editSpliceText({ ...edit, splice: { applied: false, reason: "source_not_preserved_by_engine" } })!, /엔진이 만든 그대로/);
+  assert.equal(editSpliceText({ ...edit, splice: null }), null);  // made before edits were joined this way
+  assert.equal(editSpliceText({ editRange: null, splice: { applied: true } }), null);
+});
+
+test("a take repaired while it was made is the requested version, with the unrepaired take to compare against", () => {
+  const range = { startSeconds: 0, endSeconds: 15 };
+  const repair = { ofCandidateId: "finished", attempt: 1, maxAttempts: 3, section: "Verse 1", lineCount: 2,
+    firstLine: "Your window glows above the street", range };
+  const raw = version("raw");
+  const finished = version("finished", { parentId: "raw", quality: quality({ processing: { sourceCandidateId: "raw" } }) });
+  const repainted = version("repainted", { parentId: "finished", editRange: range, quality: quality({ repair: { ...repair, accepted: true } }) });
+  const rejected = version("rejected", { parentId: "finished", editRange: range, quality: quality({ repair: { ...repair, attempt: 2, accepted: false } }) });
+  const winner = version("winner", { parentId: "repainted", editRange: range, recommended: true,
+    splice: { applied: true, changedRange: { startSeconds: 0, endSeconds: 15.01 } },
+    quality: quality({ preferred: true, processing: { sourceCandidateId: "repainted" }, repair: { ...repair, accepted: true } }) });
+  const song = { versions: [raw, finished, repainted, rejected, winner], finalVersionId: null, recommendedVersionId: "winner" } as Song;
+  const tree = versionTree(song);
+  assert.deepEqual(tree.roots.filter((node) => !isAutomaticAttempt(node.version)).map((node) => [node.version.id, node.name]), [["winner", "버전 1"]]);
+  assert.equal(tree.byId.get("finished")!.name, "버전 1 · 시도 1 · 정리본");
+  assert.equal(tree.byId.get("repainted")!.name, "버전 1 · 시도 1 · 가사 보정 1 · 원본");
+  assert.equal(tree.byId.get("rejected")!.name, "버전 1 · 시도 1 · 가사 보정 2 · 원본");
+  assert.equal(versionSourceParent(song, winner)?.id, "finished");  // what "비교 버전" plays: the take before the repair
+  const text = editSpliceText(winner)!;
+  assert.match(text, /"Your window glows above the street" 등 2줄/);
+  assert.match(text, /0–15\.01초만 다시 만들었고/);
+  assert.match(text, /비교 버전/);
 });

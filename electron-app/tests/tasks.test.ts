@@ -64,6 +64,8 @@ test("quality progress counts finished requested slots rather than every success
   assert.equal(stageText("seed 12: quality_rhythm"), "박자와 구간별 소리 변화를 확인하는 중");
   assert.match(stageText("quality_setup"), /자동 검사/);
   assert.match(stageText("quality_retry"), /다시 만드는/);
+  assert.match(stageText("quality_repair"), /그 구간만 다시 만드는/);
+  assert.match(stageText("restoring audio outside the edit"), /원래 소리 그대로/);
   assert.match(stageText("finalizing"), /재생본/);
   assert.match(stageForJob({ ...job, stage: "quality_retry" }, { jobId: "child", kind: "generate-candidate", status: "running", stage: "submitting" }), /다시 만드는/);
 });
@@ -144,4 +146,14 @@ test("quitting awaits the CLI cancellation handler", async () => {
   } finally {
     child.kill();
   }
+});
+
+test("a version whose played copy was not tidied counts as made, with resuming named as the way to finish", async () => {
+  const payload = { candidateIds: ["raw"], newCandidateIds: ["raw"], reusedCandidateIds: [], recommendedCandidateId: "raw",
+    failures: [{ seed: "1", stage: "audio_finishing", error: "OSError: disk full" }] };
+  const outcome = await run(`process.stdout.write(${JSON.stringify(JSON.stringify(payload))})`).finished;
+  assert.equal(outcome.ok, true);
+  assert.match(outcome.message, /^버전 1개를 만들었어요\./);
+  assert.match(outcome.message, /재생본 정리를 마치지 못한 버전이 있어요\. 이어서 만들기/);
+  assert.doesNotMatch(outcome.message, /실패했어요/);
 });

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .ace_adapter import AceStepClient
+from .edit_splice import restore_outside_edit
 from .jobs import ACTIVE_STATUSES
 from .qc import artifact_and_findings
 from .storage import ProjectStore, new_id, utc_now
@@ -93,6 +94,13 @@ def execute_candidate(
         # not turn the engine into a writer outside the project.
         relative = store.relative_path(destination)
         client.download(file_path, destination)
+        splice = None
+        if source is not None and edit_range is not None:
+            # The engine turns the whole song down to fit the new stretch. Put the source's
+            # own samples back everywhere the edit did not reach, before this file is recorded.
+            progress({"stage": "restoring audio outside the edit", "progress": 0.98})
+            splice = restore_outside_edit(source, destination, start_seconds=edit_range["startSeconds"],
+                                          end_seconds=edit_range["endSeconds"])
         progress({"stage": "checking audio", "progress": 0.99})
         artifact, findings = artifact_and_findings(
             path=destination,
@@ -101,6 +109,8 @@ def execute_candidate(
             created_by_job_id=job_id,
             requested_duration_seconds=float(request["parameters"]["audio_duration"]),
         )
+        if splice is not None:
+            artifact["splice"] = splice
         candidate = {
             "candidateId": new_id("candidate"),
             "requestId": request["requestId"],

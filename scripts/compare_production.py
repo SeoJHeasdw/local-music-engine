@@ -239,7 +239,7 @@ def run_comparison(
                     result = generate_candidates(project_root, seeds=[seed], base_url=config.base_url, engine="ace-step",
                         model=config.model, lm_model=config.lm_model, lm_temperature=config.lm_temperature,
                         timeout_seconds=config.timeout_seconds, client_factory=client_factory,
-                        quality=quality_policy("auto", max_attempts=1), quality_backend=quality_backend)
+                        quality=quality_policy("auto", max_attempts=1, repair_attempts=0), quality_backend=quality_backend)
                     evidence = attempt_evidence(store, result)
                     attempt.update(evidence)
                     post_health = client_factory(config.base_url).health()

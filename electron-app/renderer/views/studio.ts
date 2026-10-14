@@ -21,7 +21,7 @@ import {
 import { Player } from "../player.ts";
 import { get, isPlanTicket, isSongTicket, planTicket, set, songTicket, type InspectorTab, type State } from "../store.ts";
 import { confirmDialog, errorText, menu, toast, withBusy } from "../ui.ts";
-import { audioQualityText, checkCount, isAutomaticAttempt, listeningPoints, lyricQualityText, processingText, qualityLabel, remainingProblems, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText } from "../quality.ts";
+import { audioQualityText, checkCount, editSpliceText, isAutomaticAttempt, listeningPoints, lyricQualityText, processingText, qualityLabel, remainingProblems, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText } from "../quality.ts";
 import { songPlanView } from "../song-plan-view.ts";
 import { comparisonChoices, comparisonVersion } from "../comparison.ts";
 import { INSTRUMENTS, applyInstrumentChanges, hasInstrument } from "../instruments.ts";
@@ -431,10 +431,14 @@ function renderBanner(state: State, song: Song): void {
     mount(els.banner, ...resumable.map((job) => {
       const done = (job.succeeded ?? 0) + (job.reused ?? 0);
       const total = job.seeds?.length ?? 0;
-      const label = job.status === "cancelled" ? "취소했던 만들기" : job.status === "partial" ? "일부 버전을 못 만든 작업" : job.status === "failed" ? "완료하지 못한 만들기" : "중단된 만들기";
+      // Every version exists; only tidying the played copy is left, and resuming does just that.
+      const unfinished = job.status === "partial" && job.failures?.length && job.failures.every((item) => item.stage === "audio_finishing");
+      const label = unfinished ? "재생본 정리를 못 마친 작업" : job.status === "cancelled" ? "취소했던 만들기" : job.status === "partial" ? "일부 버전을 못 만든 작업" : job.status === "failed" ? "완료하지 못한 만들기" : "중단된 만들기";
       return h("div", { class: "notice tone-warn row", role: "status" },
         h("div", null,
-          h("p", null, h("b", null, `${label} · ${done}/${total}개 완료`), " 처음 요청 그대로 남은 버전을 이어 만들어요."),
+          unfinished
+            ? h("p", null, h("b", null, label), " 음원은 새로 만들지 않고 재생본 정리만 다시 해요.")
+            : h("p", null, h("b", null, `${label} · ${done}/${total}개 완료`), " 처음 요청 그대로 남은 버전을 이어 만들어요."),
           job.error || job.failures?.length ? h("p", { class: "footnote" }, (job.error ?? job.failures?.[0]?.error ?? "").slice(0, 180)) : null,
         ),
         h("button", {
@@ -494,7 +498,8 @@ function renderPlayer(state: State, song: Song): void {
             version.isFinal && h("span", { class: "pill tone-accent" }, "최종본"),
             version.recommended && !version.isFinal && h("span", { class: "pill tone-accent" }, "자동 추천"),
             quality && h("span", { class: `pill tone-${quality.tone}` }, quality.label),
-            version.editRange && parent && h("span", { class: "pill tone-edit" }, `${parent.short}의 ${rangeLabel(version.editRange)} 수정`),
+            version.editRange && parent && h("span", { class: "pill tone-edit" }, version.quality?.repair
+              ? `${rangeLabel(version.editRange)} 가사 자동 보정` : `${parent.short}의 ${rangeLabel(version.editRange)} 수정`),
             version.kind === "cover" && parent && h("span", { class: "pill tone-edit" }, `${parent.short} 바탕`),
             h("span", { class: `pill tone-${version.review.status}` }, reviewCopy[version.review.status].label),
           ],
@@ -685,7 +690,7 @@ function versionRow(song: Song, item: VersionNode, state: State, busy: boolean):
       { type: "button", class: "version-main", onClick: () => selectVersion(version.id) },
       h("b", null, item.short),
       h("small", null,
-        version.fileOk ? (version.editRange ? `${rangeLabel(version.editRange)} 수정` : lengthLabel(version.durationSeconds)) : "파일 없음",
+        version.fileOk ? (version.editRange && !version.quality?.repair ? `${rangeLabel(version.editRange)} 수정` : lengthLabel(version.durationSeconds)) : "파일 없음",
         quality ? ` · ${quality.label}` : "",
       ),
     ),
@@ -1053,8 +1058,9 @@ function qualityReport(version: Version): Child {
   const processing = processingText(quality.processing);
   const rhythm = rhythmQualityText(quality);
   const rhythmDiagnostics = rhythmDiagnosticChecks(quality);
-  const problems = remainingProblems(quality);
+  const problems = remainingProblems(quality, version.findings);
   const points = listeningPoints(version.findings);
+  const splice = editSpliceText(version);
   const observations = version.findings.filter((finding) => !points.includes(finding));
   const preparation = quality.preparation;
   const extended = preparation && typeof preparation.requestedDurationSeconds === "number" && typeof preparation.effectiveDurationSeconds === "number"
@@ -1063,6 +1069,7 @@ function qualityReport(version: Version): Child {
     h("div", { class: "row" }, h("span", { class: `pill tone-${badge.tone}` }, badge.label), version.recommended && h("span", { class: "pill tone-accent" }, "자동 추천"),
       h("span", { class: "footnote" }, `${quality.attempt}번째 시도 · 최대 ${quality.maxAttempts}회`)),
     extended && h("p", { class: "hint" }, `가사를 다 담도록 길이를 ${lengthLabel(preparation.requestedDurationSeconds)}에서 ${lengthLabel(preparation.effectiveDurationSeconds)}로 늘렸어요.`),
+    splice && h("p", { class: "hint" }, splice),
     problems.length || points.length
       ? h("ul", { class: "findings" },
           problems.map((problem) => h("li", { class: "finding tone-warning" }, h("div", { class: "finding-head" }, h("b", null, problem)))),
