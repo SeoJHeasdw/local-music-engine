@@ -230,15 +230,21 @@ uv run music-engine inspect-rhythm projects/my-song --candidate-id <candidate-id
 정리본(`finished-audio`)마다 `listening-copy` job이 `listening-audio` artifact를 만든다. 버전 자체는 바꾸지 않는다.
 구간 수정은 버전의 원래 샘플을 다시 칠하고 이어 붙이므로, 마스터링을 버전에 넣으면 수정 밖이 두 번 마스터링된다.
 
-- 처리: 25 Hz high-pass → glue compressor(−20 dBFS, 2.5:1, 20/200 ms) → 옆(side) +2.6 dB → drive → limiter(−2 dBFS,
-  look-ahead 지연 보정). FFmpeg 필터로 하며 `mastering`에 필터 문자열·FFmpeg 판본·전후 측정을 남긴다.
+- 처리: 25 Hz high-pass → glue compressor(−20 dBFS, 2.5:1, 20/200 ms) → 옆(side) +2.6 dB → drive → 4배 oversampling한
+  limiter(−1.1 dBFS, look-ahead 지연 보정). FFmpeg 필터로 하며 `mastering`에 판본·필터 문자열·FFmpeg 판본·전후 측정을
+  남긴다. sample rate에서 limiter를 돌리면 저장된 곡 73개 중 20개가 −1 dBTP를 넘었다(최대 +0.7).
 - drive는 곡 전체가 −9 LUFS가 되도록 찾는다. 구간 수정본은 고친 버전의 drive를 그대로 써서 곡의 음량이 바뀌지 않는다.
-- 측정('Night Bus' 150초): −9.0 LUFS, true peak −1.2 dBTP, 길이·sample rate 같음, 원본과 시간 어긋남 0 샘플. 구절과
-  후렴의 음량 차이(구절이 0.8 → 1.0 dB 작음)는 유지됐다. 24-bit WAV로 쓴다.
+- 측정(저장된 곡 23개의 버전 73개): 새로 찾은 drive의 53개는 모두 −9.0 LUFS, true peak는 모두 −1.0 dBTP 이하다. drive를
+  물려받은 구간 수정본 20개는 −9.9 ~ −8.5 LUFS다. 길이·sample rate는 그대로이고 원본과 시간 어긋남은 0 샘플('Night Bus').
+  구절과 후렴의 음량 차이는 유지됐다(구절이 0.8 → 1.0 dB 작음). 24-bit WAV로 쓰며 73개가 1.4 GB다.
 - 3초보다 짧거나 소리가 없는 음원은 만들지 않는다. 실패해도 버전은 그대로이고 앱은 버전 음원을 재생한다.
   실패 이유는 그 `listening-copy` job에 남는다.
 - 앱은 사본이 있으면 그것을 재생·파형 표시·Finder 보기에 쓴다. `export`는 사본을 쓰고, `--unmastered`면 버전 음원을 쓴다.
-  예전 곡은 `music-engine master <곡 폴더>`로 사본을 만든다.
+- `music-engine master <곡 폴더>`는 정리본이 대신한 원 테이크를 뺀, 앱이 재생할 수 있는 모든 버전에 사본을 만든다.
+  마스터링 판본이 바뀌면 새 사본이 옛 사본을 대신하며, 옛 사본은 기록에 `retired`(대신한 사본)를 남기고 파일은
+  기록된 SHA-256과 같을 때만 지운다. 사본은 버전에서 다시 만들 수 있으므로 버전마다 하나만 디스크에 둔다.
+- 버전 음원은 지우지 않는다. 구간 수정·검사·다른 마스터링이 모두 그것에서 시작하고, 마스터링(압축·limiting)은
+  되돌릴 수 없다.
 
 ACE 음원에는 MP3 같은 대역 흔적이 남는다. 16 kHz 위가 거의 없고 16.5–18 kHz가 켜졌다 꺼지며(저장된 ACE 곡 5개에서
 프레임의 6–24%), 하이햇 사이 6–16 kHz에 구멍이 생긴다. Music 3 곡에는 없었다. ACE는 디코더에서 WAV를 바로 쓰므로

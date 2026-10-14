@@ -8,11 +8,13 @@ import pytest
 
 from local_music_engine import mastering
 from local_music_engine.listening import _inherited_drive, listening_copies, master_versions
-from local_music_engine.mastering import LIMIT, MasteringError, master_audio
+from local_music_engine.mastering import MASTERING_VERSION, MasteringError, master_audio
 from local_music_engine.qc import inspect_wav
 from local_music_engine.views import candidate_rows
-from local_music_engine.workflow import export_selected
+from local_music_engine.storage import ProjectStore
+from local_music_engine.workflow import export_selected, generate_candidates
 from test_auto_quality import generate, song  # noqa: F401 - the fixture is used by name
+from test_workflow import FakeAceClient, make_project
 
 
 def _write(path: Path, seconds: float = 8.0, *, rate: int = 48000, level: float = 0.2) -> None:
@@ -47,13 +49,14 @@ def _read(path: Path) -> tuple[int, np.ndarray]:
 def test_master_reaches_release_loudness_without_moving_or_resizing_the_song(tmp_path: Path) -> None:
     source, copy = tmp_path / "version.wav", tmp_path / "listening.wav"
     _write(source)
-    report = master_audio(source, copy, channels=2, duration_seconds=8.0)
+    report = master_audio(source, copy, channels=2, sample_rate=48000, duration_seconds=8.0)
     assert abs(report["output"]["integratedLufs"] - mastering.TARGET_LUFS) <= 0.5
     assert report["driveInherited"] is False
     rate_in, before = _read(source)
     rate_out, after = _read(copy)
     assert rate_out == rate_in and after.shape == before.shape
-    assert np.abs(after).max() <= LIMIT + 1e-3
+    # What the limiter guarantees is the true peak; returning to the sample rate can lift a sample peak a little.
+    assert report["output"]["truePeakDbtp"] <= -1.0
     # The limiter's 5 ms look-ahead (240 samples) is compensated, so playhead times and edit
     # ranges stay valid. What remains is the 25 Hz high-pass's phase on low notes, a few samples.
     window = slice(2 * rate_in, 4 * rate_in)
@@ -67,8 +70,8 @@ def test_master_reaches_release_loudness_without_moving_or_resizing_the_song(tmp
 def test_an_inherited_drive_reproduces_the_same_copy(tmp_path: Path) -> None:
     source = tmp_path / "version.wav"
     _write(source)
-    first = master_audio(source, tmp_path / "a.wav", channels=2, duration_seconds=8.0, drive_db=4.0)
-    master_audio(source, tmp_path / "b.wav", channels=2, duration_seconds=8.0, drive_db=4.0)
+    first = master_audio(source, tmp_path / "a.wav", channels=2, sample_rate=48000, duration_seconds=8.0, drive_db=4.0)
+    master_audio(source, tmp_path / "b.wav", channels=2, sample_rate=48000, duration_seconds=8.0, drive_db=4.0)
     assert first["driveInherited"] is True and first["driveDb"] == 4.0
     assert (tmp_path / "a.wav").read_bytes() == (tmp_path / "b.wav").read_bytes()
 
@@ -78,7 +81,7 @@ def test_short_or_silent_audio_is_not_mastered(tmp_path: Path, seconds: float, l
     source, copy = tmp_path / "version.wav", tmp_path / "listening.wav"
     _write(source, seconds, level=level)
     with pytest.raises(MasteringError):
-        master_audio(source, copy, channels=2, duration_seconds=seconds)
+        master_audio(source, copy, channels=2, sample_rate=48000, duration_seconds=seconds)
     assert not copy.exists() and list(tmp_path.iterdir()) == [source]
 
 
@@ -101,6 +104,19 @@ def test_the_listener_hears_and_exports_the_copy_while_the_version_stays_as_made
     assert len(song.load()["artifacts"]) == before
 
 
+def test_older_songs_get_copies_for_versions_that_were_never_finished(tmp_path: Path) -> None:
+    root = tmp_path / "older"
+    make_project(root)
+    FakeAceClient.fail_seeds, FakeAceClient.submitted = set(), []
+    take = generate_candidates(root, seeds=[3], client_factory=FakeAceClient, engine="ace-step")["candidateIds"][0]
+    store = ProjectStore(root)
+    assert listening_copies(store.load()) == {}
+    made = master_versions(root)
+    project = store.load()
+    version = store.find_by_id(project, "candidates", "candidateId", take)
+    assert made == {"listeningArtifactIds": {take: listening_copies(project)[version["artifactId"]]["artifactId"]}, "failures": {}}
+
+
 def test_an_edit_keeps_the_level_of_the_mastered_version_it_edits() -> None:
     edit = {"startSeconds": 10.0, "endSeconds": 20.0}
     project = {"candidates": [
@@ -108,6 +124,26 @@ def test_an_edit_keeps_the_level_of_the_mastered_version_it_edits() -> None:
         {"candidateId": "edit-raw", "artifactId": "a-edit-raw", "parentCandidateId": "version", "editRange": edit},
         {"candidateId": "edit", "artifactId": "a-edit", "parentCandidateId": "edit-raw", "editRange": edit},
     ]}
-    copies = {"a-version": {"mastering": {"driveDb": 7.5}}}
+    copies = {"a-version": {"mastering": {"driveDb": 7.5, "version": MASTERING_VERSION}}}
     assert _inherited_drive(project, project["candidates"][2], copies) == 7.5
     assert _inherited_drive(project, project["candidates"][0], copies) is None
+    # A drive found for an older mastering chain does not carry over to the current one.
+    stale = {"a-version": {"mastering": {"driveDb": 7.5, "version": MASTERING_VERSION - 1}}}
+    assert _inherited_drive(project, project["candidates"][2], stale) is None
+
+
+def test_a_copy_from_older_mastering_is_replaced_and_its_file_removed(song) -> None:
+    generate(song)
+    project = song.load()
+    finished = project["candidates"][-1]
+    old = listening_copies(project)[finished["artifactId"]]
+    old_path = song.resolve_artifact(old)
+    with song.transaction() as project:
+        song.find_by_id(project, "artifacts", "artifactId", old["artifactId"])["mastering"]["version"] = MASTERING_VERSION - 1
+    made = master_versions(song.root)["listeningArtifactIds"][finished["candidateId"]]
+    project = song.load()
+    assert made != old["artifactId"] and listening_copies(project)[finished["artifactId"]]["artifactId"] == made
+    assert song.find_by_id(project, "artifacts", "artifactId", old["artifactId"])["retired"]["supersededBy"] == made
+    assert not old_path.exists()
+    rows = {row["candidateId"]: row for row in candidate_rows(song, project)}
+    assert rows[finished["candidateId"]]["listeningPath"] == str(song.resolve_artifact(song.find_by_id(project, "artifacts", "artifactId", made)))

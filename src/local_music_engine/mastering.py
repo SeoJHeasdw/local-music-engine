@@ -25,10 +25,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-MASTERING_VERSION = 1
+MASTERING_VERSION = 2
 TARGET_LUFS = -9.0
-# -2 dBFS sample peak: measured on a mastered 150 s song, inter-sample peaks then stay under -1 dBTP.
-LIMIT = 0.79
+# The limiter runs at four times the sample rate so it sees the peaks between samples.
+# Limiting at the sample rate left 20 of 73 saved songs above -1 dBTP (up to +0.7);
+# oversampled at -1.1 dBFS they measure -1.0 dBTP or lower.
+LIMIT = 0.88
+OVERSAMPLING = 4
 MINIMUM_SECONDS = 3.0      # integrated loudness needs gated blocks to mean anything
 SILENT_LUFS = -60.0
 DRIVE_RANGE_DB = (-12.0, 24.0)
@@ -39,10 +42,11 @@ class MasteringError(RuntimeError):
     """The listening copy could not be made; the version itself is unaffected."""
 
 
-def chain(drive_db: float, channels: int) -> str:
+def chain(drive_db: float, channels: int, sample_rate: int) -> str:
     widen = "stereotools=slev=1.35," if channels == 2 else ""
     return ("highpass=f=25,acompressor=threshold=0.1:ratio=2.5:attack=20:release=200:knee=4,"
-            f"{widen}volume={drive_db:.2f}dB,alimiter=limit={LIMIT}:attack=5:release=60:level=0:latency=1")
+            f"{widen}volume={drive_db:.2f}dB,aresample={sample_rate * OVERSAMPLING},"
+            f"alimiter=limit={LIMIT}:attack=5:release=60:level=0:latency=1,aresample={sample_rate}")
 
 
 def _ffmpeg() -> str:
@@ -80,7 +84,7 @@ def measure(path: Path | str, filters: str | None = None) -> dict[str, float | N
     return _summary(result.stderr)
 
 
-def find_drive(source: Path | str, channels: int, target_lufs: float = TARGET_LUFS) -> float:
+def find_drive(source: Path | str, channels: int, sample_rate: int, target_lufs: float = TARGET_LUFS) -> float:
     """The gain into the limiter that brings the mastered song to the target loudness.
 
     Loudness rises with drive, never by more than the drive itself (the limiter only takes
@@ -91,7 +95,7 @@ def find_drive(source: Path | str, channels: int, target_lufs: float = TARGET_LU
     low, high = DRIVE_RANGE_DB
 
     def error(drive: float) -> float:
-        loudness = measure(source, chain(drive, channels))["integratedLufs"]
+        loudness = measure(source, chain(drive, channels, sample_rate))["integratedLufs"]
         return (SILENT_LUFS if loudness is None else loudness) - target_lufs
 
     a = min(high, max(low, -error(0.0)))
@@ -124,8 +128,8 @@ def find_drive(source: Path | str, channels: int, target_lufs: float = TARGET_LU
     return round(drive, 2)
 
 
-def master_audio(source: Path | str, destination: Path | str, *, channels: int, duration_seconds: float,
-                 drive_db: float | None = None, on_staged: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+def master_audio(source: Path | str, destination: Path | str, *, channels: int, sample_rate: int,
+                 duration_seconds: float, drive_db: float | None = None, on_staged: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     """Write the mastered copy to a new file and return what was done and measured.
 
     ``drive_db`` given means the copy follows an existing level (an edit of a mastered
@@ -145,10 +149,10 @@ def master_audio(source: Path | str, destination: Path | str, *, channels: int, 
         raise MasteringError("audio is silent; there is nothing to master")
     inherited = drive_db is not None
     if drive_db is None:
-        drive_db = find_drive(source, channels)
+        drive_db = find_drive(source, channels, sample_rate)
     elif not math.isfinite(drive_db) or not DRIVE_RANGE_DB[0] <= drive_db <= DRIVE_RANGE_DB[1]:
         raise MasteringError("inherited drive is out of range")
-    filters = chain(drive_db, channels)
+    filters = chain(drive_db, channels, sample_rate)
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp.wav", dir=destination.parent)
     os.close(descriptor)

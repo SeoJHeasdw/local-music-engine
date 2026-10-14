@@ -290,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--unmastered", action="store_true",
                         help="export the version as the engine made it instead of its mastered listening copy")
 
-    master = subparsers.add_parser("master", help="make the missing mastered listening copies of finished versions")
+    master = subparsers.add_parser("master", help="make the missing mastered listening copies of a song's versions")
     master.add_argument("path", type=Path)
     master.add_argument("--candidate-id", help="only this version")
 
