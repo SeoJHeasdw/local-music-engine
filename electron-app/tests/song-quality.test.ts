@@ -135,13 +135,15 @@ test("v3 requires valid PCM evidence for observed status and preserves warning o
   }
 });
 
-test("song loading exposes a separate recommendation and streams the finished artifact while preserving raw audio and review", async () => {
+test("song loading exposes a separate recommendation and streams the finished version's mastered copy while preserving raw audio and review", async () => {
   const folder = await mkdtemp(path.join(tmpdir(), "music-quality-song-"));
   try {
     const original = path.join(folder, "original.wav");
     const finished = path.join(folder, "finished.wav");
+    const mastered = path.join(folder, "listening.wav");
     await writeFile(original, "preserved raw");
     await writeFile(finished, "separate finished artifact");
+    await writeFile(mastered, "mastered listening copy");
     const review = { status: "unreviewed", rating: null, notes: [], updatedAt: null };
     const quality = { status: "passed", summary: "자동 검사 통과", groupId: "batch-slot", attempt: 2, maxAttempts: 4,
       originalSeed: 11, preferred: false, score: 98, retryReasons: [], audio: { automaticStatus: "passed" },
@@ -153,8 +155,8 @@ test("song loading exposes a separate recommendation and streams the finished ar
     const raw = { projectId: "project", title: "곡", path: folder, createdAt: null, updatedAt: null,
       inputs: { stylePrompt: "piano", lyrics: "가사", durationSeconds: 10, structure: null, bpm: null, keyScale: null, timeSignature: null },
       selectedCandidateId: null, recommendedCandidateId: "finished", canUndoSelection: false, generationActive: false, feedback: [], jobs: [], exports: [],
-      candidates: [candidate, { ...candidate, candidateId: "finished", parentCandidateId: "raw", taskType: "postprocess", path: finished,
-        quality: { ...quality, preferred: true, processing: { sourceCandidateId: "raw", gain: 0.95 } }, recommended: true }] };
+      candidates: [{ ...candidate, listeningPath: "" }, { ...candidate, candidateId: "finished", parentCandidateId: "raw", taskType: "postprocess", path: finished,
+        listeningPath: mastered, quality: { ...quality, preferred: true, processing: { sourceCandidateId: "raw", gain: 0.95 } }, recommended: true }] };
     const state = await loadSong(folder, async <T>() => raw as unknown as T);
     assert.equal(state.status, "ready");
     assert.equal(state.song?.recommendedVersionId, "finished");
@@ -165,8 +167,9 @@ test("song loading exposes a separate recommendation and streams the finished ar
     assert.equal(winner.recommended, true);
     assert.equal(winner.quality?.attempt, 2);
     assert.equal(versionFilePath("raw"), original);
-    assert.equal(versionFilePath("finished"), finished);
-    assert.equal(await (await handleArtifactRequest(new Request(winner.audioUrl!))).text(), "separate finished artifact");
+    // The listener hears, sees and finds the mastered copy; edits keep using the version's own audio.
+    assert.equal(versionFilePath("finished"), mastered);
+    assert.equal(await (await handleArtifactRequest(new Request(winner.audioUrl!))).text(), "mastered listening copy");
     assert.equal(await (await handleArtifactRequest(new Request(state.song!.versions[0]!.audioUrl!))).text(), "preserved raw");
   } finally {
     await rm(folder, { recursive: true, force: true });

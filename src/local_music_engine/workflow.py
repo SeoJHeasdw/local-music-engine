@@ -16,6 +16,7 @@ from .edit_splice import played_tempo
 from .execution import execute_candidate
 from .jobs import (ACTIVE_STATUSES, cleanup_export_outputs, frozen_batch_payloads, recover_export_jobs, recover_jobs,
                    reusable_candidates, resume_source, validate_seed)
+from .listening import listening_copies
 from .qc import artifact_and_findings, inspect_wav
 from .storage import ProjectStore, fingerprint, new_id, sha256_file, utc_now
 from .auto_quality import finish_single_edit, make_quality_plan, make_repair_seeds, run_quality_batch, validate_quality_plan
@@ -951,7 +952,10 @@ def _copy_atomic(
 
 def export_selected(
     project_root: Path | str, *, output: Path | str | None = None, candidate_id: str | None = None,
+    unmastered: bool = False,
 ) -> dict[str, Any]:
+    """Export what the listener heard: the version's mastered listening copy when it has one."""
+
     store = ProjectStore(project_root)
     with store.export_lock():
         job_id = None
@@ -964,6 +968,9 @@ def export_selected(
                 source_artifact = store.find_by_id(
                     project, "artifacts", "artifactId", candidate["artifactId"]
                 )
+                copy = None if unmastered else listening_copies(project).get(source_artifact["artifactId"])
+                if copy is not None and store.verify_artifact(copy)[0]:
+                    source_artifact = copy
                 valid, reason = store.verify_artifact(source_artifact)
                 if not valid:
                     raise ValueError(reason)
@@ -981,7 +988,8 @@ def export_selected(
                         raise FileExistsError("export output already exists; choose a new filename")
                 job = store.append_job(
                     project, kind="export",
-                    parameters={"candidateId": selected_id, "requestedOutput": str(output or "")},
+                    parameters={"candidateId": selected_id, "requestedOutput": str(output or ""),
+                                "sourceArtifactId": source_artifact["artifactId"]},
                 )
                 job_id = job["jobId"]
                 job["ownedOutputs"] = []

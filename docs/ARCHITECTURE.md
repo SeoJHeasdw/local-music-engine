@@ -206,7 +206,9 @@ SIGINT로 CLI를 멈춰 batch와 진행 중이던 하위 job을 모두 `cancelle
 추가 추론하지 않는다. 실패한 검사기는 그 항목만 `unknown`으로 남기고, 이미 측정한 소리 결함과 그
 재생성 근거는 지우지 않는다. 원격 timeout은 진행 중인 추론이 남을 수 있어 추가 자동 제출을 멈춘다.
 
-`quality-check`와 `audio-finish`는 별도 하위 job이다. 후처리는 원본을 읽어 새 artifact·candidate·
+`quality-check`, `audio-finish`, `listening-copy`는 별도 하위 job이다. `listening-copy`는 정리본의 마스터링한
+듣기용 사본(`listening-audio`, `sourceArtifactId`가 버전 음원)을 만들며 버전과 그 계보는 바꾸지 않는다. 실패해도
+batch는 성공으로 끝나고 앱은 버전 음원을 재생한다([듣기용 사본](AUTO-QUALITY.md#듣기용-사본마스터링)). 후처리는 원본을 읽어 새 artifact·candidate·
 revision을 만들고, 게시 전에 fsync한 임시 파일의 inode·byte 수·SHA-256 소유 정보를 정본에 쓴다.
 복구는 성공 저장 전의 소유 출력만 제거하며, 성공 저장 뒤에는 게시한 WAV를 남기고 임시 링크만
 정리한다. 후처리가 실패하면 검증된 원본을 추천하고 `quality.finishingError`를 남기며 batch는
@@ -239,7 +241,8 @@ conditions:`)이다. 자유 문장을 넣으면 템플릿을 덮어쓴다. 그�
 `repaint --lyrics`는 이번 요청에만 적용한다. 전체 수정안도 `generate --source-candidate-id`로
 대상 버전의 입력을 먼저 복원하고 수정안을 적용하므로 다른 버전의 가사가 섞이지 않는다.
 
-export는 새 내부 artifact를 만들며 외부 출력은 프로젝트 밖의 존재하지 않는 파일만 허용한다.
+export는 새 내부 artifact를 만들며 외부 출력은 프로젝트 밖의 존재하지 않는 파일만 허용한다. 검증된 듣기용
+사본이 있으면 그것을, `--unmastered`면 버전 음원을 복사한다.
 임시 파일을 hard link로 게시해 검사 후 이름을 선점하는 경합에서도 기존 파일을 덮지 않는다.
 선택 되돌리기도 복원할 파일의 크기와 SHA-256을 검증한다.
 

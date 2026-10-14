@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .jobs import ACTIVE_STATUSES, RECOVERABLE_KINDS, frozen_batch_payloads
+from .listening import listening_copies
 from .engines import ACE_CAPABILITIES, ACE_ENGINE, DEFAULT_ENGINE, MAX_DURATION_SECONDS
 from .lyrics import is_instrumental_lyrics
 from .storage import PROJECT_FILENAME, ProjectStore
@@ -43,11 +44,15 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
     feedback_by_job = {
         record["jobId"]: record["feedbackId"] for record in project.get("feedback", [])
     }
+    copies = listening_copies(project)
     rows = []
     for candidate in project["candidates"]:
         artifact = artifacts[candidate["artifactId"]]
         valid, reason = store.verify_artifact(artifact)
         path = _artifact_path(store, artifact)
+        # What the listener hears: the mastered copy when one verifies, else the version itself.
+        copy = copies.get(artifact["artifactId"])
+        listening = _artifact_path(store, copy) if copy is not None and store.verify_artifact(copy)[0] else None
         request = requests[candidate["requestId"]]
         parameters = request["parameters"]
         job = jobs.get(artifact.get("createdByJobId") or "")
@@ -103,6 +108,7 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
                 "feedbackId": feedback_id,
                 "createdAt": candidate.get("createdAt"),
                 "path": str(path) if path is not None else "",
+                "listeningPath": str(listening) if listening is not None else "",
             }
         )
     return rows

@@ -46,6 +46,8 @@ type RawCandidate = {
   feedbackId: string | null;
   createdAt: string | null;
   path: string;
+  // The mastered copy the listener hears; empty for versions made before mastering.
+  listeningPath?: string;
   quality?: Partial<AutomaticQuality> | null;
   splice?: Version["splice"];
   recommended?: boolean;
@@ -322,7 +324,8 @@ export async function loadSong(folder: string, read: typeof runCli = runCli): Pr
     const raw = await read<RawStatus>(["status", folder]);
     const versions: Version[] = await Promise.all(
       raw.candidates.map(async (candidate) => {
-        versionPaths.set(candidate.candidateId, candidate.path);
+        const heard = candidate.listeningPath || candidate.path;
+        versionPaths.set(candidate.candidateId, heard);
         return {
           id: candidate.candidateId,
           // A take repaired while it was being made is that take, not an edit the listener asked for.
@@ -346,8 +349,8 @@ export async function loadSong(folder: string, read: typeof runCli = runCli): Pr
           instruction: candidate.instruction,
           feedbackId: candidate.feedbackId,
           createdAt: candidate.createdAt,
-          audioUrl: candidate.artifactValid ? audioUrlFor(candidate.path) : null,
-          waveform: candidate.artifactValid ? await wavPeaks(candidate.path) : [],
+          audioUrl: candidate.artifactValid ? audioUrlFor(heard) : null,
+          waveform: candidate.artifactValid ? await wavPeaks(heard) : [],
           quality: qualityFromStatus(candidate.quality),
           splice: candidate.splice ?? null,
           recommended: Boolean(candidate.recommended || raw.recommendedCandidateId === candidate.candidateId),

@@ -404,7 +404,7 @@ export class Controller {
       const feedback = String(input?.feedback ?? "").trim().slice(0, 2000);
       if (!feedback) throw new Error("무엇이 마음에 안 드는지 적어 주세요.");
       const strength = strengths.includes(input?.strength) ? input.strength : "medium";
-      const versions = Math.min(4, Math.max(1, Math.round(Number(input?.versions) || 2)));
+      const versions = Math.min(4, Math.max(1, Math.round(Number(input?.versions) || 1)));
       const settings = currentSettings();
       const args = ["plan", folder, versionId, "--feedback", feedback, "--strength", strength, "--versions", String(versions)];
       if (input.range) {
@@ -450,7 +450,7 @@ export class Controller {
           jobKind: "repaint-candidate",
         }, context);
       }
-      const count = Math.min(4, Math.max(1, Math.round(Number(plan.versions) || 2)));
+      const count = Math.min(4, Math.max(1, Math.round(Number(plan.versions) || 1)));
       const args = [...this.generationArgs(folder, count), "--source-candidate-id", versionId, "--style", style, "--feedback-json", feedback];
       if (typeof plan.lyrics === "string" && plan.lyrics.trim()) args.push("--lyrics", plan.lyrics);
       if (plan.bpm && Number.isInteger(plan.bpm)) args.push("--bpm", String(plan.bpm));

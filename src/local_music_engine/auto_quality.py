@@ -14,6 +14,7 @@ from typing import Any, Callable
 from .audio_quality import AudioFinishPolicy, analyze_audio_quality, finish_audio
 from .execution import execute_candidate
 from .jobs import ACTIVE_STATUSES, batch_lineage, cleanup_export_outputs, validate_seed
+from .listening import ensure_listening_copy
 from .lyric_quality import assess_lyric_suitability, evaluate_lyric_transcript, reread_requests, reread_starts
 from .qc import artifact_and_findings
 from .quality_backend import AudioOnlyBackend, LocalQualityBackend
@@ -565,6 +566,16 @@ def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str
 
 
 def finalize_candidate(store: ProjectStore, candidate_id: str, *, batch_id: str) -> str:
+    finished = _finish_candidate(store, candidate_id, batch_id=batch_id)
+    try:
+        ensure_listening_copy(store, finished, parent_job_id=batch_id)
+    except Exception:
+        # The failed listening-copy job keeps the reason; the app plays the version itself.
+        pass
+    return finished
+
+
+def _finish_candidate(store: ProjectStore, candidate_id: str, *, batch_id: str) -> str:
     candidate, source_artifact, source = _candidate(store, candidate_id)
     project = store.load()
     # A completed finishing job can be reused only within an explicitly resumed batch.

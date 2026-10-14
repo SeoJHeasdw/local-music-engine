@@ -111,7 +111,7 @@ uv run music-engine production-rules
 uv run music-engine draft --query "늦은 밤 감성 힙합" --duration 30 --vocal-language en
 uv run music-engine init projects/my-song --title "내 노래" --lyrics-file lyrics.txt \
   --style "emotional hip hop, warm piano, clear male melodic rap" --duration 60
-uv run music-engine generate projects/my-song --seeds 101
+uv run music-engine generate projects/my-song
 uv run music-engine status projects/my-song
 uv run music-engine library --dir projects
 ```
@@ -121,6 +121,9 @@ CLI의 기본 엔진은 앱과 같은 ACE-Step XL turbo(`127.0.0.1:18001`, `aces
 `draft --engine ace-step`은 ACE가 꺼져 있으면 켜서 쓰고, 끝나면 ACE가 스스로 꺼진다. 서버가 다른
 DiT를 올렸으면 `--model`로 그 이름을 적는다.
 
+`generate`는 기본으로 버전 하나를 새 seed로 만든다. 여러 개는 `--versions 2–4`로 고르거나, 같은 곡을 다시
+만들려면 `--seeds 101,102`처럼 seed를 적는다(둘은 함께 쓰지 않는다). 쓴 seed는 `project.json`에 남는다.
+
 품질 기본값은 `--quality auto --quality-attempts 4`다. 버전마다 첫 생성과 재시도를 합쳐 최대 네 번이며,
 검사가 불확실하다는 이유만으로 다시 만들지 않는다. 다시 만드는 근거는 전체 무음, 클리핑, 큰 길이 차이, 크게
 틀린 가사, 통째로 빠진 후렴·구절뿐이다. 부르지 않은 가사 줄은 줄과 구간을 확인할 것에 올린다.
@@ -128,13 +131,16 @@ DiT를 올렸으면 `--model`로 그 이름을 적는다.
 쓴다(기본은 꺼짐). 생성 뒤 파일·음량·가사 받아쓰기·리듬과, 엔진이 실제로
 적용했다고 보고한 템포·조성·박자를 검사해 확인할 구간을 표시한다. 리듬 경고는 청취 확인용이며 재생성이나
 시간 보정의 근거로 쓰지 않는다. 자동 추천은 사람의 최종본 선택과 분리하고 새 음원은 `unreviewed`다.
+정리본마다 −9 LUFS로 마스터링한 듣기용 사본을 따로 만들어 앱이 재생하고 내보낸다. 버전 음원은 그대로이며
+`export --unmastered`로 받을 수 있다. 예전 곡은 `uv run music-engine master projects/my-song`으로 사본을 만든다.
 검사 항목과 한계는 [자동 품질 검사](docs/AUTO-QUALITY.md)와 [타격 시각 검사](docs/TIMBRE-TRACKING.md)에 있다.
 
 ```bash
+uv run music-engine generate projects/my-song --versions 3
 uv run music-engine generate projects/my-song --seeds 101 --quality-attempts 2
-uv run music-engine generate projects/my-song --seeds 102 --quality audio
+uv run music-engine generate projects/my-song --quality audio
 uv run music-engine generate projects/my-song --source-candidate-id <candidate-id> \
-  --seeds 103 --style "fuller chorus, clear lead vocal"
+  --style "fuller chorus, clear lead vocal"
 uv run music-engine revise projects/my-song --title "새 제목" --duration 120
 uv run music-engine repaint projects/my-song --candidate-id <candidate-id> \
   --start 41 --end 58 --seed 104 --strength strong --model acestep-v15-xl-turbo

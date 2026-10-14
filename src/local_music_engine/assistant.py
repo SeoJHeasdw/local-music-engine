@@ -286,7 +286,7 @@ class PlanRequest:
     duration_seconds: float
     edit_range: dict[str, float] | None = None
     strength: str = "medium"
-    versions: int = 2
+    versions: int = 1
     bpm: int | None = None
     key_scale: str | None = None
     engine: str = DEFAULT_ENGINE

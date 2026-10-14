@@ -12,7 +12,8 @@
 4. 재생성 근거가 있으면 같은 준비본에 새 seed를 쓴다. 버전마다 **첫 생성 1회 + 재시도 최대 3회**다.
    근거가 없으면 그 시점에서 끝내며, 검사가 불확실하다는 것은 근거가 아니다. 이 재시도는 다른 곡을 한 번 더
    뽑는 것이며 같은 곡을 고치는 것이 아니다. 같은 곡의 한 부분을 고치는 길은 [구간 수정](#구간-수정)이다.
-5. 시도들을 아래 순서로 견주어 하나를 고르고, 원본을 보존한 정리본을 새 artifact로 만든다.
+5. 시도들을 아래 순서로 견주어 하나를 고르고, 원본을 보존한 정리본을 새 artifact로 만든다. 정리본마다
+   [마스터링한 듣기용 사본](#듣기용-사본마스터링)을 따로 만들어, 앱은 그것을 재생하고 내보낸다.
 6. 고른 곡에 부르지 않은 가사 줄이 확인되면 그 줄과 구간을 확인할 것에 올린다. `--repair-attempts`를 주면
    [그 구간만 다시 만들어](#가사-누락-구간-수리) 넣고, 고쳐진 것이 확인된 경우에만 그 결과를 추천한다.
 
@@ -220,6 +221,29 @@ uv run music-engine inspect-rhythm projects/my-song --candidate-id <candidate-id
 않는다. gain 감소는 이미 생긴 clipping을, fade는 끊긴 가사나 불완전한 끝을 복원하지 않는다. 정리본의 true peak를
 다시 재서 −1 dBTP를 인증하는 단계는 없다.
 
+## 듣기용 사본(마스터링)
+
+엔진이 낸 음원은 마스터링 전 상태다. 'Night Bus'는 −13.8 LUFS, true peak와 음량 차이 11.8 dB, 좌우 상관 0.90(거의
+모노)이었다. 같은 22초를 원본·마스터링·마스터링 + 16 kHz 위 재구성으로 만들어 모두 −14 LUFS(스트리밍 재생 음량)로
+맞춰 들려주자 사용자는 마스터링한 둘이 "훨씬 깨끗하다"고 했고 둘의 차이는 듣지 못했다. 그래서 마스터링만 쓴다.
+
+정리본(`finished-audio`)마다 `listening-copy` job이 `listening-audio` artifact를 만든다. 버전 자체는 바꾸지 않는다.
+구간 수정은 버전의 원래 샘플을 다시 칠하고 이어 붙이므로, 마스터링을 버전에 넣으면 수정 밖이 두 번 마스터링된다.
+
+- 처리: 25 Hz high-pass → glue compressor(−20 dBFS, 2.5:1, 20/200 ms) → 옆(side) +2.6 dB → drive → limiter(−2 dBFS,
+  look-ahead 지연 보정). FFmpeg 필터로 하며 `mastering`에 필터 문자열·FFmpeg 판본·전후 측정을 남긴다.
+- drive는 곡 전체가 −9 LUFS가 되도록 찾는다. 구간 수정본은 고친 버전의 drive를 그대로 써서 곡의 음량이 바뀌지 않는다.
+- 측정('Night Bus' 150초): −9.0 LUFS, true peak −1.2 dBTP, 길이·sample rate 같음, 원본과 시간 어긋남 0 샘플. 구절과
+  후렴의 음량 차이(구절이 0.8 → 1.0 dB 작음)는 유지됐다. 24-bit WAV로 쓴다.
+- 3초보다 짧거나 소리가 없는 음원은 만들지 않는다. 실패해도 버전은 그대로이고 앱은 버전 음원을 재생한다.
+  실패 이유는 그 `listening-copy` job에 남는다.
+- 앱은 사본이 있으면 그것을 재생·파형 표시·Finder 보기에 쓴다. `export`는 사본을 쓰고, `--unmastered`면 버전 음원을 쓴다.
+  예전 곡은 `music-engine master <곡 폴더>`로 사본을 만든다.
+
+ACE 음원에는 MP3 같은 대역 흔적이 남는다. 16 kHz 위가 거의 없고 16.5–18 kHz가 켜졌다 꺼지며(저장된 ACE 곡 5개에서
+프레임의 6–24%), 하이햇 사이 6–16 kHz에 구멍이 생긴다. Music 3 곡에는 없었다. ACE는 디코더에서 WAV를 바로 쓰므로
+모델 자체의 성질이다. 마스터링은 이것을 고치지 않는다(16 kHz 위 재구성은 사용자가 차이를 듣지 못해 버렸다).
+
 ## 가사 누락 구간 수리
 
 전곡 재시도가 다른 곡을 뽑는 것과 달리, 이 단계는 **고른 곡 자체**를 고친다. 대상은 세 번 다시 받아써도
@@ -307,8 +331,8 @@ uv run music-engine inspect-rhythm projects/my-song --candidate-id <candidate-id
 ```bash
 ./scripts/bootstrap_quality.sh        # 가사가 있는 곡의 첫 검사 때 자동 실행된다
 uv run music-engine generate projects/my-song --seeds 101 --quality-attempts 2
-uv run music-engine generate projects/my-song --seeds 102 --quality audio
-uv run music-engine generate projects/my-song --seeds 103 --repair-attempts 2   # 가사 누락 구간 수리 켜기
+uv run music-engine generate projects/my-song --quality audio
+uv run music-engine generate projects/my-song --repair-attempts 2   # 가사 누락 구간 수리 켜기
 ```
 
 Apple Silicon macOS·FFmpeg·uv가 필요하다. 검사 환경 `.runtime/quality/.venv`(Python 3.12.12)는 프로젝트·엔진

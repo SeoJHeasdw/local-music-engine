@@ -518,11 +518,18 @@ def test_sigkill_after_finished_wav_publication_recovers_and_resumes_raw_without
     assert finished["quality"]["processing"]["sourceCandidateId"] == raw["candidateId"]
     assert result["newCandidateIds"] == [finished["candidateId"]]
     assert submissions.read_text().splitlines() == ["1"] and FakeAceClient.submitted == []
-    assert len(project["candidates"]) == len(project["artifacts"]) == 2
+    assert len(project["candidates"]) == 2
+    assert _listening_copy_of(project, finished)["kind"] == "listening-audio"
     assert all(song.verify_artifact(artifact)[0] for artifact in project["artifacts"])
     assert not list((song.root / "artifacts/finished").glob(".*.tmp"))
     assert not any(job["status"] in {"queued", "running", "cancelling"} for job in project["jobs"])
     assert {candidate["humanReview"]["status"] for candidate in project["candidates"]} == {"unreviewed"}
+
+
+def _listening_copy_of(project, candidate):
+    copies = [artifact for artifact in project["artifacts"] if artifact.get("sourceArtifactId") == candidate["artifactId"]]
+    assert len(copies) == 1 and len(project["artifacts"]) == len(project["candidates"]) + 1
+    return copies[0]
 
 
 def test_sigkill_after_finished_success_commit_preserves_output_cleans_anchor_and_reuses_finished(song):
@@ -541,7 +548,9 @@ def test_sigkill_after_finished_success_commit_preserves_output_cleans_anchor_an
     assert result["candidateIds"] == result["reusedCandidateIds"] == [finished["candidateId"]]
     assert result["newCandidateIds"] == []
     assert submissions.read_text().splitlines() == ["1"] and FakeAceClient.submitted == []
-    assert len(project["candidates"]) == len(project["artifacts"]) == 2
+    assert len(project["candidates"]) == 2
+    # The kill came before mastering; the resume masters the reused version without finishing it again.
+    assert _listening_copy_of(project, finished)["mastering"]["driveInherited"] is False
     assert len([job for job in project["jobs"] if job["kind"] == "audio-finish"]) == 1
     assert all(song.verify_artifact(artifact)[0] for artifact in project["artifacts"])
     assert not list((song.root / "artifacts/finished").glob(".*.tmp"))

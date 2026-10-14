@@ -131,3 +131,17 @@ def test_cli_generation_commands_start_ace_with_the_models_they_need(tmp_path: P
     # A version or batch the project cannot name falls back to the defaults; the run reports why.
     for name in ("repaint_candidate", "cover_candidates", "resume_latest_batch"):
         assert seen[name] == ("ManagedAceClient", (ACE_DIT_MODEL, DEFAULT_LM_MODEL))
+
+
+def test_cli_makes_one_version_unless_more_are_asked_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    batches: list[list[int]] = []
+    monkeypatch.setattr(cli, "generate_candidates", lambda *_args, seeds, **_kwargs: batches.append(seeds) or {})
+    song = str(_song(tmp_path))
+    parser = cli.build_parser()
+    for argv in (["generate", song], ["generate", song, "--versions", "3"], ["generate", song, "--seeds", "7,8"]):
+        cli.run(parser.parse_args(argv))
+    assert [len(seeds) for seeds in batches] == [1, 3, 2]
+    assert len(set(batches[1])) == 3 and all(1 <= seed < 2**31 for seed in batches[0] + batches[1])
+    assert batches[2] == [7, 8]
+    with pytest.raises(SystemExit):
+        parser.parse_args(["generate", song, "--versions", "2", "--seeds", "7,8"])

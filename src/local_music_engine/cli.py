@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import secrets
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from .drafting import draft_song
 from .auto_quality import quality_policy
 from .jobs import frozen_batch_payloads, recover_project, resume_source
 from .lane import shared_lane
+from .listening import master_versions
 from .production_rules import catalog as production_catalog, normalize_selection
 from .song_planning import prepare_song_plan, validate_song_plan_input
 from .storage import ProjectStore
@@ -55,6 +57,24 @@ def _parse_seeds(value: str) -> list[int]:
     if len(set(seeds)) != len(seeds):
         raise argparse.ArgumentTypeError("seeds must be unique within a batch")
     return seeds
+
+
+def _add_seed_args(parser: argparse.ArgumentParser) -> None:
+    """One new version by default; more is an explicit choice, by count or by naming each seed."""
+
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--versions", type=int, choices=range(1, 5), default=1,
+                       help="how many new versions to make, each from a fresh random seed (default 1)")
+    group.add_argument("--seeds", type=_parse_seeds, help="comma-separated seeds; one version per seed")
+
+
+def _seeds(args: argparse.Namespace) -> list[int]:
+    if args.seeds is not None:
+        return args.seeds
+    seeds: set[int] = set()
+    while len(seeds) < args.versions:  # the app draws from the same range
+        seeds.add(secrets.randbelow(2_147_483_646) + 1)
+    return sorted(seeds)
 
 
 def _parse_feedback(value: str) -> dict[str, Any]:
@@ -125,10 +145,10 @@ def build_parser() -> argparse.ArgumentParser:
     rules.add_argument("--engine", choices=ENGINES, default=DEFAULT_ENGINE)
     subparsers.add_parser("capabilities", help="show the default engine's supported operations")
 
-    generate = subparsers.add_parser("generate", help="start a new candidate batch")
+    generate = subparsers.add_parser("generate", help="make a new version (or --versions N)")
     generate.add_argument("path", type=Path)
     generate.add_argument("--engine", choices=ENGINES, default=DEFAULT_ENGINE)
-    generate.add_argument("--seeds", type=_parse_seeds, required=True)
+    _add_seed_args(generate)
     generate.add_argument("--base-url", help="engine server address; defaults to the chosen engine's loopback port")
     generate.add_argument("--model", help=f"defaults to {ACE_DIT_MODEL} for ACE")
     generate.add_argument("--lm-model", default=DEFAULT_LM_MODEL)
@@ -225,7 +245,7 @@ def build_parser() -> argparse.ArgumentParser:
     cover.add_argument("path", type=Path)
     cover.add_argument("--engine", choices=ENGINES, default=DEFAULT_ENGINE)
     cover.add_argument("--candidate-id", required=True)
-    cover.add_argument("--seeds", type=_parse_seeds, required=True)
+    _add_seed_args(cover)
     cover.add_argument("--strength", type=float, default=0.7)
     cover.add_argument("--style")
     cover.add_argument("--lyrics")
@@ -244,7 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument("--start", type=float)
     plan.add_argument("--end", type=float)
     plan.add_argument("--strength", choices=assistant.STRENGTH_NAMES, default="medium")
-    plan.add_argument("--versions", type=int, default=2)
+    plan.add_argument("--versions", type=int, default=1)
     _add_assistant_args(plan)
 
     draft = subparsers.add_parser("draft", help="draft caption, lyrics and title from a description")
@@ -267,6 +287,12 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("path", type=Path)
     export.add_argument("--output", type=Path)
     export.add_argument("--candidate-id", help="export this explicit version without changing the human final selection")
+    export.add_argument("--unmastered", action="store_true",
+                        help="export the version as the engine made it instead of its mastered listening copy")
+
+    master = subparsers.add_parser("master", help="make the missing mastered listening copies of finished versions")
+    master.add_argument("path", type=Path)
+    master.add_argument("--candidate-id", help="only this version")
 
     inspect = subparsers.add_parser("inspect", help="summarize and verify a reopened project")
     inspect.add_argument("path", type=Path)
@@ -419,7 +445,7 @@ def run(args: argparse.Namespace) -> Any:
     if args.command == "generate":
         return generate_candidates(
             args.path,
-            seeds=args.seeds,
+            seeds=_seeds(args),
             base_url=args.base_url,
             model=args.model,
             lm_model=args.lm_model,
@@ -438,7 +464,7 @@ def run(args: argparse.Namespace) -> Any:
         )
     if args.command == "cover":
         model, lm_model = _source_models(args.path, args.candidate_id)
-        return cover_candidates(args.path, candidate_id=args.candidate_id, seeds=args.seeds,
+        return cover_candidates(args.path, candidate_id=args.candidate_id, seeds=_seeds(args),
                                 strength=args.strength, style_prompt=args.style, lyrics=args.lyrics,
                                 base_url=args.base_url, model=args.model, feedback=args.feedback_json,
                                 poll_seconds=args.poll_seconds, timeout_seconds=args.timeout_seconds,
@@ -544,7 +570,9 @@ def run(args: argparse.Namespace) -> Any:
             return {"models": []}
         return {"models": assistant.list_models(config)}
     if args.command == "export":
-        return export_selected(args.path, output=args.output, candidate_id=args.candidate_id)
+        return export_selected(args.path, output=args.output, candidate_id=args.candidate_id, unmastered=args.unmastered)
+    if args.command == "master":
+        return master_versions(args.path, candidate_id=args.candidate_id)
     if args.command == "inspect":
         store = ProjectStore(args.path)
         project = store.load()
