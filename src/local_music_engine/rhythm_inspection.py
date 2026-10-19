@@ -10,6 +10,7 @@ import wave
 
 from .music_structure import analyze_music_structure
 from .percussion_analysis import VERSION as PERCUSSION_VERSION, analyze_percussion
+from .played_tempo import song_tempo
 from .rhythm_diagnostics import (VERSION as DIAGNOSTICS_VERSION, LEGACY_VERSION, MAX_EVENTS, SIGNAL_VERSION,
                                  SUPPORTED_VERSIONS, contextualize_tempo_observations, contextualize_timing_events,
                                  diagnose_rhythm, validate_expected_sections)
@@ -159,6 +160,7 @@ def inspect_audio_rhythm(audio: Path | str, *, requested_bpm: float | None = Non
     result = attach_diagnostics(rhythm, audio, duration_seconds=rhythm["durationSeconds"],
         source_sha256=source_hash, style_prompt=style_prompt, separation=separation, stem_inputs=stem_inputs,
         expected_sections=expected_sections, diagnostics_version=diagnostics_version)
+    result["playedTempo"] = song_tempo(audio, reference_bpm=requested_bpm, reference_source="request" if requested_bpm else "none")
     if intent_snapshot is not None:
         result["intentSnapshot"] = intent_snapshot.to_dict()
         result["intentFileSha256"] = intent_snapshot.intent_file_sha256

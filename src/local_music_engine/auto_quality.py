@@ -23,6 +23,7 @@ from .production_rules import normalize_time_signature
 from .song_planning import prepare_song_plan
 from .lyrics import is_instrumental_lyrics
 from .music_structure import VERSION as RHYTHM_VERSION, analyze_music_structure
+from .played_tempo import VERSION as PLAYED_TEMPO_VERSION, song_tempo
 from .rhythm_diagnostics import SUPPORTED_VERSIONS as DIAGNOSTICS_VERSIONS, VERSION as DIAGNOSTICS_VERSION
 from .rhythm_inspection import attach_diagnostics
 
@@ -50,6 +51,7 @@ def quality_policy(mode: str = "auto", *, max_attempts: int = 4, repair_attempts
     return {"enabled": True, "version": QUALITY_VERSION, "maxAttempts": max_attempts,
             "lyrics": mode == "auto", "finishAudio": True, "autoSetup": True,
             "rhythmVersion": RHYTHM_VERSION, "diagnosticsVersion": DIAGNOSTICS_VERSION, "engineMetas": True,
+            "playedTempoVersion": PLAYED_TEMPO_VERSION,
             # Repair is driven by what the lyric reader hears, so it needs that reader.
             "repairAttempts": repair_attempts if mode == "auto" else 0}
 
@@ -193,6 +195,7 @@ def validate_quality_plan(parameters: dict[str, Any]) -> None:
     if (not isinstance(policy, dict) or policy.get("version") != QUALITY_VERSION
             or policy.get("rhythmVersion") not in (None, RHYTHM_VERSION)
             or policy.get("diagnosticsVersion") not in (None, *DIAGNOSTICS_VERSIONS)
+            or policy.get("playedTempoVersion") not in (None, PLAYED_TEMPO_VERSION)
             or isinstance(policy.get("maxAttempts"), bool) or not isinstance(policy.get("maxAttempts"), int)
             or not 1 <= policy["maxAttempts"] <= 4 or not isinstance(plan, list)
             or not isinstance(seeds, list) or not plan or len(plan) != len(seeds)):
@@ -283,6 +286,24 @@ def _measure_rhythm(path: Path, payload: dict[str, Any], artifact_sha256: str) -
                   "confidence": 0.0, "findings": [],
                   "error": f"{type(error).__name__}: {error}"}
     return {**report, "measuredArtifactSha256": artifact_sha256}
+
+
+def _played_tempo(path: Path, payload: dict[str, Any], metas: Any, artifact_sha256: str) -> dict[str, Any]:
+    """The whole song's played tempo, looked for near the tempo it was conditioned on: the
+    request, or the engine's own choice when the request left the tempo open."""
+
+    def positive(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if not isinstance(value, bool) and math.isfinite(number) and number > 0 else None
+
+    reference, source = positive(payload.get("bpm")), "request"
+    if reference is None:
+        reference, source = positive(metas.get("bpm") if isinstance(metas, dict) else None), "engine"
+    return {**song_tempo(path, reference_bpm=reference, reference_source=source if reference else "none"),
+            "measuredArtifactSha256": artifact_sha256}
 
 
 _ENGINE_META_FIELDS = (("bpm", "bpm", "bpm"), ("keyScale", "key_scale", "keyscale"),
@@ -489,10 +510,16 @@ def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str
         def failed(name: str, error: Exception) -> None:
             inspection_errors.append({"stage": name, "error": f"{type(error).__name__}: {error}"})
 
-        rhythm = None
+        rhythm = played = None
+        metas = _engine_metas(store, candidate_id) if policy.get("engineMetas") or policy.get("playedTempoVersion") else None
         if policy.get("rhythmVersion") == RHYTHM_VERSION:
             stage("quality_rhythm")
             rhythm = _measure_rhythm(path, context["payload"], artifact["sha256"])
+        if policy.get("playedTempoVersion") == PLAYED_TEMPO_VERSION:
+            try:
+                played = _played_tempo(path, context["payload"], metas, artifact["sha256"])
+            except Exception as error:
+                failed("played_tempo", error)
         original_lyrics = context["payload"].get("qualityPreparation", {}).get("lyricsOriginal", context["payload"]["lyrics"])
         preflight = assess_lyric_suitability(original_lyrics, context["payload"]["audio_duration"], bpm=context["payload"].get("bpm"))
         unavailable = {"available": False, "reliable": False, "text": "", "segments": [], "loudness": {"status": "unknown"}}
@@ -520,7 +547,7 @@ def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str
         reasons = [finding["check"] for finding in audio["findings"] if finding.get("retryEligible")]
         reasons.extend(lyrics.get("retryReasons", []))
         # A dropped request field repeats for every seed, so this never asks for a retry.
-        engine = compare_engine_metas(context["payload"], _engine_metas(store, candidate_id)) if policy.get("engineMetas") else None
+        engine = compare_engine_metas(context["payload"], metas) if policy.get("engineMetas") else None
         status = _assessment_status(audio, lyrics, rhythm, reasons, engine)
         summary = _assessment_summary(status, instrumental=preflight["instrumental"])
         report = {**context["metadata"], "version": QUALITY_VERSION, "complete": True,
@@ -534,6 +561,8 @@ def assess_candidate(store: ProjectStore, candidate_id: str, *, policy: dict[str
             report["scope"] = "technical_integrity_transcript_match_and_rhythm_observations"
         if engine is not None:
             report["engine"] = engine
+        if played is not None:
+            report["playedTempo"] = played
         if inspection_errors:
             report["inspectionErrors"] = inspection_errors
         with store.transaction() as project:
@@ -644,6 +673,12 @@ def _finish_candidate(store: ProjectStore, candidate_id: str, *, batch_id: str) 
             report["summary"] = _assessment_summary(report["status"], instrumental=report["lyrics"].get("status") == "not_applicable")
             findings.extend({**finding, "findingId": new_id("finding"), "artifactId": artifact["artifactId"],
                              "createdAt": utc_now()} for finding in report["rhythm"].get("findings", []))
+        if report.get("playedTempo") is not None:
+            # The same performance at a lower gain plays at the same tempo; bind it to this file.
+            before = report["playedTempo"]
+            report["playedTempo"] = {**song_tempo(destination, reference_bpm=before.get("referenceBpm"),
+                                                  reference_source=before.get("referenceSource", "none")),
+                                     "measuredArtifactSha256": artifact["sha256"]}
         # The finished file is the same performance; it keeps the engine's own account of it
         # and what was heard of its lyrics.
         findings.extend({**finding, "findingId": new_id("finding"), "artifactId": artifact["artifactId"],

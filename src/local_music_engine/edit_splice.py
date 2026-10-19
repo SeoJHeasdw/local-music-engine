@@ -25,7 +25,6 @@ from typing import Any
 
 import numpy as np
 from scipy.ndimage import minimum_filter1d
-from scipy.signal import stft
 
 VERSION = "edit-splice-v1"
 _LOOKAHEAD_SECONDS = 0.0025       # each side of a peak
@@ -177,76 +176,3 @@ def restore_outside_edit(source: Path, edited: Path, *, start_seconds: float, en
             "strayChangedWindowsRestored": stray, "engineOutputSha256": engine_sha256,
             "peakCeiling": ceiling / 32768, "peakReductionDb": reduction_db, "peakReducedSeconds": limited_seconds,
             "method": "source samples outside the changed range; engine samples at the source's level inside it"}
-
-
-_TEMPO_CONTEXT_SECONDS = 20.0
-_TEMPO_SEARCH = 0.12            # the played tempo is looked for within ±12% of the requested one
-_TEMPO_FOLLOW_ABOVE = 0.015     # smaller differences are left to the request
-
-
-def played_tempo(source: Path, *, requested_bpm: float, start_seconds: float, end_seconds: float) -> dict[str, Any]:
-    """The tempo the source actually plays at next to an edit, near the requested tempo.
-
-    A song can drift from the BPM it was asked for (one measured at 87.5 for 84). A
-    repaint conditioned on the request then keeps the requested tempo inside the edit and
-    meets the song's own beat off the grid at the far end. This reads the onsets in up
-    to 20 s on each side of the edit (never inside it): onset autocorrelation at one to
-    four beats finds the beat period, and a line fitted through the onsets nearest each
-    predicted beat refines it.
-    """
-
-    try:
-        params, data = _read(source)
-    except (OSError, wave.Error, EOFError, ValueError) as error:
-        return {"status": "unknown", "reason": str(error) if isinstance(error, ValueError) else "unreadable_audio"}
-    rate, hop = params.framerate, 0.005
-    mono = data.astype(np.float64).mean(axis=1) / 32768
-    requested_period = 60 / requested_bpm
-    lags = np.arange(round(requested_period * (1 - _TEMPO_SEARCH) / hop), round(requested_period * (1 + _TEMPO_SEARCH) / hop) + 1)
-    total = np.zeros(len(lags))
-    envelopes = []
-    for begin, stop in ((max(0.0, start_seconds - _TEMPO_CONTEXT_SECONDS), start_seconds),
-                        (end_seconds, min(len(mono) / rate, end_seconds + _TEMPO_CONTEXT_SECONDS))):
-        if stop - begin < 6 * requested_period:
-            continue
-        size, step = 2048, round(rate * hop)
-        _, _, spectrum = stft(mono[round(begin * rate):round(stop * rate)], fs=rate, nperseg=size, noverlap=size - step,
-                              boundary=None, padded=False)
-        envelope = np.maximum(0, np.diff(np.log1p(100 * np.abs(spectrum)), axis=1)).sum(axis=0)
-        envelopes.append((begin + (np.arange(len(envelope)) + 1) * hop + size / 2 / rate, envelope))
-        centred = envelope - envelope.mean()
-        correlation = np.correlate(centred, centred, mode="full")[len(centred) - 1:]
-        # A beat period also lines up at two, three and four beats; summing those sharpens it.
-        for multiple in (1, 2, 3, 4):
-            positions = lags * multiple
-            usable = positions < len(correlation)
-            total[usable] += correlation[positions[usable]] / max(1.0, correlation[0])
-    if not envelopes:
-        return {"status": "unknown", "reason": "too_little_audio_next_to_the_edit"}
-    peak = int(np.argmax(total))
-    contrast = float(total[peak] / (np.abs(total).mean() + 1e-9))
-    period = lags[peak] * hop
-    # Refine: on each side, the strongest onset near every predicted beat, then one shared slope.
-    indexes, times, weights = [], [], []
-    for side, (clock, envelope) in enumerate(envelopes):
-        phases = np.arange(0, period, hop)
-        grid = [np.interp(np.arange(phase + clock[0], clock[-1], period), clock, envelope).sum() for phase in phases]
-        origin = phases[int(np.argmax(grid))] + clock[0]
-        for beat in range(int((clock[-1] - origin) / period) + 1):
-            near = np.abs(clock - (origin + beat * period)) <= 0.06 * period
-            if near.any() and envelope[near].max() > 0:
-                position = int(np.flatnonzero(near)[np.argmax(envelope[near])])
-                indexes.append((side, beat))
-                times.append(clock[position])
-                weights.append(envelope[position])
-    if len(times) >= 8:
-        sides = np.array([side for side, _ in indexes])
-        design = np.column_stack([np.array([beat for _, beat in indexes], dtype=float)] + [(sides == side).astype(float) for side in range(len(envelopes))])
-        root = np.sqrt(np.array(weights))
-        period = float(np.linalg.lstsq(design * root[:, None], np.array(times) * root, rcond=None)[0][0])
-    bpm = 60 / period
-    edge = peak in (0, len(total) - 1)
-    follow = bool(abs(bpm - requested_bpm) / requested_bpm >= _TEMPO_FOLLOW_ABOVE and contrast >= 1.5 and not edge)
-    return {"status": "measured", "requestedBpm": requested_bpm, "playedBpm": round(float(bpm), 2), "contrast": round(contrast, 2),
-            "measuredSeconds": round(float(sum(clock[-1] - clock[0] for clock, _ in envelopes)), 1), "follow": follow,
-            "method": "onset autocorrelation at 1-4 beats, refined through the onsets on each side of the edit"}

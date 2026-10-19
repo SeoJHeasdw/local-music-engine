@@ -299,7 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rhythm = subparsers.add_parser("analyze-rhythm", help="measure WAV rhythm, frame levels and spectrum without changing audio")
     rhythm.add_argument("path", type=Path)
-    rhythm.add_argument("--bpm", type=float, help="compare the measured pulse with this requested quarter-note BPM")
+    rhythm.add_argument("--bpm", type=float, help="compare the measured pulse with this requested quarter-note BPM and measure the tempo played near it")
     rhythm.add_argument("--time-signature", help="project the requested meter (2/4, 3/4, 4/4 or 6/8), without verifying downbeats")
     rhythm.add_argument("--style", default="", help="musical intent, such as rubato or tempo changes")
     rhythm.add_argument("--diagnostics", action="store_true", help="also analyze percussive timing and separately attributed backing continuity; loads no model")
@@ -409,9 +409,11 @@ def run(args: argparse.Namespace) -> Any:
         if args.stem_label is not None or args.evidence_audio is not None:
             raise ValueError("Stem label/source audio requires explicit separated-energy JSON")
         from .music_structure import analyze_music_structure
+        from .played_tempo import song_tempo
         from .storage import sha256_file
         return {**analyze_music_structure(args.path, requested_bpm=args.bpm,
             time_signature=args.time_signature, style_prompt=args.style),
+            "playedTempo": song_tempo(args.path, reference_bpm=args.bpm, reference_source="request" if args.bpm else "none"),
             "measuredArtifactSha256": sha256_file(args.path)}
     if args.command == "song-plan":
         controls = args.input_json

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .ace_adapter import AceApiError, AceStepClient
-from .edit_splice import played_tempo
+from .played_tempo import played_tempo
 from .execution import execute_candidate
 from .jobs import (ACTIVE_STATUSES, cleanup_export_outputs, frozen_batch_payloads, recover_export_jobs, recover_jobs,
                    reusable_candidates, resume_source, validate_seed)

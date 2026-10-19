@@ -184,7 +184,7 @@ def clicks(seconds: float, bpm: float, *, start: float = 0.0) -> np.ndarray:
 
 @pytest.mark.parametrize("played,requested,follow", [(87.4, 84, True), (125.0, 125, False), (84.6, 84, False)])
 def test_the_tempo_a_song_actually_plays_is_measured_next_to_the_edit(tmp_path, played, requested, follow):
-    from local_music_engine.edit_splice import played_tempo
+    from local_music_engine.played_tempo import played_tempo
     song = write(tmp_path / "song.wav", clicks(60, played))
     tempo = played_tempo(song, requested_bpm=requested, start_seconds=20, end_seconds=40)
     assert tempo["status"] == "measured" and abs(tempo["playedBpm"] - played) < 0.25 and tempo["follow"] is follow
