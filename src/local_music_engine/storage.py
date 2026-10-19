@@ -7,6 +7,7 @@ import json
 import math
 import os
 import tempfile
+import time
 import uuid
 import fcntl
 from contextlib import contextmanager, nullcontext
@@ -22,6 +23,8 @@ from .lyrics import is_instrumental_lyrics
 
 SCHEMA_VERSION = 1
 PROJECT_FILENAME = "project.json"
+# How long a run waits for the lock before it believes another run holds it.
+LOCK_PROBE_WAIT_SECONDS = 2.0
 
 
 def utc_now() -> str:
@@ -54,9 +57,10 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def atomic_write_json(path: Path, value: Any) -> None:
+def atomic_write_json(path: Path, value: Any, *, compact: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    layout = {"separators": (",", ":")} if compact else {"indent": 2}
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False, **layout) + "\n"
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
@@ -74,6 +78,24 @@ def atomic_write_json(path: Path, value: Any) -> None:
             os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _claim(handle: Any, busy_message: str) -> None:
+    """Take a run lock, waiting out ``generation_active``/``export_active`` probes.
+
+    A probe holds the lock for an instant; a run that starts during one must not
+    report another run that is not there. A real owner still refuses the run.
+    """
+
+    deadline = time.monotonic() + LOCK_PROBE_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(busy_message) from None
+            time.sleep(0.05)
 
 
 class ProjectStore:
@@ -138,7 +160,7 @@ class ProjectStore:
         for key, value in (("bpm", bpm or None), ("keyScale", key_scale.strip() if key_scale else None), ("timeSignature", meter)):
             if value is not None:
                 project["inputs"][key] = value
-        with store.locked():
+        with store.locked(create=True):
             if store.manifest_path.exists():
                 raise FileExistsError(f"project already exists: {store.manifest_path}")
             store.save(project)
@@ -177,10 +199,15 @@ class ProjectStore:
         return data
 
     @contextmanager
-    def locked(self):
-        """Serialize project mutations without making the lock file project state."""
+    def locked(self, *, create: bool = False):
+        """Serialize project mutations without making the lock file project state.
 
-        self.root.mkdir(parents=True, exist_ok=True)
+        Only ``initialize`` passes ``create``: a mistyped path must not leave a folder
+        and a lock file behind.
+        """
+
+        if not create and not self.manifest_path.is_file():
+            raise FileNotFoundError(f"project not found: {self.manifest_path}")
         lock_path = self.root / ".project.lock"
         with lock_path.open("a+b") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -190,9 +217,9 @@ class ProjectStore:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def save(self, project: dict[str, Any]) -> None:
-        project = deepcopy(project)
-        project["updatedAt"] = utc_now()
-        atomic_write_json(self.manifest_path, project)
+        # Compact: indentation nearly triples a big manifest and its write time, and
+        # every reader parses it as JSON. A shallow copy keeps the caller's dict as it was.
+        atomic_write_json(self.manifest_path, {**project, "updatedAt": utc_now()}, compact=True)
 
     @contextmanager
     def transaction(self):
@@ -215,10 +242,7 @@ class ProjectStore:
 
         self.load()  # A typo must not create an empty project directory.
         with shared_lane() if lane else nullcontext(), (self.root / ".generation.lock").open("a+b") as handle:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise RuntimeError("project generation is already running") from error
+            _claim(handle, "project generation is already running")
             try:
                 yield
             finally:
@@ -245,10 +269,7 @@ class ProjectStore:
 
         self.load()
         with (self.root / ".export.lock").open("a+b") as handle:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise RuntimeError("project export is already running") from error
+            _claim(handle, "project export is already running")
             try:
                 yield
             finally:

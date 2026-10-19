@@ -29,7 +29,7 @@ fi
 uv python install "$PYTHON_VERSION"
 (
   cd "$ACE_ROOT"
-  UV_PROJECT_ENVIRONMENT=.venv uv sync --python "$PYTHON_VERSION"
+  UV_PROJECT_ENVIRONMENT=.venv uv sync --locked --python "$PYTHON_VERSION"
 )
 
 if [[ -d "$ACE_ROOT/checkpoints" && ! -L "$ACE_ROOT/checkpoints" ]]; then
@@ -40,5 +40,8 @@ if [[ ! -e "$ACE_ROOT/checkpoints" ]]; then
   ln -s ../models "$ACE_ROOT/checkpoints"
 fi
 
-echo "ACE-Step $ACE_TAG is ready at $ACE_ROOT"
-echo "Models will be stored at $MODEL_ROOT on first server start."
+# Weights come only from the revisions in ace-weights.json, and every file is checked
+# against its SHA-256. The server starts offline and refuses to run without them.
+"$ACE_ROOT/.venv/bin/python" -I "$SCRIPT_DIR/ace_weights.py" download --models "$MODEL_ROOT"
+
+echo "ACE-Step $ACE_TAG is ready at $ACE_ROOT with the pinned weights in $MODEL_ROOT"

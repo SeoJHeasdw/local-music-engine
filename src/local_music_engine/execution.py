@@ -54,16 +54,25 @@ def execute_candidate(
     quality_context: dict[str, Any] | None = None,
 ) -> str:
     seed = request["parameters"]["seed"]
+    saved: dict[str, Any] = {}
 
     def progress(state: dict[str, Any]) -> None:
+        stage = str(state["stage"])
+        reported = min(0.99, max(0.0, float(state["progress"])))
+        # The engine is polled every second. Rewriting the whole manifest under its lock
+        # for a poll the app would show the same way (same stage, same whole percent)
+        # costs more than the poll itself.
+        if saved and stage == saved["stage"] and round(reported * 100) <= round(saved["progress"] * 100):
+            return
         with store.transaction() as project:
             job = store.find_by_id(project, "jobs", "jobId", job_id)
             # ACE occasionally reports stages without progress; never move backwards.
-            value = max(job["progress"], min(0.99, max(0.0, float(state["progress"]))))
-            job.update(stage=str(state["stage"]), progress=value)
+            value = max(job["progress"], reported)
+            job.update(stage=stage, progress=value)
             if batch_id:
                 batch = store.find_by_id(project, "jobs", "jobId", batch_id)
                 batch.update(stage=f"seed {seed}: {job['stage']}", progress=(index + value) / total)
+        saved.update(stage=stage, progress=value)
 
     try:
         if request["parameters"].get("coverSource") is not None:
