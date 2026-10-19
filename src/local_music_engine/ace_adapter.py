@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import secrets
@@ -21,8 +22,24 @@ class AceApiError(RuntimeError):
     pass
 
 
-class AceUnavailable(AceApiError):
-    """Nothing answers at the engine's address."""
+class AceServerError(AceApiError):
+    """The server cannot take work as asked: unreachable, unhealthy, refusing over HTTP,
+    or running other models. Another seed would meet the same server, which may still be
+    working on a task it accepted."""
+
+
+class AceUnavailable(AceServerError):
+    """Nothing answers at the engine's address, or the connection broke before the answer."""
+
+
+# A status call can be dropped while the server is busy rendering; the task goes on.
+POLL_RETRIES = 3
+
+
+def stops_submissions(error: BaseException) -> bool:
+    """Whether a failed request means no further seed should be sent to this server."""
+
+    return isinstance(error, (TimeoutError, AceServerError))
 
 
 def _require_loopback(base_url: str) -> str:
@@ -78,9 +95,13 @@ class AceStepClient:
                 return response.read()
         except urllib.error.HTTPError as error:
             detail = error.read().decode("utf-8", errors="replace")
-            raise AceApiError(f"{self.api_label} API HTTP {error.code}: {detail}") from error
+            raise AceServerError(f"{self.api_label} API HTTP {error.code}: {detail}") from error
         except urllib.error.URLError as error:
             raise AceUnavailable(f"{self.api_label} API unavailable: {error.reason}") from error
+        # urllib wraps only connection failures; a reset, a dropped connection or a
+        # socket timeout while reading the answer arrives as itself.
+        except (http.client.HTTPException, OSError) as error:
+            raise AceUnavailable(f"{self.api_label} API unavailable: {type(error).__name__}: {error}") from error
 
     def _json(
         self,
@@ -107,7 +128,7 @@ class AceStepClient:
         response = self._json("GET", "/health")
         data = response.get("data")
         if not isinstance(data, dict) or data.get("status") != "ok":
-            raise AceApiError(f"unhealthy {self.api_label} API response: {response!r}")
+            raise AceServerError(f"unhealthy {self.api_label} API response: {response!r}")
         return data
 
     def create_sample(
@@ -183,8 +204,17 @@ class AceStepClient:
         on_progress: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_seconds
+        dropped = 0
         while True:
-            state = self.query(task_id)
+            try:
+                state = self.query(task_id)
+            except AceUnavailable:
+                dropped += 1
+                if dropped > POLL_RETRIES or time.monotonic() >= deadline:
+                    raise
+                time.sleep(max(0.1, poll_seconds))
+                continue
+            dropped = 0
             if on_progress:
                 on_progress(state)
             if state["status"] == 1:

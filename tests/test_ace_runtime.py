@@ -1,3 +1,5 @@
+import http.client
+import io
 import threading
 import time
 from pathlib import Path
@@ -5,8 +7,8 @@ from typing import Any
 
 import pytest
 
-from local_music_engine import ace_runtime, cli
-from local_music_engine.ace_adapter import AceApiError, AceUnavailable
+from local_music_engine import ace_adapter, ace_runtime, cli
+from local_music_engine.ace_adapter import AceApiError, AceServerError, AceUnavailable
 from local_music_engine.ace_runtime import ManagedAceClient, ensure_ace, start_lock, stop_when_idle
 from local_music_engine.engines import ACE_DIT_MODEL
 from local_music_engine.lane import shared_lane
@@ -42,7 +44,7 @@ def answers(monkeypatch: pytest.MonkeyPatch, sequence: list[Any]) -> list[Any]:
 
 def test_a_run_starts_ace_when_nothing_answers_and_waits_for_its_models(monkeypatch: pytest.MonkeyPatch) -> None:
     answers(monkeypatch, [AceUnavailable("off"), AceUnavailable("loading"), {"status": "ok", "models_initialized": False},
-                          {"status": "ok", "models_initialized": True}])
+                          {"status": "ok", "models_initialized": True, "loaded_lm_model": "lm"}])
     started = []
 
     def spawn(base_url: str, **models: str) -> FakeProcess:
@@ -69,6 +71,42 @@ def test_a_server_that_exits_or_fails_to_load_is_reported(monkeypatch: pytest.Mo
     answers(monkeypatch, [AceUnavailable("off")])
     with pytest.raises(AceApiError, match="did not finish loading"):
         ensure_ace(URL, model=ACE_DIT_MODEL, lm_model="lm", poll=0, timeout=0, spawn=lambda *_a, **_k: FakeProcess())
+
+
+def test_a_started_server_whose_lm_did_not_load_is_reported_with_its_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # ACE only warns when the LM fails, then answers as ready and renders without it.
+    log = tmp_path / "ace-server.log"
+    log.write_text("[API Server] Loading primary DiT model\n[API Server] Warning: LLM model failed to load: out of memory\n"
+                   "[API Server] All models initialized successfully!\nINFO: Application startup complete.\n", encoding="utf-8")
+    monkeypatch.setattr(ace_runtime, "LOG_PATH", log)
+    answers(monkeypatch, [AceUnavailable("off"), {"status": "ok", "models_initialized": True, "loaded_lm_model": None}])
+    with pytest.raises(AceServerError, match="failed to load the LM lm .loaded: none.*LLM model failed to load: out of memory"):
+        ensure_ace(URL, model=ACE_DIT_MODEL, lm_model="lm", poll=0, spawn=lambda *_a, **_k: FakeProcess())
+    answers(monkeypatch, [AceUnavailable("off"), {"status": "ok", "models_initialized": True, "loaded_lm_model": "other-lm"}])
+    with pytest.raises(AceServerError, match="loaded: other-lm"):
+        ensure_ace(URL, model=ACE_DIT_MODEL, lm_model="lm", poll=0, spawn=lambda *_a, **_k: FakeProcess())
+    # A server someone else started is checked per request, where an edit needs no LM.
+    answers(monkeypatch, [{"status": "ok", "models_initialized": True, "loaded_lm_model": None}])
+    ensure_ace(URL, model=ACE_DIT_MODEL, lm_model="lm", poll=0, spawn=lambda *_a, **_k: pytest.fail("must not start"))
+
+
+@pytest.mark.parametrize("dropped", [http.client.RemoteDisconnected("Remote end closed connection without response"),
+                                     ConnectionResetError(54, "Connection reset by peer"), TimeoutError("timed out"),
+                                     http.client.IncompleteRead(b"{")], ids=lambda error: type(error).__name__)
+def test_a_connection_that_breaks_mid_answer_is_a_server_that_is_not_there_yet(dropped: Exception,
+                                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+
+    def open_local(_request: Any, *, timeout: float) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            raise dropped
+        return io.BytesIO(b'{"data": {"status": "ok", "models_initialized": true, "loaded_lm_model": "lm"}}')
+
+    monkeypatch.setattr(ace_adapter, "open_local", open_local)
+    assert ace_runtime._probe(ace_runtime.AceStepClient(URL, api_key="")) is None
+    ensure_ace(URL, model=ACE_DIT_MODEL, lm_model="lm", poll=0, spawn=lambda *_a, **_k: FakeProcess())
+    assert len(calls) == 3
 
 
 def test_the_managed_client_brings_ace_up_once_before_its_first_request(monkeypatch: pytest.MonkeyPatch) -> None:

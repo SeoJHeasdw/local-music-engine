@@ -147,7 +147,7 @@ def test_whisper_segments_support_reliability_and_are_ordered_by_timestamps():
 
 @pytest.mark.parametrize("patch, reason", [
     ({"start": -1}, "stt_timestamps_invalid"),
-    ({"end": 40}, "stt_timestamps_invalid"),
+    ({"start": 25, "end": 40}, "stt_timestamps_invalid"),
     ({"end": 1}, "stt_timestamps_invalid"),
     ({"confidence": 0.1}, "stt_low_confidence"),
     ({"avg_logprob": -2}, "stt_low_confidence"),
@@ -158,6 +158,70 @@ def test_bad_segments_override_backend_reliability_claim(patch, reason):
     segment = {"start": 1, "end": 8, "text": "꿈을 따라 걸어가", "confidence": 0.9, **patch}
     result = evaluate_lyric_transcript("꿈을 따라 걸어가", trustworthy(segment["text"], segments=[segment]), duration_seconds=20)
     assert result["status"] == "unknown" and reason in result["reliabilityReasons"]
+    assert not result["retryEligible"]
+
+
+def test_the_last_segment_may_run_past_the_end_of_the_file():
+    # Whisper reads whole 30-second windows; the last one often ends after the song does.
+    segments = [{"start": 1, "end": 8, "text": "꿈을 따라", "avg_logprob": -0.2, "no_speech_prob": 0.1},
+                {"start": 12, "end": 30, "text": "걸어가", "avg_logprob": -0.3, "no_speech_prob": 0.1}]
+    result = evaluate_lyric_transcript("꿈을 따라 걸어가", trustworthy("꿈을 따라 걸어가", segments=segments), duration_seconds=19.4)
+    assert result["status"] == "pass" and result["orderedCoverage"] == 1 and result["reliabilityReasons"] == []
+    assert result["segments"][-1]["end"] == 19.4
+    # Only the last one: an earlier segment past the end of the file is still impossible.
+    early = [{**segments[0], "end": 25}, segments[1]]
+    broken = evaluate_lyric_transcript("꿈을 따라 걸어가", trustworthy("꿈을 따라 걸어가", segments=early), duration_seconds=19.4)
+    assert broken["status"] == "unknown" and "stt_timestamps_invalid" in broken["reliabilityReasons"]
+
+
+def test_a_closing_word_the_file_has_no_time_left_for_is_not_read_as_singing():
+    sung = "꿈을 따라 걸어가 우리 함께 노래해"
+    segments = [{"start": 1, "end": 8, "text": sung, "avg_logprob": -0.2, "no_speech_prob": 0.1},
+                {"start": 19.9, "end": 20.9, "text": "감사합니다.", "avg_logprob": -0.4, "no_speech_prob": 0.1}]
+    result = evaluate_lyric_transcript(sung, trustworthy(f"{sung} 감사합니다.", segments=segments), duration_seconds=20)
+    assert result["status"] == "pass" and result["unreadSpans"] == [[19.9, 20.0]]
+
+
+VERSE_KO = "조용한 아침 햇살 따라\n우리 둘이 걸어가는 길"
+CHORUS_KO = "너와 함께 새로운 꿈을\n향해 달려가 노래해"
+SONG_KO = f"[Verse]\n{VERSE_KO}\n[Chorus]\n{CHORUS_KO}\n[Verse]\n{VERSE_KO}\n[Chorus]\n{CHORUS_KO}"
+
+
+def read(*parts):
+    """Whisper-style segments (start, end, text, avg_logprob) with the worker's top-level verdict."""
+    return {"available": True, "reliable": True, "text": " ".join(text for _, _, text, _ in parts),
+            "segments": [{"start": start, "end": end, "text": text, "avg_logprob": logprob, "no_speech_prob": 0.05}
+                         for start, end, text, logprob in parts]}
+
+
+def test_one_doubtful_segment_is_an_unread_stretch_not_an_unreadable_take():
+    lines = [line for part in (VERSE_KO, CHORUS_KO, VERSE_KO, CHORUS_KO) for line in part.split("\n")]
+    parts = [(4 * index, 4 * index + 4, line, -0.2) for index, line in enumerate(lines)]
+    parts.append((33, 34, "you", -1.3))  # the familiar closing guess over the fade-out
+    result = evaluate_lyric_transcript(SONG_KO, read(*parts), duration_seconds=36)
+    assert result["status"] == "pass" and result["sttReliable"] and result["orderedCoverage"] == 1
+    assert result["unreadSpans"] == [[33, 34]] and result["reliabilityReasons"] == []
+
+
+def test_words_read_without_confidence_neither_count_as_heard_nor_ask_for_another_song():
+    verse, chorus = VERSE_KO.split("\n"), CHORUS_KO.split("\n")
+    parts = [(0, 4, verse[0], -0.2), (4, 8, verse[1], -0.2), (8, 12, chorus[0], -0.2), (12, 16, chorus[1], -0.2),
+             (16, 20, verse[0], -0.2), (20, 24, verse[1], -0.2),
+             (24, 32, CHORUS_KO.replace("\n", " "), -1.2)]  # the last chorus, read with low confidence
+    result = evaluate_lyric_transcript(SONG_KO, read(*parts), duration_seconds=34)
+    assert result["sttReliable"] and result["unreadSpans"] == [[24, 32]]
+    assert result["sectionCoverage"][3]["orderedCoverage"] == 0 and result["status"] == "warning"
+    # The place is named to listen to and read again; the recognizer's doubt asks for no new song.
+    [finding] = result["findings"]
+    assert finding["check"] == "lyric_lines_unclear" and finding["observed"]["section"] == "Chorus"
+    assert result["retryReasons"] == [] and not result["retryEligible"] and reread_requests(result) == [(20.0, 34.0)]
+
+
+def test_a_reading_mostly_read_without_confidence_says_nothing():
+    lines = [line for part in (VERSE_KO, CHORUS_KO) for line in part.split("\n")]
+    parts = [(4 * index, 4 * index + 4, line, -0.2 if index == 0 else -1.4) for index, line in enumerate(lines)]
+    result = evaluate_lyric_transcript(f"[Verse]\n{VERSE_KO}\n[Chorus]\n{CHORUS_KO}", read(*parts), duration_seconds=20)
+    assert result["status"] == "unknown" and "stt_low_confidence" in result["reliabilityReasons"]
     assert not result["retryEligible"]
 
 

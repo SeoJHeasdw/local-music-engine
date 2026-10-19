@@ -5,8 +5,10 @@
 앱과 CLI의 기본 엔진은 ACE-Step 1.5 XL turbo다. 엔진 이름과 기본 주소·모델은 `engines.py` 한 곳에 있다.
 `ace-step`은 `127.0.0.1:18001`의 `acestep-v15-xl-turbo`(LM `acestep-5Hz-lm-4B`), `minimax-music3`는
 `127.0.0.1:18002`의 `mlx-community/MiniMax-Music3-bf16`이다. 엔진·주소·모델을 적지 않은 요청은 ACE 값을
-쓰고, 서버가 올린 DiT·LM이 요청과 다르면 제출 전에 거부한다. `engine` 필드가 없는 저장된 요청은 ACE
-요청이다. ACE 서버의 수명·구간 수정은 아래 '현재 구현 범위'에 있다.
+쓰고, 서버가 올린 DiT·LM이 요청과 다르면 제출 전에 거부한다. LM이 곡을 계획하는 요청(`thinking`, text2music)은
+서버가 요청한 LM을 올려 두었거나 LM을 내려 두었다고(`llm_initialized: false`) 밝힐 때만 제출한다. ACE는 Apple
+Silicon에서 cover 뒤 LM을 내리고, 다음 계획 요청 때 요청의 LM을 다시 올리며 못 올리면 그 요청을 실패로 끝낸다.
+`engine` 필드가 없는 저장된 요청은 ACE 요청이다. ACE 서버의 수명·구간 수정은 아래 '현재 구현 범위'에 있다.
 
 ## Music 3(이름으로 고를 때만)
 
@@ -21,8 +23,8 @@ Music 3는 `--engine minimax-music3`를 명시할 때만 쓴다. 모델과 실�
   보내지 않는다. 매핑은 `music3.py`에 있다.
 - 묶음은 만든 엔진에서만 재개한다. Music 3 묶음은 `--engine minimax-music3`를 명시해야 재개되고, 곡 화면은
   이어 만들 수 없다고 표시한다. Music 3로 만든 음원의 재생·평가·선택·export는 그대로 쓴다.
-- 취소는 로컬 CLI 작업을 멈추며 이미 제출한 추론은 서버가 끝까지 계산할 수 있다. timeout 뒤에는 같은 묶음의
-  남은 seed를 제출하지 않고 따로 기록한다.
+- 취소는 로컬 CLI 작업을 멈추며 이미 제출한 추론은 서버가 끝까지 계산할 수 있다. timeout이나 서버 불통·HTTP
+  거절 뒤에는 같은 묶음의 남은 seed를 제출하지 않고 따로 기록한다(`stopReason`, `unsubmittedSeeds`).
 
 ## 현재 구현 범위
 
@@ -60,7 +62,8 @@ token URL로만 전달되고 Range 요청을 스트림으로 응답한다.
 ACE는 일이 있을 때만 켜져 있다(`ace_runtime.py`). 생성·커버·구간 수정·재개와 `draft --engine ace-step`은
 CLI의 `ManagedAceClient`로 ACE를 부른다. 첫 요청 때 주소에 응답하는 서버가 없으면 `scripts/start_ace_api.sh`를
 새 세션으로 띄우고(`MUSIC_ENGINE_ACE_STOP_WHEN_IDLE=1`, 기록은 `.runtime/logs/ace-server.log`) 모델이 올라올 때까지
-기다린다. 이 요청은 생성 차선을 쥔 채 일어난다. 그 서버의 런처는 1초마다 차선을 보고, 두 번 연속 비어 있으면
+기다린다. 이렇게 켠 서버가 요청한 LM을 올리지 못했으면 기록의 LM 줄을 붙여 바로 실패한다. 이 요청은 생성
+차선을 쥔 채 일어난다. 그 서버의 런처는 1초마다 차선을 보고, 두 번 연속 비어 있으면
 `ace-start.lock`을 잡고 다시 확인한 뒤 SIGTERM으로 스스로 끈다(모델을 올리는 중이면 20초 뒤 강제 종료). 시작도
 같은 잠금 안에서 하므로 꺼지는 서버를 다시 쓰거나 서버 둘을 동시에 올리지 않는다. 생성이 강제 종료돼도 차선이
 풀리므로 서버가 남지 않는다. 손으로 켠 서버(그 환경 변수가 없는 서버)는 그대로 쓰고 끄지 않는다.
@@ -204,7 +207,9 @@ SIGINT로 CLI를 멈춰 batch와 진행 중이던 하위 job을 모두 `cancelle
 재시도를 합쳐 최대 4회다. 모든 시도의 입력·seed·예산을 첫 batch에 고정하며, 명시적 재개도 그
 예산을 늘리지 않는다. 가사 받아쓰기가 불확실하거나 로컬 검사기가 실패하면 가사 문제를 추측해
 추가 추론하지 않는다. 실패한 검사기는 그 항목만 `unknown`으로 남기고, 이미 측정한 소리 결함과 그
-재생성 근거는 지우지 않는다. 원격 timeout은 진행 중인 추론이 남을 수 있어 추가 자동 제출을 멈춘다.
+재생성 근거는 지우지 않는다. 원격 timeout은 진행 중인 추론이 남을 수 있어 추가 자동 제출을 멈추고, 서버 불통
+(응답 도중 끊긴 연결 포함)·HTTP 거절·모델 불일치도 같다. 이 판단은 오류 종류(`ace_adapter.stops_submissions`)로
+한다. 진행 상황 조회가 끊기면 세 번까지 다시 묻는다.
 
 `quality-check`, `audio-finish`, `listening-copy`는 별도 하위 job이다. `listening-copy`는 정리본의 마스터링한
 듣기용 사본(`listening-audio`, `sourceArtifactId`가 버전 음원)을 만들며 버전과 그 계보는 바꾸지 않는다. 실패해도

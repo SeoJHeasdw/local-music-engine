@@ -11,7 +11,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .ace_adapter import AceApiError, AceStepClient
+from .ace_adapter import AceServerError, AceStepClient, stops_submissions
 from .edit_splice import played_tempo
 from .execution import execute_candidate
 from .jobs import (ACTIVE_STATUSES, cleanup_export_outputs, frozen_batch_payloads, recover_export_jobs, recover_jobs,
@@ -70,26 +70,32 @@ def _vocal_language(lyrics: str) -> str:
 
 def _require_loaded_models(adapter_info: dict[str, Any], frozen: dict[str, Any]) -> None:
     """ACE loads one DiT and one LM at start and silently serves any other requested
-    name with them. Refuse, so project.json never records a model that did not run."""
+    name with them. Refuse, so project.json never records a model that did not run.
+
+    A request that asks the LM to plan (``thinking``) needs the requested LM loaded. The
+    one exception is a server that reports its LM unloaded (``llm_initialized`` false):
+    on Apple Silicon ACE unloads it after a cover request and loads the request's
+    ``lm_model_path`` again when a request needs it, failing that request if it cannot."""
 
     if frozen.get("engine") == MUSIC3_ENGINE:
         if (adapter_info.get("engine") != MUSIC3_ENGINE or adapter_info.get("status") != "ok"
                 or not adapter_info.get("models_initialized") or adapter_info.get("loaded_model") != frozen["model"]):
-            raise AceApiError(f"Music 3 server is not ready with the requested model {frozen['model']}; engine/model health must match")
+            raise AceServerError(f"Music 3 server is not ready with the requested model {frozen['model']}; engine/model health must match")
         return
     if adapter_info.get("engine") == MUSIC3_ENGINE:
-        raise AceApiError("a frozen ACE request cannot run on a Music 3 server; use the ACE server address")
+        raise AceServerError("a frozen ACE request cannot run on a Music 3 server; use the ACE server address")
     loaded = adapter_info.get("loaded_model")
     if loaded and loaded != frozen["model"]:
-        raise AceApiError(
+        raise AceServerError(
             f"ACE server has DiT {loaded} loaded, not the requested {frozen['model']}; "
             "restart the engine with that model (MUSIC_ENGINE_ACE_DIT_MODEL) or request the loaded one"
         )
     loaded_lm = adapter_info.get("loaded_lm_model")
-    if frozen.get("thinking") and loaded_lm and loaded_lm != frozen["lm_model_path"]:
-        raise AceApiError(
-            f"ACE server has LM {loaded_lm} loaded, not the requested {frozen['lm_model_path']}; "
-            "restart the engine with that model (MUSIC_ENGINE_ACE_LM_MODEL) or request the loaded one"
+    unloaded = loaded_lm is None and adapter_info.get("llm_initialized") is False
+    if frozen.get("thinking") and loaded_lm != frozen["lm_model_path"] and not unloaded:
+        raise AceServerError(
+            f"ACE server has LM {loaded_lm or 'none'} loaded, not the requested {frozen['lm_model_path']}; "
+            "restart the engine with that model (MUSIC_ENGINE_ACE_LM_MODEL; see .runtime/logs/ace-server.log) or request the loaded one"
         )
 
 
@@ -445,11 +451,12 @@ def _run_batch(
                     batch = store.find_by_id(project, "jobs", "jobId", batch_id)
                     batch["failures"].append({"seed": str(seed), "error": f"{type(error).__name__}: {error}"})
                     batch["progress"] = (index + 1) / len(payloads)
-                if isinstance(error, TimeoutError):
-                    # The server may still own this task. Starting another seed can
-                    # queue competing inference while the caller believes it stopped.
+                if stops_submissions(error):
+                    # The server may still own this task, or cannot take another one.
+                    # Starting another seed can queue competing inference while the
+                    # caller believes it stopped.
                     unsubmitted_seeds = [item["seed"] for item in payloads[index + 1:] if item["seed"] not in reusable]
-                    stop_reason = "remote-task-timeout"
+                    stop_reason = "remote-task-timeout" if isinstance(error, TimeoutError) else "engine-unavailable"
                     break
         with store.transaction() as project:
             batch = store.find_by_id(project, "jobs", "jobId", batch_id)
