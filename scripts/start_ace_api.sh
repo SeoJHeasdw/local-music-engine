@@ -27,6 +27,12 @@ export ACESTEP_CONFIG_PATH="$DIT_MODEL"
 export ACESTEP_LM_MODEL_PATH="$LM_MODEL"
 export ACESTEP_INIT_LLM="true"
 export ACESTEP_NO_INIT="false"
+# ACE fetches any model it finds missing from the newest revision (and from ModelScope if
+# Hugging Face fails). Start only on the pinned weights, and offline, so a missing file
+# stops here instead. bootstrap_ace.sh downloads and verifies the pinned files.
+"$ACE_ROOT/.venv/bin/python" -I "$SCRIPT_DIR/ace_weights.py" check --models "$MODEL_ROOT" \
+  --model "$DIT_MODEL" --model "$LM_MODEL"
+export HF_HUB_OFFLINE="1"
 export ACESTEP_DOWNLOAD_SOURCE="huggingface"
 export TOKENIZERS_PARALLELISM="false"
 export HF_HUB_DISABLE_TELEMETRY="1"

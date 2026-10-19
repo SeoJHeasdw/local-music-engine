@@ -578,8 +578,12 @@ def run(args: argparse.Namespace) -> Any:
     if args.command == "inspect":
         store = ProjectStore(args.path)
         project = store.load()
-        invalid = []
+        invalid, retired = [], []
         for artifact in project["artifacts"]:
+            if artifact.get("retired"):
+                # A replaced listening copy's file is removed on purpose; its record stays as history.
+                retired.append({"artifactId": artifact["artifactId"], "supersededBy": artifact["retired"].get("supersededBy")})
+                continue
             valid, reason = store.verify_artifact(artifact)
             if not valid:
                 invalid.append({"artifactId": artifact["artifactId"], "reason": reason})
@@ -598,6 +602,7 @@ def run(args: argparse.Namespace) -> Any:
                 "feedback": len(project.get("feedback", [])),
             },
             "invalidArtifacts": invalid,
+            "retiredArtifacts": retired,
             "restorable": not invalid,
         }
     raise AssertionError(args.command)

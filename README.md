@@ -17,14 +17,15 @@ Music 3로 만든 곡도 재생·비교·평가·선택·내보낼 수 있다.
 
 ```bash
 chmod +x scripts/*.sh app.sh
-./scripts/bootstrap_ace.sh  # 고정 판본의 ACE-Step 실행 환경 준비
+./scripts/bootstrap_ace.sh  # 고정 판본의 ACE-Step 실행 환경과 모델 준비
 ./app.sh                    # 프로젝트 Python·Electron 환경 준비, 앱 빌드 및 실행
 ```
 
 환경은 루트 `.venv`, ACE의 `.runtime/ace-step-1.5/.venv`, 품질 검사의 `.runtime/quality/.venv`로 분리한다.
-모델은 `.runtime/models/`에 둔다. 엔진을 처음 켤 때 없는 모델(XL turbo 약 20GB, 4B LM 약 8GB와 기본 묶음)을
-Hugging Face에서 받는다. 음원·가사·프로젝트·모델·로그는 Git에 넣지 않는다. 생성과 품질 검사에서
-음원·가사를 외부 API에 업로드하지 않는다.
+모델은 `.runtime/models/`에 둔다. `bootstrap_ace.sh`가 없는 모델(XL turbo 약 20GB, 4B LM 약 8.4GB와 기본 묶음
+약 10GB)을 [고정 revision](docs/DECISIONS.md#고정-판본)으로 Hugging Face에서 받고 모든 파일의 SHA-256을 확인한다.
+엔진은 오프라인으로 켜지며 고정 파일이 빠졌거나 크기가 다르면 켜지지 않는다. 음원·가사·프로젝트·모델·로그는
+Git에 넣지 않는다. 생성과 품질 검사에서 음원·가사를 외부 API에 업로드하지 않는다.
 
 ## 음악 엔진
 
