@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from .ace_adapter import AceApiError, AceStepClient, AceUnavailable
+from .ace_adapter import AceServerError, AceStepClient, AceUnavailable
 from .lane import LANE_ENV, lane_held, lane_path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,14 +63,17 @@ def _probe(client: AceStepClient) -> dict[str, Any] | None:
         return None
 
 
-def _log_tail(lines: int = 4) -> str:
+def _log_tail(lines: int = 4, *, mentioning: str | None = None) -> str:
+    """The log's last lines, or its last lines that mention ``mentioning``."""
+
     try:
         with LOG_PATH.open("rb") as handle:
-            handle.seek(max(0, LOG_PATH.stat().st_size - 4096))
+            handle.seek(max(0, LOG_PATH.stat().st_size - (4096 if mentioning is None else 65536)))
             text = handle.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
-    return " | ".join([line.strip() for line in text.splitlines() if line.strip()][-lines:])
+    kept = [line.strip() for line in text.splitlines() if line.strip() and (mentioning is None or mentioning in line)]
+    return " | ".join(kept[-lines:])
 
 
 def spawn_server(base_url: str, *, model: str, lm_model: str) -> subprocess.Popen:
@@ -103,6 +106,10 @@ def ensure_ace(base_url: str, *, model: str, lm_model: str, timeout: float = STA
                spawn: Callable[..., subprocess.Popen] = spawn_server) -> None:
     """Make ACE answer at ``base_url`` with its models loaded, starting it when nothing answers.
 
+    A server started here must have loaded ``lm_model``: ACE only warns when its LM fails
+    to load at start, and the run would learn it only when a request fails. A server that
+    was already running is checked per request (``workflow._require_loaded_models``),
+    since edits need no LM and a cover request may have unloaded it.
     Call it while holding the work lane, or the new server stops itself at once.
     """
 
@@ -114,13 +121,17 @@ def ensure_ace(base_url: str, *, model: str, lm_model: str, timeout: float = STA
             health = _probe(client)
             if health is not None:
                 if health.get("stage") == "failed":
-                    raise AceApiError(f"ACE engine failed to load its models: {_log_tail()}")
+                    raise AceServerError(f"ACE engine failed to load its models: {_log_tail()}")
                 if health.get("models_initialized"):
+                    loaded_lm = health.get("loaded_lm_model")
+                    if process is not None and loaded_lm != lm_model:
+                        raise AceServerError(f"ACE engine failed to load the LM {lm_model} "
+                                             f"(loaded: {loaded_lm or 'none'}): {_log_tail(mentioning='LM') or _log_tail()}")
                     return
             elif process is not None and process.poll() is not None:
-                raise AceApiError(f"ACE engine did not start (exit {process.returncode}): {_log_tail()}")
+                raise AceServerError(f"ACE engine did not start (exit {process.returncode}): {_log_tail()}")
             if time.monotonic() >= deadline:
-                raise AceApiError(f"ACE engine did not finish loading within {timeout:.0f}s: {_log_tail()}")
+                raise AceServerError(f"ACE engine did not finish loading within {timeout:.0f}s: {_log_tail()}")
             time.sleep(poll)
 
 

@@ -1,7 +1,11 @@
+import http.client
 import json
 import math
 from typing import Any
 
+import pytest
+
+from local_music_engine import assistant
 from local_music_engine.assistant import LlmConfig, rule_plan, PlanRequest
 from local_music_engine.drafting import (
     draft_from_llm_answer,
@@ -73,6 +77,19 @@ def test_unreachable_llm_falls_back_to_engine_draft() -> None:
     result = draft_song("잔잔한 발라드", instrumental=False, duration_seconds=60, base_url="http://127.0.0.1:1", llm=config, client_factory=FakeSampleClient, engine="ace-step")
     assert result["source"] == "engine"
     assert "LLM" in result["notes"][0]
+
+
+@pytest.mark.parametrize("dropped", [http.client.RemoteDisconnected("Remote end closed connection without response"),
+                                     ConnectionResetError(54, "Connection reset by peer"), http.client.IncompleteRead(b"{")],
+                         ids=lambda error: type(error).__name__)
+def test_an_llm_connection_dropped_mid_answer_falls_back_to_engine_draft(dropped: Exception, monkeypatch: pytest.MonkeyPatch) -> None:
+    def open_local(_request: Any, *, timeout: float) -> Any:
+        raise dropped
+
+    monkeypatch.setattr(assistant, "open_local", open_local)
+    config = LlmConfig(base_url="http://127.0.0.1:9", model="none", timeout_seconds=1)
+    result = draft_song("잔잔한 발라드", instrumental=False, duration_seconds=60, base_url="http://127.0.0.1:1", llm=config, client_factory=FakeSampleClient, engine="ace-step")
+    assert result["source"] == "engine" and type(dropped).__name__ in result["notes"][0]
 
 
 def test_rules_only_append_to_prose_captions() -> None:

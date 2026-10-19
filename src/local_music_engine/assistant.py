@@ -8,6 +8,7 @@ same output contract: offline keyword rules, and an optional loopback LLM.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.error
@@ -465,7 +466,13 @@ def _read_json(request: urllib.request.Request, timeout: float) -> Any:
         raise AssistantError(f"LLM HTTP {error.code}: {detail}") from error
     except urllib.error.URLError as error:
         raise AssistantError(f"LLM unavailable: {error.reason}") from error
-    except (TimeoutError, json.JSONDecodeError) as error:
+    except TimeoutError as error:
+        raise AssistantError(f"LLM response failed: {error}") from error
+    # urllib wraps only connection failures; a reset or a dropped connection while
+    # reading the answer arrives as itself.
+    except (http.client.HTTPException, OSError) as error:
+        raise AssistantError(f"LLM unavailable: {type(error).__name__}: {error}") from error
+    except json.JSONDecodeError as error:
         raise AssistantError(f"LLM response failed: {error}") from error
 
 

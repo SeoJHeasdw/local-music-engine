@@ -206,15 +206,21 @@ def _number(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def _transcript(transcription: Any, duration_seconds: float | None) -> tuple[str, list[str], list[dict[str, Any]]]:
+_UNREAD_AT_MOST = 0.3  # share of a reading's words; the quality worker's own rule is 70% read with confidence
+_MAX_UNITS_PER_SECOND = 20  # faster than anyone sings
+
+
+def _transcript(transcription: Any, duration_seconds: float | None) -> tuple[str, list[str], list[dict[str, Any]], list[dict[str, Any]], str]:
+    """The confidently read text and segments, why the reading cannot be trusted, the
+    segments read without confidence, and the text of every segment in time order."""
+
     reasons: list[str] = []
-    accepted = []
     if transcription is None:
-        return "", ["stt_unavailable"], []
+        return "", ["stt_unavailable"], [], [], ""
     if isinstance(transcription, str):
-        return transcription, ["stt_reliability_not_reported"], []
+        return transcription, ["stt_reliability_not_reported"], [], [], transcription
     if not isinstance(transcription, dict):
-        return "", ["stt_result_invalid"], []
+        return "", ["stt_result_invalid"], [], [], ""
     if transcription.get("available") is False or transcription.get("error"):
         reasons.append("stt_unavailable")
     if transcription.get("task") == "translate":
@@ -229,16 +235,24 @@ def _transcript(transcription: Any, duration_seconds: float | None) -> tuple[str
     if segments is None or segments == []:
         if transcription.get("reliable") is not True:
             reasons.append("stt_reliability_not_reported")
-        return text, reasons, []
+        return text, reasons, [], [], text
     if not isinstance(segments, list) or any(not isinstance(item, dict) for item in segments):
-        return text, reasons + ["stt_segments_invalid"], []
-    trusted = True
+        return text, reasons + ["stt_segments_invalid"], [], [], text
+    timed = []
     for index, segment in enumerate(segments):
         segment_text = segment.get("text", "")
         if not isinstance(segment_text, str):
             reasons.append("stt_segment_text_invalid")
             continue
-        start, end = _number(segment.get("start")), _number(segment.get("end"))
+        timed.append((index, segment, segment_text, _number(segment.get("start")), _number(segment.get("end"))))
+    final = max((start for *_, start, _ in timed if start is not None), default=None)
+    trusted = True
+    accepted, unread = [], []
+    for index, segment, segment_text, start, end in timed:
+        # Whisper reads whole 30-second windows, so the final segment may end past the file.
+        cut = duration_seconds is not None and start is not None and end is not None and start == final and start < duration_seconds < end
+        if cut:
+            end = duration_seconds
         if start is None or end is None or start < 0 or end <= start or (duration_seconds is not None and end > duration_seconds + 0.5):
             reasons.append("stt_timestamps_invalid")
             continue
@@ -248,25 +262,39 @@ def _transcript(transcription: Any, duration_seconds: float | None) -> tuple[str
         if any(key in segment and _number(segment[key]) is None
                for key in ("confidence", "avg_logprob", "no_speech_prob")):
             reasons.append("stt_confidence_invalid")
-        # Whisper's own failure thresholds: https://github.com/openai/whisper/blob/main/whisper/transcribe.py
         if confidence is not None and not 0 <= confidence <= 1:
             reasons.append("stt_confidence_invalid")
-        if (confidence is not None and confidence < 0.5) or (logprob is not None and logprob < -1.0):
-            reasons.append("stt_low_confidence")
-        if no_speech is not None and (not 0 <= no_speech <= 1 or (no_speech > 0.6 and (logprob is None or logprob < -1.0))):
+        if no_speech is not None and not 0 <= no_speech <= 1:
             reasons.append("stt_possible_silence_hallucination")
         if confidence is None and logprob is None:
             trusted = False
-        accepted.append({"index": index, "start": start, "end": end, "text": segment_text})
+        # Whisper's own failure thresholds: https://github.com/openai/whisper/blob/main/whisper/transcribe.py
+        # Such a segment is a stretch the recognizer could not read. Its words show neither
+        # that the written lines were sung there nor that they were not.
+        silent = no_speech is not None and no_speech > 0.6 and (logprob is None or logprob < -1.0)
+        doubtful = (confidence is not None and confidence < 0.5) or (logprob is not None and logprob < -1.0)
+        # Words the file has no time left for (often a closing "thank you") are not singing either.
+        doubtful = doubtful or (cut and len(_units(segment_text)) > _MAX_UNITS_PER_SECOND * (end - start))
+        item = {"index": index, "start": start, "end": end, "text": segment_text}
+        if silent or doubtful:
+            unread.append({**item, "silent": silent})
+        else:
+            accepted.append(item)
     accepted.sort(key=lambda item: item["start"])
-    if any(current["start"] < previous["end"] - 0.5 for previous, current in zip(accepted, accepted[1:])):
+    every = sorted(accepted + unread, key=lambda item: item["start"])
+    if any(current["start"] < previous["end"] - 0.5 for previous, current in zip(every, every[1:])):
         reasons.append("stt_timestamps_overlap")
     if not trusted and transcription.get("reliable") is not True:
         reasons.append("stt_reliability_not_reported")
-    joined = " ".join(item["text"] for item in accepted)
-    if text.strip() and _units(text) != _units(joined):
+    unread_units = sum(len(_units(item["text"])) for item in unread)
+    if unread_units > _UNREAD_AT_MOST * sum(len(_units(item["text"])) for item in every):
+        reasons.append("stt_low_confidence")
+        if any(item["silent"] for item in unread):
+            reasons.append("stt_possible_silence_hallucination")
+    full = " ".join(item["text"] for item in every)
+    if text.strip() and _units(text) != _units(full):
         reasons.append("stt_text_and_segments_disagree")
-    return joined, reasons, accepted
+    return " ".join(item["text"] for item in accepted), reasons, accepted, unread, full
 
 
 _MINIMUM_UNITS = 6             # about one full line; shorter stretches are not judged on their own
@@ -278,26 +306,48 @@ _SECTION_RETRY_MINIMUM_UNITS = 16
 _MAX_REREAD_SECONDS = 90.0
 
 
+def _scores(reference: list[str], owners: list[int], occurrences: list[dict[str, Any]], hypothesis: list[str]) -> dict[str, Any]:
+    pairs = _ordered_matches(reference, hypothesis) if reference and hypothesis else []
+    matched_counts = Counter(owners[index] for index, _ in pairs)
+    sections = [{**item, "matchedUnits": matched_counts[index],
+                 "orderedCoverage": matched_counts[index] / item["expectedUnits"] if item["expectedUnits"] and hypothesis else None}
+                for index, item in enumerate(occurrences)]
+    korean_ref = [item for item in reference if item.startswith("ko:")]
+    english_ref = [item for item in reference if item.startswith("en:")]
+    korean_observed = [item for item in hypothesis if item.startswith("ko:")]
+    english_observed = [item for item in hypothesis if item.startswith("en:")]
+    return {"pairs": pairs, "sections": sections,
+            "cer": _edit_distance(korean_ref, korean_observed) / len(korean_ref) if korean_ref and hypothesis else None,
+            "wer": _edit_distance(english_ref, english_observed) / len(english_ref) if english_ref and hypothesis else None,
+            "coverage": len(pairs) / len(reference) if reference and hypothesis else None}
+
+
 def _measure(lyrics: str, transcription: dict[str, Any] | str | None, duration_seconds: float | None) -> dict[str, Any]:
-    """Align one reading of the audio with the written lyrics; no verdict yet."""
+    """Align one reading of the audio with the written lyrics; no verdict yet.
+
+    Only confidently read text counts as heard. ``retryBasis`` scores the same reading
+    with the unread text counted as heard too, so recognizer doubt never asks for
+    another song.
+    """
 
     reference, owners, occurrences, lines = _reference(lyrics)
-    text, reliability_reasons, segments = _transcript(transcription, duration_seconds)
+    text, reliability_reasons, segments, unread, full_text = _transcript(transcription, duration_seconds)
     if _unsupported_content(lyrics):
         reliability_reasons.append("unsupported_reference_lyric_content")
     if _unsupported_content(text):
         reliability_reasons.append("stt_contains_unsupported_lyric_content")
-    if len(text) > _MAX_TEXT_CHARS:
+    if len(full_text) > _MAX_TEXT_CHARS:
         reliability_reasons.append("stt_text_exceeds_diagnostic_limit")
-        text = ""
+        text = full_text = ""
     hypothesis = _units(text)
+    generous = _units(full_text) if unread else hypothesis
     if not hypothesis and reference:
         reliability_reasons.append("stt_has_no_usable_lyric_text")
     if not reference:
         reliability_reasons.append("no_supported_reference_lyric_units")
-    if len(reference) * len(hypothesis) > _MAX_ALIGNMENT_CELLS:
+    if len(reference) * len(generous) > _MAX_ALIGNMENT_CELLS:
         reliability_reasons.append("stt_alignment_exceeds_diagnostic_limit")
-        hypothesis = []
+        hypothesis = generous = []
     reference_counts, observed_counts = Counter(reference), Counter(hypothesis)
     if len(hypothesis) >= 40 and len(hypothesis) > max(3 * len(reference), len(reference) + 80):
         reliability_reasons.append("stt_excess_text_possible_hallucination")
@@ -307,13 +357,10 @@ def _measure(lyrics: str, transcription: dict[str, Any] | str | None, duration_s
     normalized_observed = "".join(unit[3:] for unit in hypothesis)
     if any(phrase in normalized_observed and phrase not in normalized_reference for phrase in _HALLUCINATION_PHRASES):
         reliability_reasons.append("stt_boilerplate_possible_hallucination")
-    if segments and any(len(_units(item["text"])) / (item["end"] - item["start"]) > 20 for item in segments):
+    if segments and any(len(_units(item["text"])) / (item["end"] - item["start"]) > _MAX_UNITS_PER_SECOND for item in segments):
         reliability_reasons.append("stt_text_rate_implausible")
-    pairs = _ordered_matches(reference, hypothesis) if reference and hypothesis else []
-    matched_counts = Counter(owners[index] for index, _ in pairs)
-    sections = [{**item, "matchedUnits": matched_counts[index],
-                 "orderedCoverage": matched_counts[index] / item["expectedUnits"] if item["expectedUnits"] and hypothesis else None}
-                for index, item in enumerate(occurrences)]
+    heard_scores = _scores(reference, owners, occurrences, hypothesis)
+    pairs = heard_scores["pairs"]
     # Each observed unit belongs to the timestamped segment it was read in.
     unit_segment = [position for position, item in enumerate(segments) for _ in _units(item["text"])]
     unheard = []
@@ -349,18 +396,14 @@ def _measure(lyrics: str, transcription: dict[str, Any] | str | None, duration_s
                                     "searchSpanSeconds": [round(outer[0], 3), round(min(outer[1], outer[0] + _MAX_REREAD_SECONDS), 3)],
                                     "listenSpanSeconds": [round(listen[0], 3), round(listen[1], 3)]})
             run = []
-    korean_ref = [item for item in reference if item.startswith("ko:")]
-    english_ref = [item for item in reference if item.startswith("en:")]
-    korean_observed = [item for item in hypothesis if item.startswith("ko:")]
-    english_observed = [item for item in hypothesis if item.startswith("en:")]
     return {"reference": reference, "hypothesisUnits": len(hypothesis), "matchedUnits": len(pairs),
-            "sections": sections, "lines": lines, "unheard": unheard, "segments": segments,
-            "reliabilityReasons": sorted(set(reliability_reasons)),
+            "sections": heard_scores["sections"], "lines": lines, "unheard": unheard, "segments": segments,
+            "unread": unread, "reliabilityReasons": sorted(set(reliability_reasons)),
             "known": bool(reference and hypothesis) and not reliability_reasons,
-            "koreanReference": len(korean_ref), "englishReference": len(english_ref),
-            "cer": _edit_distance(korean_ref, korean_observed) / len(korean_ref) if korean_ref and hypothesis else None,
-            "wer": _edit_distance(english_ref, english_observed) / len(english_ref) if english_ref and hypothesis else None,
-            "coverage": len(pairs) / len(reference) if reference and hypothesis else None,
+            "koreanReference": sum(item.startswith("ko:") for item in reference),
+            "englishReference": sum(item.startswith("en:") for item in reference),
+            "cer": heard_scores["cer"], "wer": heard_scores["wer"], "coverage": heard_scores["coverage"],
+            "retryBasis": _scores(reference, owners, occurrences, generous) if generous != hypothesis else heard_scores,
             "anchor": _number(transcription.get("windowAnchorSeconds")) if isinstance(transcription, dict) else None}
 
 
@@ -385,9 +428,13 @@ def evaluate_lyric_transcript(
     """Compare an STT observation conservatively; unknown never authorizes a retry.
 
     A backend may attest ``reliable=True`` when its confidence checks are usable.
-    Timestamped Whisper-style segments can establish this independently. Low
-    confidence, impossible timestamps, and suspected hallucinations override that
-    attestation. Repeating chorus text consumes distinct observed units.
+    Timestamped Whisper-style segments can establish this independently. Impossible
+    timestamps and suspected hallucinations override that attestation; the final
+    segment may run past the end of the file and is cut there. A segment read with low
+    confidence is an unread stretch (``unreadSpans``): its words are not counted as
+    heard, and a reason to regenerate must hold even when they are. A reading with
+    more than 30% of its words unread is unknown. Repeating chorus text consumes
+    distinct observed units.
 
     Written lines that went unheard in a row are listed in ``unheardLines`` with
     ``searchSpanSeconds``, the stretch of audio where they would be. ``rereads`` holds
@@ -397,14 +444,14 @@ def evaluate_lyric_transcript(
     more of the written words, which a recognizer that never saw the lyrics cannot do
     by chance. Lines are reported as missing, and a whole missing section as a reason
     to regenerate, only after two usable readings from other starting points still do
-    not find them.
+    not find them. A further reading settles nothing where it was itself unread.
     """
 
     if duration_seconds is not None and (_number(duration_seconds) is None or duration_seconds <= 0):
         raise ValueError("duration must be finite and positive")
     measured = _measure(lyrics, transcription, duration_seconds)
     history = []
-    reread_spans: list[tuple[float, float]] = []
+    reread_spans: list[tuple[float, float, list[tuple[float, float]]]] = []
     if measured["known"] and isinstance(transcription, dict):
         current = transcription
         for item in rereads or []:
@@ -423,21 +470,24 @@ def evaluate_lyric_transcript(
                 current, measured = _with_reread(current, start, end, second), trial
             # A reading that came back unreliable settles nothing about that span.
             if usable and independent and trial is not None and (trial["known"] or adopted):
-                reread_spans.append((start, end))
+                doubtful = [(part["start"], part["end"]) for part in _transcript(second, duration_seconds)[3]
+                            if start <= (part["start"] + part["end"]) / 2 <= end]
+                reread_spans.append((start, end, doubtful))
     reference, sections = measured["reference"], measured["sections"]
     cer, wer, coverage, known = measured["cer"], measured["wer"], measured["coverage"], measured["known"]
     chorus = [item["orderedCoverage"] for item in sections
               if item["isChorus"] and item["expectedUnits"] and item["orderedCoverage"] is not None]
-    retry_chorus = [item["orderedCoverage"] for item in sections
+    basis = measured["retryBasis"]
+    retry_chorus = [item["orderedCoverage"] for item in basis["sections"]
                     if item["isChorus"] and item["expectedUnits"] >= 8 and item["orderedCoverage"] is not None]
     retry_reasons = []
     # Retry only large, supported mismatches. Smaller errors remain observations
     # for listening because sung voice recognition itself can be wrong.
-    if coverage is not None and coverage < 0.65 and len(reference) >= 20:
+    if basis["coverage"] is not None and basis["coverage"] < 0.65 and len(reference) >= 20:
         retry_reasons.append("low_ordered_lyric_coverage")
-    if cer is not None and cer > 0.65 and measured["koreanReference"] >= 20:
+    if basis["cer"] is not None and basis["cer"] > 0.65 and measured["koreanReference"] >= 20:
         retry_reasons.append("large_korean_transcript_error")
-    if wer is not None and wer > 0.75 and measured["englishReference"] >= 6:
+    if basis["wer"] is not None and basis["wer"] > 0.75 and measured["englishReference"] >= 6:
         retry_reasons.append("large_english_transcript_error")
     if retry_chorus and min(retry_chorus) < 0.5:
         retry_reasons.append("written_chorus_occurrence_missing")
@@ -445,13 +495,15 @@ def evaluate_lyric_transcript(
     confirmed_lines: set[int] = set()
     for run in unheard:
         search = run["searchSpanSeconds"]
-        again = sum(min(end, search[1]) - max(start, search[0]) >= 0.5 * (search[1] - search[0]) for start, end in reread_spans)
+        again = sum(min(end, search[1]) - max(start, search[0]) >= 0.5 * (search[1] - search[0])
+                    and not any(first < search[1] and last > search[0] for first, last in doubtful)
+                    for start, end, doubtful in reread_spans)
         run["rereadConfirmed"] = again >= 2
         if run["rereadConfirmed"]:
             confirmed_lines.update(run["lineIndexes"])
     # A whole written section is missing when it was barely matched and every one of
     # its lines is among those two further readings did not find.
-    missing_sections = {index for index, item in enumerate(sections)
+    missing_sections = {index for index, item in enumerate(basis["sections"])
                         if item["expectedUnits"] >= _SECTION_RETRY_MINIMUM_UNITS and (item["orderedCoverage"] or 0) < _SECTION_MISSING_BELOW
                         and all(position in confirmed_lines for position, line in enumerate(measured["lines"]) if line["owner"] == index)}
     if any(not sections[index]["isChorus"] for index in missing_sections):
@@ -484,6 +536,7 @@ def evaluate_lyric_transcript(
         "sectionCoverage": sections, "minimumChorusCoverage": min(chorus) if chorus else None,
         "unheardLines": [{key: value for key, value in run.items() if key != "lineIndexes"} for run in unheard],
         "segments": measured["segments"], "reliabilityReasons": measured["reliabilityReasons"],
+        "unreadSpans": [[round(item["start"], 3), round(item["end"], 3)] for item in measured["unread"]],
         "findings": findings, "rereads": history,
         "retryEligible": known and bool(retry_reasons), "retryReasons": retry_reasons if known else [],
         "heuristicThresholds": {"retryCoverageBelow": 0.65, "retryKoreanCERAbove": 0.65,

@@ -11,6 +11,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 
+from .ace_adapter import stops_submissions
 from .audio_quality import AudioFinishPolicy, analyze_audio_quality, finish_audio
 from .execution import execute_candidate
 from .jobs import ACTIVE_STATUSES, batch_lineage, cleanup_export_outputs, validate_seed
@@ -804,11 +805,6 @@ def run_quality_batch(store: ProjectStore, *, batch_id: str, client: Any, poll_s
             _candidate(store, candidate_id)  # Never fall back to a damaged original.
             return candidate_id, f"{type(error).__name__}: {error}"
 
-    def server_may_still_be_working(error: Exception) -> bool:
-        # A timeout may leave remote inference running. Do not add more work automatically.
-        return isinstance(error, TimeoutError) or any(term in str(error) for term in
-            ("API unavailable", "API HTTP", "unhealthy ACE", "unhealthy Music 3", "Music 3 server", "not the requested"))
-
     def repair(slot: int, source_id: str, report: dict[str, Any], payload: dict[str, Any], seed: int) -> tuple[str, dict[str, Any]]:
         """Repaint a stretch whose written lines went unsung; keep the first take that verifiably sings them.
 
@@ -868,7 +864,7 @@ def run_quality_batch(store: ProjectStore, *, batch_id: str, client: Any, poll_s
                         context_range={"startSeconds": 0.0, "endSeconds": duration}, quality_context=metadata)
                 except Exception as error:
                     failure(seed, error, stage="local_repair")
-                    if server_may_still_be_working(error):
+                    if stops_submissions(error):
                         stop_submissions = True
                         break
                     continue
@@ -1005,7 +1001,7 @@ def run_quality_batch(store: ProjectStore, *, batch_id: str, client: Any, poll_s
                             quality_context=metadata)
                     except Exception as error:
                         failure(original_seed, error, stage="generation")
-                        if server_may_still_be_working(error):
+                        if stops_submissions(error):
                             stop_submissions = True
                             break
                         continue

@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .ace_adapter import AceApiError, AceStepClient
+from .ace_adapter import AceServerError, AceStepClient
 from .music3 import BASE_URL, ENGINE
 from .music3_auth import read_api_key
 
@@ -21,7 +21,7 @@ class Music3Client(AceStepClient):
         data = response.get("data")
         if (not isinstance(data, dict) or data.get("status") != "ok"
                 or data.get("engine") != ENGINE or not data.get("models_initialized")):
-            raise AceApiError(f"unhealthy Music 3 API response: {response!r}")
+            raise AceServerError(f"unhealthy Music 3 API response: {response!r}")
         return data
 
     def submit(self, request: dict[str, Any], source_audio: Path | None = None) -> str:

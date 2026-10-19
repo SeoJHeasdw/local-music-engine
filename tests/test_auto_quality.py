@@ -11,6 +11,7 @@ import wave
 import pytest
 
 from local_music_engine import auto_quality
+from local_music_engine.ace_adapter import AceApiError, AceServerError, AceUnavailable
 from local_music_engine.auto_quality import _quality_rank, compare_engine_metas, listening_points, prepare_payload, quality_policy
 from local_music_engine.jobs import recover_project
 from local_music_engine.storage import ProjectStore
@@ -287,6 +288,30 @@ def test_timeout_does_not_automatically_submit_more_remote_work(song):
     result = generate_candidates(song.root, seeds=[1, 2], client_factory=TimedOut, quality=quality_policy(), quality_backend=Reports(), engine="ace-step")
     assert result["status"] == "failed"
     assert len(FakeAceClient.submitted) == 1
+
+
+@pytest.mark.parametrize("error", [AceUnavailable("ACE API unavailable: ConnectionResetError: [Errno 54] Connection reset by peer"),
+                                   AceServerError("ACE engine did not start (exit 1)")], ids=["reset", "not-started"])
+def test_an_engine_that_cannot_take_work_gets_no_more_automatic_seeds(song, error):
+    class Broken(FakeAceClient):
+        def wait(self, *args, **kwargs):
+            raise error
+
+    result = generate_candidates(song.root, seeds=[1, 2], client_factory=Broken, quality=quality_policy(), quality_backend=Reports(), engine="ace-step")
+    assert result["status"] == "failed"
+    assert len(FakeAceClient.submitted) == 1
+
+
+def test_a_task_failure_is_not_read_as_an_engine_failure_from_its_wording(song):
+    class SecondFails(FakeAceClient):
+        def wait(self, *args, **kwargs):
+            if self.seed != 1:
+                raise AceApiError("remote task failed: API unavailable for this prompt")
+            return super().wait(*args, **kwargs)
+
+    result = generate_candidates(song.root, seeds=[1, 2], client_factory=SecondFails, quality=quality_policy(), quality_backend=Reports(), engine="ace-step")
+    assert result["status"] == "partial" and len(result["candidateIds"]) == 1
+    assert len(FakeAceClient.submitted) > 2  # the second version still used its automatic attempts
 
 
 def test_a_failed_requested_version_does_not_hide_successful_versions(song):

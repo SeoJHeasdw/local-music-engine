@@ -6,9 +6,11 @@ from typing import Any
 
 import pytest
 
+from local_music_engine.ace_adapter import AceServerError, AceUnavailable
 from local_music_engine.storage import ProjectStore
 from local_music_engine.views import library, project_status
 from local_music_engine.workflow import (
+    _require_loaded_models,
     export_selected,
     generate_candidates,
     repaint_candidate,
@@ -254,6 +256,39 @@ def test_generation_refuses_a_model_the_server_did_not_load(tmp_path: Path) -> N
     project = ProjectStore(tmp_path).load()
     assert RecordingAceClient.payloads == [] and project["candidates"] == [] and project["requests"] == []
     assert project["jobs"][0]["status"] == "failed"
+
+
+def test_a_planning_request_refuses_a_server_that_does_not_name_its_lm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    make_project(tmp_path)
+    RecordingAceClient.payloads = []
+    monkeypatch.setattr(RecordingAceClient, "loaded", ("acestep-v15-xl-turbo", None))
+    with pytest.raises(AceServerError, match="has LM none loaded, not the requested acestep-5Hz-lm-4B"):
+        generate_candidates(tmp_path, seeds=[1], lm_model="acestep-5Hz-lm-4B", client_factory=RecordingAceClient, engine="ace-step")
+    project = ProjectStore(tmp_path).load()
+    assert RecordingAceClient.payloads == [] and project["candidates"] == [] and project["requests"] == []
+    plan = {"model": "acestep-v15-xl-turbo", "thinking": True, "lm_model_path": "acestep-5Hz-lm-4B"}
+    for claimed in ({"loaded_lm_model": None, "llm_initialized": True}, {"loaded_lm_model": "acestep-5Hz-lm-1.7B", "llm_initialized": False}):
+        with pytest.raises(AceServerError, match="not the requested acestep-5Hz-lm-4B"):
+            _require_loaded_models({"loaded_model": "acestep-v15-xl-turbo", **claimed}, plan)
+    # An LM ACE reports unloaded (it does so after a cover) is loaded again for the request or fails it.
+    _require_loaded_models({"loaded_model": "acestep-v15-xl-turbo", "loaded_lm_model": None, "llm_initialized": False}, plan)
+    # An edit does not ask the LM to plan, so it may run on a server without one.
+    _require_loaded_models({"loaded_model": "acestep-v15-xl-turbo", "loaded_lm_model": None}, {**plan, "thinking": False})
+
+
+@pytest.mark.parametrize("error", [AceUnavailable("ACE API unavailable: RemoteDisconnected: Remote end closed connection"),
+                                   AceServerError("ACE API HTTP 503: queue full")], ids=["dropped", "refused"])
+def test_an_engine_that_cannot_take_work_gets_no_further_seeds(tmp_path: Path, error: Exception) -> None:
+    make_project(tmp_path)
+    FakeAceClient.submitted = []
+
+    class Broken(FakeAceClient):
+        def wait(self, task_id: str, **kwargs: Any) -> dict[str, Any]:
+            raise error
+
+    result = generate_candidates(tmp_path, seeds=[1, 2, 3], client_factory=Broken, engine="ace-step")
+    assert FakeAceClient.submitted == [1] and result["status"] == "failed"
+    assert result["stopReason"] == "engine-unavailable" and result["unsubmittedSeeds"] == [2, 3]
 
 
 def test_sampling_follows_the_dit_and_language_follows_the_lyrics(tmp_path: Path) -> None:
