@@ -216,9 +216,12 @@ SIGINT로 CLI를 멈춰 batch와 진행 중이던 하위 job을 모두 `cancelle
 (응답 도중 끊긴 연결 포함)·HTTP 거절·모델 불일치도 같다. 이 판단은 오류 종류(`ace_adapter.stops_submissions`)로
 한다. 진행 상황 조회가 끊기면 세 번까지 다시 묻는다.
 
-`quality-check`, `audio-finish`, `listening-copy`는 별도 하위 job이다. `listening-copy`는 정리본의 마스터링한
+`quality-check`, `audio-finish`, `listening-copy`, `loop-copy`는 별도 하위 job이다. `listening-copy`는 정리본의 마스터링한
 듣기용 사본(`listening-audio`, `sourceArtifactId`가 버전 음원)을 만들며 버전과 그 계보는 바꾸지 않는다. 실패해도
-batch는 성공으로 끝나고 앱은 버전 음원을 재생한다([듣기용 사본](AUTO-QUALITY.md#듣기용-사본마스터링)). 후처리는 원본을 읽어 새 artifact·candidate·
+batch는 성공으로 끝나고 앱은 버전 음원을 재생한다([듣기용 사본](AUTO-QUALITY.md#듣기용-사본마스터링)).
+요청에 `purpose: "bgm"`이 고정된 버전은 `loop-copy`가 그 사본에서 반복용(`loop-audio`, `sourceArtifactId`가 듣기용
+사본)을 자른다. 자를 수 없으면 파일 없이 job의 `outcome`에 이유를 남긴다([BGM 반복용](AUTO-QUALITY.md#bgm-반복용)).
+`purpose`는 구간 수정·커버·다시 만들기·재개가 원본 요청에서 이어받고, 제작 규칙 기록에는 `purpose`(문구)로만 남는다. 후처리는 원본을 읽어 새 artifact·candidate·
 revision을 만들고, 게시 전에 fsync한 임시 파일의 inode·byte 수·SHA-256 소유 정보를 정본에 쓴다.
 복구는 성공 저장 전의 소유 출력만 제거하며, 성공 저장 뒤에는 게시한 WAV를 남기고 임시 링크만
 정리한다. 후처리가 실패하면 검증된 원본을 추천하고 `quality.finishingError`를 남기며 batch는

@@ -5,19 +5,21 @@ import { installResizer } from "./resize.ts";
 import { get, initStore, isSongTicket, listeningRevision, set, songTicket, subscribe, type State, type View } from "./store.ts";
 import { TaskListeningFocus } from "./quality.ts";
 import { errorText, installMenus, installTooltips, toast } from "./ui.ts";
-import { demoDraft, renderCreate, submitCreateShortcut } from "./views/create.ts";
+import { demoBgm, demoDraft, renderCreate, submitCreateShortcut } from "./views/create.ts";
 import { renderLibrary } from "./views/library.ts";
 import { renderSettings } from "./views/settings.ts";
 import { renderSidebar, renderTopbar, renderWindowControls } from "./views/sidebar.ts";
 import {
   clearSelection,
   demoInstruments,
+  demoLoopCheck,
   demoLyricsEdit,
   demoPlan,
   demoZoom,
   focusFeedback,
   nudge,
   renderStudio,
+  stopLoopPreview,
   stepVersion,
   toggleCompare,
   toggleLoop,
@@ -41,6 +43,7 @@ function render(state: State, changed: Set<keyof State>): void {
     renderTopbar();
   }
   if (changed.has("view")) showView(state.view);
+  if (changed.has("view") && state.view !== "studio") stopLoopPreview();
   if (state.view === "library" && (changed.has("view") || changed.has("songs") || changed.has("settings") || changed.has("song") || changed.has("task"))) renderLibrary();
   if (state.view === "create" && (changed.has("view") || changed.has("engine") || changed.has("settings") || changed.has("create"))) {
     // Typing only patches the draft; the form itself is built once.
@@ -253,6 +256,7 @@ async function start(): Promise<void> {
   });
 
   const demo = params.get("demo");
+  if (demo === "bgm" && get().view === "create") demoBgm(params.get("description") ?? "밤에 공부할 때 틀어 둘 잔잔한 감성 힙합 비트");
   if ((demo === "draft" || demo === "lyrics") && get().view === "create") {
     demoDraft(params.get("description") ?? "늦은 밤 도시를 달리는 감성 힙합. 남자 목소리, 비트와 피아노가 끝까지 이어지게",
       demo === "lyrics" ? "[Verse]\n가로등 아래 혼자 걷던 밤\n네 목소리만 귓가에 남아\n\n[Chorus]\n멈추지 마 이 리듬 위에\n우리 둘만의 도시를 그려" : null,
@@ -269,6 +273,8 @@ async function start(): Promise<void> {
       demoZoom();
     } else if (demo === "instruments") {
       demoInstruments();
+    } else if (demo === "loop-check") {
+      void demoLoopCheck();
     } else if (demo === "plan" || demo === "edit-plan") {
       void demoPlan(params.get("feedback") ?? "후렴 발음이 뭉개지고 드럼이 너무 세요", demo === "edit-plan");
     }

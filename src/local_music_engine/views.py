@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .jobs import ACTIVE_STATUSES, RECOVERABLE_KINDS, frozen_batch_payloads
-from .listening import listening_copies
+from .listening import listening_copies, played_versions
+from .loops import current_loop, loop_outcome
 from .engines import ACE_CAPABILITIES, ACE_ENGINE, DEFAULT_ENGINE, MAX_DURATION_SECONDS
 from .lyrics import is_instrumental_lyrics
 from .storage import PROJECT_FILENAME, ProjectStore
@@ -31,6 +32,27 @@ def _edit_splice(artifacts: dict[str, dict[str, Any]], candidate: dict[str, Any]
     return {key: splice.get(key) for key in ("applied", "reason", "changedRange", "gainDb", "peakReductionDb")}
 
 
+LOOP_FIELDS = ("startSeconds", "endSeconds", "durationSeconds", "bars", "bpm", "sampleRate", "warnings")
+
+
+def _loop_view(store: ProjectStore, project: dict[str, Any], candidate: dict[str, Any], parameters: dict[str, Any],
+               copy: dict[str, Any] | None) -> tuple[dict[str, Any] | None, Path | None]:
+    """The version's loop when it is current and verifies, else why it has none (BGM versions only)."""
+
+    looped = current_loop(store, project, copy) if copy is not None else None
+    if looped is not None:
+        return {"status": "ready", "artifactId": looped["artifactId"],
+                **{key: looped["loop"].get(key) for key in LOOP_FIELDS}}, _artifact_path(store, looped)
+    outcome = loop_outcome(project, candidate["candidateId"])
+    if parameters.get("purpose") != "bgm" and outcome is None:
+        return None, None
+    if outcome is not None and outcome.get("status") == "none":
+        return {"status": "none", "code": outcome.get("code"), "reason": outcome.get("reason")}, None
+    if outcome is not None and outcome.get("status") in {"failed", "cancelled", "interrupted"}:
+        return {"status": "failed", "code": "loop_failed", "reason": "반복용을 자르다 멈췄어요.", "error": outcome.get("error")}, None
+    return {"status": "missing", "code": "loop_missing", "reason": "반복용이 아직 없어요."}, None
+
+
 def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[str, Any]]:
     """One row per candidate, with the exact inputs its request froze.
 
@@ -45,6 +67,7 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
         record["jobId"]: record["feedbackId"] for record in project.get("feedback", [])
     }
     copies = listening_copies(project)
+    played = set(played_versions(project))
     rows = []
     for candidate in project["candidates"]:
         artifact = artifacts[candidate["artifactId"]]
@@ -55,6 +78,9 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
         listening = _artifact_path(store, copy) if copy is not None and store.verify_artifact(copy)[0] else None
         request = requests[candidate["requestId"]]
         parameters = request["parameters"]
+        # A raw take that a finished copy replaced is never looped; only what can be played is.
+        loop, loop_path = (_loop_view(store, project, candidate, parameters, copy if listening is not None else None)
+                           if candidate["candidateId"] in played else (None, None))
         job = jobs.get(artifact.get("createdByJobId") or "")
         feedback_id = None
         if job is not None:
@@ -109,6 +135,9 @@ def candidate_rows(store: ProjectStore, project: dict[str, Any]) -> list[dict[st
                 "createdAt": candidate.get("createdAt"),
                 "path": str(path) if path is not None else "",
                 "listeningPath": str(listening) if listening is not None else "",
+                "purpose": parameters.get("purpose"),
+                "loop": loop,
+                "loopPath": str(loop_path) if loop_path is not None else "",
             }
         )
     return rows
@@ -169,11 +198,8 @@ def _job_view(project: dict[str, Any], job: dict[str, Any], generation_active: b
 
 
 def _exports(store: ProjectStore, project: dict[str, Any]) -> list[dict[str, Any]]:
-    candidate_by_export = {
-        revision["after"].get("exportArtifactId"): revision["after"].get("candidateId")
-        for revision in project["revisions"]
-        if revision["kind"] == "export"
-    }
+    revisions = {revision["after"].get("exportArtifactId"): revision["after"]
+                 for revision in project["revisions"] if revision["kind"] == "export"}
     rows = []
     for artifact in project["artifacts"]:
         if artifact.get("kind") != "export-wav":
@@ -183,7 +209,8 @@ def _exports(store: ProjectStore, project: dict[str, Any]) -> list[dict[str, Any
         rows.append(
             {
                 "artifactId": artifact["artifactId"],
-                "candidateId": candidate_by_export.get(artifact["artifactId"]),
+                "candidateId": revisions.get(artifact["artifactId"], {}).get("candidateId"),
+                "variant": revisions.get(artifact["artifactId"], {}).get("variant", "song"),
                 "createdAt": artifact.get("createdAt"),
                 "path": str(internal) if internal is not None else "",
                 "exists": internal is not None and internal.is_file(),
@@ -223,6 +250,7 @@ def project_status(store: ProjectStore, project: dict[str, Any]) -> dict[str, An
             "keyScale": inputs.get("keyScale"),
             "timeSignature": inputs.get("timeSignature"),
             "productionRules": inputs.get("productionRules"),
+            "purpose": inputs.get("purpose"),
         },
         "selectedCandidateId": project.get("selectedCandidateId"),
         "recommendedCandidateId": project.get("recommendedCandidateId"),
@@ -267,6 +295,7 @@ def _summary(path: Path) -> dict[str, Any]:
             "stylePrompt": inputs.get("stylePrompt", ""),
             "durationSeconds": inputs.get("targetDurationSeconds"),
             "instrumental": is_instrumental_lyrics(inputs.get("lyricsNormalized", "")),
+            "purpose": inputs.get("purpose"),
             "versionCount": sum(1 for item in candidates if not item.get("quality") or item["quality"].get("preferred")),
             "automaticAttemptCount": sum(1 for item in candidates if item.get("quality") and not item["quality"].get("preferred")),
             "editCount": sum(1 for item in candidates if item.get("parentCandidateId") and (not item.get("quality") or item["quality"].get("preferred"))

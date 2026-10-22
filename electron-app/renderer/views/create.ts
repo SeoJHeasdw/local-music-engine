@@ -59,6 +59,13 @@ const EXAMPLES = [
   "졸업식에서 부르는 희망찬 밴드 록, 떼창하기 좋은 후렴",
 ];
 
+// A loop is cut on the kick drum's downbeats, so every BGM example keeps a beat.
+const BGM_EXAMPLES = [
+  "밤에 공부할 때 틀어 둘 잔잔한 감성 힙합 비트",
+  "브이로그에 깔기 좋은 밝은 신스팝, 통통 튀는 베이스",
+  "카페에서 흘러나오는 따뜻한 재즈 피아노와 부드러운 드럼",
+];
+
 const SECTIONS: Array<[string, string]> = [
   ["[Intro]", "전주 — 노래가 시작되기 전 부분"],
   ["[Verse]", "벌스 — 이야기를 풀어 가는 부분"],
@@ -69,8 +76,11 @@ const SECTIONS: Array<[string, string]> = [
 ];
 
 const DURATIONS = [30, 60, 120, 180, 240, 300];
+// A BGM song needs room for an intro, at least 16 looped bars and its ending.
+const BGM_DURATIONS = DURATIONS.filter((seconds) => seconds >= 60);
+const BGM_DEFAULT_SECONDS = 120;
 const INSTRUMENTAL = "[Instrumental]";
-type Voice = "ko" | "en" | "inst";
+type Voice = "ko" | "en" | "inst" | "bgm";
 
 type Refs = {
   description: HTMLTextAreaElement;
@@ -81,6 +91,7 @@ type Refs = {
   startLyricsBox: HTMLDetailsElement;
   lyricsField: HTMLElement;
   lyricsInstrumental: HTMLElement;
+  examples: HTMLElement;
   chips: HTMLButtonElement[];
   voice: HTMLElement;
   instruments: HTMLElement;
@@ -104,6 +115,14 @@ type Refs = {
   sendPreview: HTMLElement;
   bar: HTMLElement;
   createButton: HTMLButtonElement;
+};
+
+const VOICE_LABELS: Record<Voice, string> = { ko: "한국어", en: "영어", inst: "연주곡", bgm: "BGM" };
+const VOICE_TIPS: Record<Voice, string> = {
+  ko: "AI 초안의 가사 언어예요. 직접 쓴 가사는 그대로 둬요",
+  en: "AI 초안의 가사 언어예요. 직접 쓴 가사는 그대로 둬요",
+  inst: "가사 없이 연주만",
+  bgm: "가사 없이, 끊김 없이 반복되는 파일도 함께 만들어요",
 };
 
 let refs: Refs | null = null;
@@ -131,6 +150,7 @@ export function blankDraft(): CreateDraft {
     drafted: false,
     productionRules: emptyProductionRules(),
     vocalLanguage: "ko",
+    purpose: null,
   };
 }
 
@@ -152,7 +172,12 @@ function fallbackTitle(description: string): string {
 }
 
 function voiceOf(draft: CreateDraft): Voice {
-  return draft.instrumental ? "inst" : draft.vocalLanguage ?? "ko";
+  return draft.purpose === "bgm" ? "bgm" : draft.instrumental ? "inst" : draft.vocalLanguage ?? "ko";
+}
+
+// The engine never counts the purpose's own words as a style someone wrote.
+function writtenStyle(draft: CreateDraft): string {
+  return productionPreview({ ...draft, purpose: null }, get().productionCatalog).stylePrompt;
 }
 
 // Lyrics alone do not open step 2: they can be pasted in step 1 before asking for a draft.
@@ -281,7 +306,7 @@ async function requestSongPlan(): Promise<SongPlanResult | null> {
 
 // Why the create button cannot run yet, in the order a person would fix it.
 function blocker(draft: CreateDraft): string | null {
-  if (!productionPreview(sentDraft(draft), get().productionCatalog).stylePrompt) {
+  if (!writtenStyle(sentDraft(draft))) {
     return draftVisible(draft) ? "스타일을 적거나 장르 추천을 골라 주세요" : "먼저 AI 초안을 받거나 직접 써 주세요";
   }
   if (!draft.instrumental && !draft.lyrics.trim()) return "가사를 적거나 ‘연주곡’을 골라 주세요";
@@ -293,7 +318,7 @@ async function submit(button: HTMLButtonElement): Promise<void> {
   if (button.disabled || creating || planningSong) return;
   const draft = sentDraft(get().create);
   const lyrics = draft.instrumental ? INSTRUMENTAL : draft.lyrics.trim();
-  if (!productionPreview(draft, get().productionCatalog).stylePrompt) {
+  if (!writtenStyle(draft)) {
     toast("스타일을 한 줄 적거나 장르 추천을 골라 주세요.", { tone: "error" });
     refs?.style.focus();
     return;
@@ -339,6 +364,7 @@ async function submit(button: HTMLButtonElement): Promise<void> {
       keyScale: draft.keyScale.trim() || null,
       timeSignature: draft.timeSignature.trim() || null,
       productionRules: draft.productionRules ?? emptyProductionRules(),
+      ...(draft.purpose === "bgm" ? { purpose: "bgm" as const } : {}),
     }),
   );
   creating = false;
@@ -351,7 +377,9 @@ async function submit(button: HTMLButtonElement): Promise<void> {
   draftOpen = null;
   refs = null;
   go("studio");
-  toast(`버전 ${draft.versions}개를 만들기 시작했어요. 끝나면 자동으로 검사하고 추천본을 골라 드려요.`, { tone: "ok" });
+  toast(draft.purpose === "bgm"
+    ? `버전 ${draft.versions}개를 만들기 시작했어요. 끝나면 자동으로 검사하고, 반복용을 마디에 맞춰 잘라 드려요.`
+    : `버전 ${draft.versions}개를 만들기 시작했어요. 끝나면 자동으로 검사하고 추천본을 골라 드려요.`, { tone: "ok" });
 }
 
 function segmented<T extends string | number>(values: T[], current: T, label: (value: T) => string, onPick: (value: T) => void, tip?: (value: T) => string | undefined) {
@@ -518,7 +546,8 @@ function build(): void {
     startLyrics,
     startLyricsBox,
     lyricsField: h("div", { class: "lyrics-field" }),
-    lyricsInstrumental: h("div", { class: "instrumental-note" }, icon("note", 18), h("div", null, h("b", null, "연주곡이에요"), h("p", null, "가사 없이 [Instrumental]로 보내요. 노래를 넣으려면 위에서 ‘한국어’나 ‘영어’를 고르세요."))),
+    lyricsInstrumental: h("div", { class: "instrumental-note" }),
+    examples: h("div", { class: "examples" }),
     chips,
     voice: h("div", { class: "segmented", role: "group", "aria-label": "노래" }),
     instruments: h("div", { class: "chips", role: "group", "aria-label": "악기" }),
@@ -624,8 +653,7 @@ function build(): void {
           "div",
           { class: "card composer-card" },
           description,
-          h("div", { class: "examples" }, EXAMPLES.map((example) =>
-            h("button", { type: "button", class: "example", onClick: () => { description.value = example; patch({ description: example }); description.focus(); } }, example))),
+          r.examples,
           r.startLyricsBox,
           h("div", { class: "option" }, h("span", { class: "sublabel" }, "악기 ", h("em", null, "선택 · 고르지 않으면 장르에 맞게 정해요")), r.instruments),
           h(
@@ -657,6 +685,7 @@ function renderSendPreview(written: CreateDraft): void {
       "dl",
       { class: "facts" },
       h("dt", null, "제목"), h("dd", null, draft.title.trim() || (draft.description ? fallbackTitle(draft.description) : "—")),
+      preview.purpose && [h("dt", null, "용도"), h("dd", null, `${preview.purpose.label} · 끊김 없는 반복용도 함께 만들어요`)],
       h("dt", null, "길이"), h("dd", null, lengthLabel(draft.durationSeconds)),
       h("dt", null, "빠르기"), h("dd", null, preview.bpm ? `${preview.bpm} BPM` : "엔진에 맡기기"),
       h("dt", null, "조성"), h("dd", null, preview.keyScale || "엔진에 맡기기"),
@@ -665,7 +694,7 @@ function renderSendPreview(written: CreateDraft): void {
     ),
     h("details", { class: "disclosure" }, h("summary", null, "가사"), h("pre", { class: "lyrics-view" }, lines || "비어 있음")),
     preview.warnings.map((warning) => h("p", { class: "notice tone-warn" }, warning)),
-    draft.instrumental && (draft.productionRules?.ruleIds ?? []).some((id) => ["clear-vocal", "phrase-breathing"].includes(id)) && h("p", { class: "hint" }, "보컬과 가사 호흡 규칙은 연주곡에 보내지 않아요."),
+    draft.instrumental && (draft.productionRules?.ruleIds ?? []).some((id) => ["clear-vocal", "phrase-breathing", "expressive-performance"].includes(id)) && h("p", { class: "hint" }, "보컬·가사 호흡·보컬 감정 규칙은 연주곡에 보내지 않아요."),
   );
 }
 
@@ -678,14 +707,24 @@ export function syncCreate(): void {
   const catalog = state.productionCatalog;
 
   const voice = voiceOf(draft);
-  mount(refs.voice, segmented<Voice>(["ko", "en", "inst"], voice, (value) => ({ ko: "한국어", en: "영어", inst: "연주곡" })[value], (value) => {
-    if (value === voiceOf(get().create)) return;
-    if (value === "inst") patch({ instrumental: true });
-    else patch({ instrumental: false, vocalLanguage: value });
-    if (refs) refs.lyrics.value = refs.startLyrics.value = value === "inst" ? "" : get().create.lyrics;
+  mount(refs.voice, segmented<Voice>(["ko", "en", "inst", "bgm"], voice, (value) => VOICE_LABELS[value], (value) => {
+    const current = get().create;
+    if (value === voiceOf(current)) return;
+    if (value === "bgm") patch({ instrumental: true, purpose: "bgm", durationSeconds: current.durationSeconds < 60 ? BGM_DEFAULT_SECONDS : current.durationSeconds });
+    else if (value === "inst") patch({ instrumental: true, purpose: null });
+    else patch({ instrumental: false, purpose: null, vocalLanguage: value });
+    if (refs) refs.lyrics.value = refs.startLyrics.value = value === "inst" || value === "bgm" ? "" : get().create.lyrics;
     syncCreate();
-  }, (value) => value === "inst" ? "가사 없이 연주만" : "AI 초안의 가사 언어예요. 직접 쓴 가사는 그대로 둬요"));
-  mount(refs.durations, segmented(DURATIONS, draft.durationSeconds, (value) => (DURATIONS.includes(value) ? lengthLabel(value) : clock(value)), (value) => { patch({ durationSeconds: value }); syncCreate(); }));
+  }, (value) => VOICE_TIPS[value]));
+  const bgm = draft.purpose === "bgm";
+  const durations = bgm ? BGM_DURATIONS : DURATIONS;
+  mount(refs.durations, segmented(durations, draft.durationSeconds, (value) => (DURATIONS.includes(value) ? lengthLabel(value) : clock(value)), (value) => { patch({ durationSeconds: value }); syncCreate(); }));
+  refs.description.placeholder = bgm ? `예: ${BGM_EXAMPLES[0]}` : `예: ${EXAMPLES[0]}`;
+  mount(refs.examples, (bgm ? BGM_EXAMPLES : EXAMPLES).map((example) =>
+    h("button", { type: "button", class: "example", onClick: () => { if (!refs) return; refs.description.value = example; patch({ description: example }); refs.description.focus(); } }, example)));
+  mount(refs.lyricsInstrumental, icon(bgm ? "loop" : "note", 18), bgm
+    ? h("div", null, h("b", null, "BGM이에요"), h("p", null, "가사 없이 만들고, 끊김 없이 반복되는 파일을 함께 만들어요. 반복용은 킥 드럼의 마디에 맞춰 자르기 때문에 드럼이 없는 곡에는 생기지 않을 수 있어요."))
+    : h("div", null, h("b", null, "연주곡이에요"), h("p", null, "가사 없이 [Instrumental]로 보내요. 노래를 넣으려면 위에서 ‘한국어’나 ‘영어’를 고르세요.")));
   mount(refs.versions, segmented([1, 2, 3, 4], draft.versions, (value) => String(value), (value) => { patch({ versions: value }); syncCreate(); }));
 
   const visible = draftVisible(draft);
@@ -767,7 +806,7 @@ export function syncCreate(): void {
   const reason = blocker(draft);
   refs.createButton.disabled = Boolean(reason) || creating || planningSong;
   if (!refs.createButton.classList.contains("is-busy")) refs.createButton.textContent = `곡 만들기 · 버전 ${draft.versions}개`;
-  const facts = [lengthLabel(draft.durationSeconds), ({ ko: "한국어 노래", en: "영어 노래", inst: "연주곡" } as const)[voice], preview.preset?.label].filter(Boolean).join(" · ");
+  const facts = [lengthLabel(draft.durationSeconds), ({ ko: "한국어 노래", en: "영어 노래", inst: "연주곡", bgm: "BGM" } as const)[voice], preview.preset?.label].filter(Boolean).join(" · ");
   mount(
     refs.bar,
     h("b", null, draft.title.trim() || (draft.description.trim() ? fallbackTitle(draft.description) : "새 곡")),
@@ -796,6 +835,18 @@ export function demoDraft(description: string, lyrics: string | null, draft: boo
     syncCreate();
   }
   if (draft) void requestDraft();
+}
+
+// Screenshot fixture only (?demo=bgm): BGM picked, with the draft step open.
+export function demoBgm(description: string): void {
+  if (!refs) return;
+  refs.description.value = description;
+  patch({ description, instrumental: true, purpose: "bgm", durationSeconds: BGM_DEFAULT_SECONDS,
+    title: "늦은 밤 공부 BGM", stylePrompt: "emotional hip hop beat, warm electric piano chords, crisp boom bap drums" });
+  refs.title.value = get().create.title;
+  refs.style.value = get().create.stylePrompt;
+  draftOpen = true;
+  syncCreate();
 }
 
 export function resetCreateView(): void {

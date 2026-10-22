@@ -21,6 +21,7 @@ from .auto_quality import quality_policy
 from .jobs import frozen_batch_payloads, recover_project, resume_source
 from .lane import shared_lane
 from .listening import master_versions
+from .loops import loop_versions
 from .production_rules import catalog as production_catalog, normalize_selection
 from .song_planning import prepare_song_plan, validate_song_plan_input
 from .storage import ProjectStore
@@ -141,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--key")
     init.add_argument("--time-signature")
     init.add_argument("--production-rules-json", type=_parse_production_rules)
+    init.add_argument("--purpose", choices=["bgm"], help="bgm: an instrumental that also gets a seamless loop")
     rules = subparsers.add_parser("production-rules", help="list selectable production presets and guidance")
     rules.add_argument("--engine", choices=ENGINES, default=DEFAULT_ENGINE)
     subparsers.add_parser("capabilities", help="show the default engine's supported operations")
@@ -287,12 +289,18 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("path", type=Path)
     export.add_argument("--output", type=Path)
     export.add_argument("--candidate-id", help="export this explicit version without changing the human final selection")
-    export.add_argument("--unmastered", action="store_true",
-                        help="export the version as the engine made it instead of its mastered listening copy")
+    export_source = export.add_mutually_exclusive_group()
+    export_source.add_argument("--unmastered", action="store_true",
+                               help="export the version as the engine made it instead of its mastered listening copy")
+    export_source.add_argument("--loop", action="store_true", help="export the version's seamless loop")
 
     master = subparsers.add_parser("master", help="make the missing mastered listening copies of a song's versions")
     master.add_argument("path", type=Path)
     master.add_argument("--candidate-id", help="only this version")
+
+    loop = subparsers.add_parser("loop", help="cut the missing seamless loops of a song's BGM versions")
+    loop.add_argument("path", type=Path)
+    loop.add_argument("--candidate-id", help="only this version; any instrumental version may be named")
 
     inspect = subparsers.add_parser("inspect", help="summarize and verify a reopened project")
     inspect.add_argument("path", type=Path)
@@ -441,6 +449,7 @@ def run(args: argparse.Namespace) -> Any:
             key_scale=args.key,
             time_signature=args.time_signature,
             production_rules=args.production_rules_json,
+            purpose=args.purpose,
         )
         project = store.load()
         return {"projectId": project["projectId"], "path": str(store.root)}
@@ -572,9 +581,12 @@ def run(args: argparse.Namespace) -> Any:
             return {"models": []}
         return {"models": assistant.list_models(config)}
     if args.command == "export":
-        return export_selected(args.path, output=args.output, candidate_id=args.candidate_id, unmastered=args.unmastered)
+        return export_selected(args.path, output=args.output, candidate_id=args.candidate_id, unmastered=args.unmastered,
+                               loop=args.loop)
     if args.command == "master":
         return master_versions(args.path, candidate_id=args.candidate_id)
+    if args.command == "loop":
+        return loop_versions(args.path, candidate_id=args.candidate_id)
     if args.command == "inspect":
         store = ProjectStore(args.path)
         project = store.load()

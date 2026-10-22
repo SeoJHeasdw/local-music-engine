@@ -17,10 +17,12 @@ from .execution import execute_candidate
 from .jobs import (ACTIVE_STATUSES, cleanup_export_outputs, frozen_batch_payloads, recover_export_jobs, recover_jobs,
                    reusable_candidates, resume_source, validate_seed)
 from .listening import listening_copies
+from .loops import current_loop
 from .qc import artifact_and_findings, inspect_wav
 from .storage import ProjectStore, fingerprint, new_id, sha256_file, utc_now
 from .auto_quality import finish_single_edit, make_quality_plan, make_repair_seeds, run_quality_batch, validate_quality_plan
-from .production_rules import editable_style, freeze_guidance, guided_prompt, normalize_selection, normalize_time_signature
+from .production_rules import (VERSION as RULES_VERSION, editable_style, freeze_guidance, guided_prompt, normalize_purpose,
+                               normalize_selection, normalize_time_signature)
 from .song_planning import prepare_song_plan
 from .engines import (ACE_BASE_URL, ACE_DIT_MODEL, ACE_ENGINE, DEFAULT_ENGINE, ENGINES, MAX_DURATION_SECONDS, MUSIC3_ENGINE,
                       engine_endpoint)
@@ -129,14 +131,20 @@ def _frozen_generation_payload(
         raise ValueError("Music 3 duration must be between 10 and 300 seconds")
     base_style = style_prompt if style_prompt is not None else inputs["stylePrompt"]
     selection = inputs.get("productionRules")
+    purpose = normalize_purpose(inputs.get("purpose")) or ((production_rules_snapshot or {}).get("purpose") or {}).get("id")
+    if purpose is not None and engine == MUSIC3_ENGINE:
+        raise ValueError("BGM is made with the ACE engine only")
+    if purpose is not None and not is_instrumental_lyrics(inputs["lyricsNormalized"]):
+        raise ValueError("BGM has no lyrics; use [Instrumental]")
     snapshot = None
-    if selection is not None or production_rules_snapshot is not None:
+    if selection is not None or production_rules_snapshot is not None or purpose is not None:
+        empty = {"version": RULES_VERSION, "presetId": None, "ruleIds": []}
         snapshot = freeze_guidance(
-            selection or production_rules_snapshot["selection"], base_style=base_style,
+            selection or (production_rules_snapshot["selection"] if production_rules_snapshot else empty), base_style=base_style,
             duration_seconds=float(inputs["targetDurationSeconds"]),
             instrumental=is_instrumental_lyrics(inputs["lyricsNormalized"]),
             input_metas={source: inputs.get(source) for source, _ in _META_FIELDS},
-            previous_snapshot=production_rules_snapshot,
+            previous_snapshot=production_rules_snapshot, purpose=purpose,
         )
     payload: dict[str, Any] = {
         "prompt": guided_prompt(base_style, snapshot) if snapshot else base_style,
@@ -155,6 +163,9 @@ def _frozen_generation_payload(
         "task_type": task_type,
         "project_structure": inputs.get("structure"),
     }
+    if purpose is not None:
+        # Provenance for the steps after generation; _api_payload never sends it to ACE.
+        payload["purpose"] = purpose
     # Only present metas enter the payload so fingerprints of older projects stay stable.
     for source, target in _META_FIELDS:
         value = inputs.get(source)
@@ -277,6 +288,9 @@ def _revise_inputs(
 
     inputs = project["inputs"]
     # Validate controls before changing even the in-memory revision or project title.
+    purpose = inputs.get("purpose") or ((production_rules_snapshot or {}).get("purpose") or {}).get("id")
+    if purpose and lyrics is not None and not is_instrumental_lyrics(lyrics):
+        raise ValueError("BGM has no lyrics; use [Instrumental]")
     selection = (deepcopy(production_rules_snapshot["selection"]) if production_rules_snapshot is not None
                  else normalize_selection(production_rules) if production_rules is not None else inputs.get("productionRules"))
     if time_signature is not None:
@@ -610,6 +624,8 @@ def cover_candidates(
         source_inputs = {"stylePrompt": base,
                          "lyricsNormalized": (lyrics if lyrics is not None else original.get("songPlan", {}).get("lyricsOriginal", original["lyrics"])),
                          "targetDurationSeconds": duration, "structure": original.get("project_structure")}
+        if original.get("purpose"):
+            source_inputs["purpose"] = original["purpose"]
         for field, api_field in _META_FIELDS:
             source_inputs[field] = original.get(api_field)
         reference = {"candidateId": candidate_id, "artifactId": artifact["artifactId"],
@@ -715,6 +731,8 @@ def frozen_repaint(
         "lyricsNormalized": original.get("songPlan", {}).get("lyricsOriginal", original["lyrics"]),
         "targetDurationSeconds": duration, "structure": original.get("project_structure"),
     }
+    if original.get("purpose"):
+        source_inputs["purpose"] = original["purpose"]
     for field, api_field in _META_FIELDS:
         source_inputs[field] = source_rules.get("inputMetas", {}).get(field) if source_rules else original.get(api_field)
     if lyrics is not None:
@@ -959,9 +977,15 @@ def _copy_atomic(
 
 def export_selected(
     project_root: Path | str, *, output: Path | str | None = None, candidate_id: str | None = None,
-    unmastered: bool = False,
+    unmastered: bool = False, loop: bool = False,
 ) -> dict[str, Any]:
-    """Export what the listener heard: the version's mastered listening copy when it has one."""
+    """Export what the listener heard: the version's mastered listening copy when it has one.
+
+    ``loop`` exports the version's seamless loop instead, which is cut from that copy.
+    """
+
+    if loop and unmastered:
+        raise ValueError("a loop is cut from the mastered copy; it has no unmastered export")
 
     store = ProjectStore(project_root)
     with store.export_lock():
@@ -978,6 +1002,11 @@ def export_selected(
                 copy = None if unmastered else listening_copies(project).get(source_artifact["artifactId"])
                 if copy is not None and store.verify_artifact(copy)[0]:
                     source_artifact = copy
+                if loop:
+                    looped = current_loop(store, project, copy) if copy is not None else None
+                    if looped is None:
+                        raise ValueError("this version has no loop to export")
+                    source_artifact = looped
                 valid, reason = store.verify_artifact(source_artifact)
                 if not valid:
                     raise ValueError(reason)
@@ -993,15 +1022,15 @@ def export_selected(
                         raise ValueError("export output must be outside the project; omit --output for an internal export")
                     if requested.exists() or requested.is_symlink():
                         raise FileExistsError("export output already exists; choose a new filename")
-                job = store.append_job(
-                    project, kind="export",
-                    parameters={"candidateId": selected_id, "requestedOutput": str(output or ""),
-                                "sourceArtifactId": source_artifact["artifactId"]},
-                )
+                parameters = {"candidateId": selected_id, "requestedOutput": str(output or ""),
+                              "sourceArtifactId": source_artifact["artifactId"]}
+                if loop:
+                    parameters["variant"] = "loop"
+                job = store.append_job(project, kind="export", parameters=parameters)
                 job_id = job["jobId"]
                 job["ownedOutputs"] = []
                 store.transition_job(job, "running", stage="copying", progress=0.1)
-            internal = store.root / "exports" / f"{job_id}-{selected_id}.wav"
+            internal = store.root / "exports" / f"{job_id}-{selected_id}{'-loop' if loop else ''}.wav"
 
             def staged(destination: Path) -> Callable[[Path], None]:
                 def record(temporary: Path) -> None:
@@ -1043,7 +1072,8 @@ def export_selected(
                         project["revisions"][-1]["revisionId"] if project["revisions"] else None
                     ),
                     "before": {},
-                    "after": {"candidateId": selected_id, "exportArtifactId": artifact["artifactId"]},
+                    "after": {"candidateId": selected_id, "exportArtifactId": artifact["artifactId"],
+                              **({"variant": "loop"} if loop else {})},
                     "createdAt": utc_now(),
                 })
                 store.transition_job(job, "succeeded", stage="verified", progress=1.0)

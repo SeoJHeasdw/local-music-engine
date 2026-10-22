@@ -590,6 +590,14 @@ select.input { appearance: none; padding-right: 32px; background-image: linear-g
 .compare { display: flex; align-items: center; gap: var(--s2); margin-top: calc(var(--s2) * -1); }
 .compare:empty { display: none; }
 .compare select { max-width: 220px; }
+/* BGM 반복용: 파형 위 띠와 같은 색으로 한 줄 */
+.loop-bar { display: flex; align-items: center; gap: var(--s2); color: var(--text-2); font-size: 13px; }
+.loop-bar:empty { display: none; }
+.loop-bar > svg { color: var(--accent); flex: none; }
+.loop-bar b { color: var(--text); font-weight: 600; }
+.loop-bar .button { margin-left: auto; }
+.loop-check { margin-bottom: var(--s3); }
+.loop-check .button { align-self: flex-start; }
 
 /* 버전 */
 .versions-card { display: flex; flex-direction: column; gap: var(--s3); padding: var(--s4) var(--s4) var(--s3); }

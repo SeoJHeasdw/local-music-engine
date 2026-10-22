@@ -10,6 +10,10 @@ const pathByToken = new Map<string, string>();
 const peaksCache = new Map<string, { size: number; mtimeMs: number; peaks: number[] }>();
 
 export const ARTIFACT_SCHEME = "music-artifact";
+// The seamless loop preview reads a file with fetch() for Web Audio, which needs CORS from the
+// file:// page. Tokens are 192-bit random names for verified files, the window cannot navigate
+// or open others, and no other page can reach the scheme, so any origin may read a token.
+const CORS = { "Access-Control-Allow-Origin": "*" };
 
 export function audioUrlFor(filePath: string): string {
   let token = tokenByPath.get(filePath);
@@ -24,14 +28,15 @@ export function audioUrlFor(filePath: string): string {
 export async function handleArtifactRequest(request: Request): Promise<Response> {
   const token = new URL(request.url).pathname.replace(/^\//, "");
   const filePath = pathByToken.get(token);
-  if (!filePath) return new Response("Not found", { status: 404 });
+  if (!filePath) return new Response("Not found", { status: 404, headers: CORS });
   let size: number;
   try {
     size = (await stat(filePath)).size;
   } catch {
-    return new Response("Not found", { status: 404 });
+    return new Response("Not found", { status: 404, headers: CORS });
   }
   const headers = {
+    ...CORS,
     "Accept-Ranges": "bytes",
     "Content-Type": "audio/wav",
     "Cache-Control": "no-store",
@@ -52,7 +57,7 @@ export async function handleArtifactRequest(request: Request): Promise<Response>
     end = match[2] ? Math.min(size - 1, Number.parseInt(match[2], 10)) : size - 1;
   }
   if (start >= size || end < start) {
-    return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${size}` } });
+    return new Response(null, { status: 416, headers: { ...CORS, "Content-Range": `bytes */${size}` } });
   }
   const body = Readable.toWeb(createReadStream(filePath, { start, end })) as ReadableStream<Uint8Array>;
   return new Response(body, {

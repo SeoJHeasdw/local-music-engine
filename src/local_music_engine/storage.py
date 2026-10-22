@@ -18,7 +18,7 @@ from typing import Any
 
 from .lane import shared_lane
 from .models import validate_job_transition
-from .production_rules import draft_guidance, guided_prompt, normalize_selection, normalize_time_signature
+from .production_rules import draft_guidance, guided_prompt, normalize_purpose, normalize_selection, normalize_time_signature
 from .lyrics import is_instrumental_lyrics
 
 SCHEMA_VERSION = 1
@@ -119,6 +119,7 @@ class ProjectStore:
         key_scale: str | None = None,
         time_signature: str | int | None = None,
         production_rules: dict[str, Any] | None = None,
+        purpose: str | None = None,
     ) -> "ProjectStore":
         store = cls(root)
         if not math.isfinite(target_duration_seconds) or not 10 <= target_duration_seconds <= 600:
@@ -129,6 +130,9 @@ class ProjectStore:
             raise ValueError("style prompt must not be empty without production guidance")
         if not lyrics.strip():
             raise ValueError("lyrics must not be empty; use [Instrumental] for no vocals")
+        purpose = normalize_purpose(purpose)
+        if purpose == "bgm" and not is_instrumental_lyrics(lyrics):
+            raise ValueError("BGM has no lyrics; use [Instrumental]")
         if bpm is not None and (type(bpm) is not int or bpm != 0 and not 30 <= bpm <= 300):
             raise ValueError("bpm must be between 30 and 300")
         meter = normalize_time_signature(time_signature)
@@ -157,6 +161,8 @@ class ProjectStore:
         }
         if selection is not None:
             project["inputs"]["productionRules"] = selection
+        if purpose is not None:
+            project["inputs"]["purpose"] = purpose
         for key, value in (("bpm", bpm or None), ("keyScale", key_scale.strip() if key_scale else None), ("timeSignature", meter)):
             if value is not None:
                 project["inputs"][key] = value

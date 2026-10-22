@@ -100,7 +100,7 @@ def ensure_listening_copy(store: ProjectStore, candidate_id: str, *, parent_job_
             store.transition_job(current, "succeeded", stage="mastered", progress=1)
         cleanup_export_outputs(current, include_published=False)
         for old in retired:
-            _remove_retired(store, old)
+            remove_retired(store, old)
         return artifact["artifactId"]
     except (Exception, KeyboardInterrupt) as error:
         try:
@@ -115,7 +115,7 @@ def ensure_listening_copy(store: ProjectStore, candidate_id: str, *, parent_job_
         raise
 
 
-def _remove_retired(store: ProjectStore, artifact: dict[str, Any]) -> None:
+def remove_retired(store: ProjectStore, artifact: dict[str, Any]) -> None:
     """Delete a retired copy's file only while it is still exactly the file that was recorded."""
 
     try:
@@ -126,7 +126,7 @@ def _remove_retired(store: ProjectStore, artifact: dict[str, Any]) -> None:
         pass  # A file that was moved or changed is left alone.
 
 
-def _played_versions(project: dict[str, Any]) -> list[str]:
+def played_versions(project: dict[str, Any]) -> list[str]:
     """Every version the app can play, except a take that a finished copy replaced."""
 
     requests = {request["requestId"]: request for request in project["requests"]}
@@ -142,7 +142,7 @@ def master_versions(project_root: Path | str, *, candidate_id: str | None = None
     with store.generation_lock(lane=False):
         with store.transaction() as project:
             recover_jobs(store, project)
-        targets = [candidate_id] if candidate_id else _played_versions(project)
+        targets = [candidate_id] if candidate_id else played_versions(project)
         made, failed = {}, {}
         for target in targets:
             try:
