@@ -158,11 +158,33 @@ RULES: tuple[dict[str, Any], ...] = (
 )
 
 
+# What a song is for, when that changes how it is made. A BGM version is an instrumental
+# whose caption asks for a bed that never drops out, and it also gets a loop cut on its
+# bars (see :mod:`.loops`). The purpose is frozen per request, not chosen per rule.
+PURPOSES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "bgm", "label": "BGM",
+        "description": "가사 없이 만들고, 끊김 없이 반복되는 파일을 함께 만들어요.",
+        "caption": "instrumental background music, no vocals, steady groove and chords from the first bar to the last, no drum fills or stops, unobtrusive lead melody",
+    },
+)
+
+
+def normalize_purpose(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in {purpose["id"] for purpose in PURPOSES}:
+        raise ValueError("unknown song purpose")
+    return value
+
+
 def catalog(*, engine: str = DEFAULT_ENGINE) -> dict[str, Any]:
     if engine not in ENGINES:
         raise ValueError("unknown music engine")
     result = {"version": VERSION, "presets": deepcopy(list(PRESETS)), "rules": deepcopy(list(RULES)),
               "captionBudgetCharacters": 16000 if engine == MUSIC3_ENGINE else 650}
+    if engine != MUSIC3_ENGINE:
+        result["purposes"] = deepcopy(list(PURPOSES))
     if engine == MUSIC3_ENGINE:
         # This is the managed API's final prompt bound, not a tokenizer estimate.
         # Captions, structural instructions and headings all share that bound.
@@ -209,7 +231,7 @@ def normalize_time_signature(value: Any) -> str | None:
 def freeze_guidance(
     selection: dict[str, Any], *, base_style: str, duration_seconds: float,
     instrumental: bool, input_metas: dict[str, Any] | None = None,
-    previous_snapshot: dict[str, Any] | None = None,
+    previous_snapshot: dict[str, Any] | None = None, purpose: str | None = None,
 ) -> dict[str, Any]:
     """Snapshot texts so a later catalog edit cannot alter source-version requests."""
 
@@ -217,10 +239,14 @@ def freeze_guidance(
         selection = normalize_selection(selection)
         preset = next((deepcopy(p) for p in PRESETS if p["id"] == selection["presetId"]), None)
         rules = [deepcopy(rule) for rule in RULES if rule["id"] in selection["ruleIds"]]
+        purpose_entry = next(({"id": p["id"], "caption": p["caption"]} for p in PURPOSES if p["id"] == normalize_purpose(purpose)), None)
     else:
         selection = deepcopy(previous_snapshot["selection"])
         preset = deepcopy(previous_snapshot["preset"])
         rules = deepcopy(previous_snapshot["rules"])
+        purpose_entry = deepcopy(previous_snapshot.get("purpose"))
+        if purpose_entry is None and purpose is not None:
+            purpose_entry = next({"id": p["id"], "caption": p["caption"]} for p in PURPOSES if p["id"] == normalize_purpose(purpose))
     captions = [preset["caption"]] if preset else []
     applied_ids: list[str] = []
     skipped_ids: list[str] = []
@@ -235,20 +261,27 @@ def freeze_guidance(
             caption = rule.get("shortInstrumentalCaption" if instrumental else "shortCaption", caption)
         captions.append(caption)
         applied_ids.append(rule["id"])
-    return {
+    snapshot = {
         "version": previous_snapshot["version"] if previous_snapshot else VERSION,
         "selection": selection, "baseStylePrompt": base_style,
         "preset": preset, "rules": rules, "appliedCaptions": captions,
         "appliedRuleIds": applied_ids, "skippedRuleIds": skipped_ids,
         "inputMetas": deepcopy(input_metas or {}),
     }
+    # Only a song with a purpose carries the key, so older snapshots keep their shape.
+    if purpose_entry is not None:
+        snapshot["purpose"] = purpose_entry
+    return snapshot
 
 
 def guided_prompt(base_style: str, snapshot: dict[str, Any]) -> str:
     # Feedback may carry an effective caption. Avoid repeating exact guidance;
-    # leave manually entered musical descriptions intact.
+    # leave manually entered musical descriptions intact. A purpose leads the prompt:
+    # the BGM song that was heard had those words before its genre and instruments.
+    purpose = (snapshot.get("purpose") or {}).get("caption")
+    lead = [purpose] if purpose and purpose.casefold() not in base_style.casefold() else []
     additions = [part for part in snapshot["appliedCaptions"] if part.casefold() not in base_style.casefold()]
-    return ", ".join(part for part in [base_style, *additions] if part)
+    return ", ".join(part for part in [*lead, base_style, *additions] if part)
 
 
 def draft_guidance(selection: dict[str, Any] | None, *, duration_seconds: float, instrumental: bool) -> dict[str, Any] | None:

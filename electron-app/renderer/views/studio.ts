@@ -1,4 +1,4 @@
-import type { Finding, Plan, ReviewStatus, Song, Strength, Version } from "../../shared.ts";
+import type { ExportVariant, Finding, Plan, ReviewStatus, Song, Strength, Version, VersionLoop } from "../../shared.ts";
 import { activeVersion, api, applySongForContext, engineUsable, go, refreshSong, songBusy } from "../actions.ts";
 import { byId, h, icon, mount, type Child } from "../dom.ts";
 import {
@@ -21,7 +21,8 @@ import {
 import { Player } from "../player.ts";
 import { get, isPlanTicket, isSongTicket, planTicket, set, songTicket, type InspectorTab, type State } from "../store.ts";
 import { confirmDialog, errorText, menu, toast, withBusy } from "../ui.ts";
-import { audioQualityText, checkCount, editSpliceText, isAutomaticAttempt, listeningPoints, lyricQualityText, processingText, qualityLabel, remainingProblems, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText } from "../quality.ts";
+import { audioQualityText, checkCount, editSpliceText, isAutomaticAttempt, listeningPoints, loopReportLines, loopSummaryText, lyricQualityText, processingText, qualityLabel, remainingProblems, rhythmDiagnosticChecks, rhythmMeterText, rhythmQualityText } from "../quality.ts";
+import { LoopPreview } from "../loop-preview.ts";
 import { songPlanView } from "../song-plan-view.ts";
 import { comparisonChoices, comparisonVersion } from "../comparison.ts";
 import { INSTRUMENTS, applyInstrumentChanges, hasInstrument } from "../instruments.ts";
@@ -42,6 +43,7 @@ type Els = {
   zoom: HTMLElement;
   overview: HTMLCanvasElement;
   compare: HTMLElement;
+  loopBar: HTMLElement;
   versions: HTMLElement;
   tabs: HTMLElement;
   info: HTMLElement;
@@ -61,6 +63,10 @@ type Els = {
 
 let els: Els | null = null;
 let player: Player | null = null;
+// The BGM loop plays through Web Audio so its wrap has no gap; the waveform player pauses meanwhile.
+const loopPreview = new LoopPreview();
+let loopBarVersion: Version | null = null;
+loopPreview.onChange = () => { if (loopBarVersion) renderLoopBar(loopBarVersion); };
 let treeCache: { song: Song; tree: ReturnType<typeof versionTree> } | null = null;
 let showAllChips = false;
 // Lyrics being rewritten in the 가사 tab. Kept per version so switching tabs keeps the text.
@@ -194,6 +200,7 @@ function build(): void {
     zoom: h("div", { class: "zoom", role: "group", "aria-label": "파형 확대" }),
     overview: h("canvas", { class: "wave-overview", "aria-label": "곡 전체. 끌어서 확대한 부분을 옮겨요." }),
     compare: h("div", { class: "compare" }),
+    loopBar: h("div", { class: "loop-bar" }),
     versions: h("section", { class: "card versions-card", "aria-label": "버전" }),
     tabs: h("div", { class: "tabs", role: "tablist" }),
     info: h("div", { class: "info-panel", role: "tabpanel" }),
@@ -247,6 +254,7 @@ function build(): void {
             refs.overview,
             h("div", { class: "player-foot" }, refs.selectionBar, refs.zoom),
             refs.compare,
+            refs.loopBar,
           ),
           refs.versions,
           h("section", { class: "card info-card", "aria-label": "이 버전 정보" }, refs.tabs, refs.info),
@@ -271,6 +279,7 @@ function build(): void {
 
   player = new Player(canvas);
   player.audio.volume = Number(localStorageGet("volume", "0.9"));
+  player.audio.addEventListener("play", () => loopPreview.stop());
   player.onTick = () => {
     if (!player || !els) return;
     els.now.textContent = clock(player.time, true);
@@ -363,20 +372,38 @@ function renderHead(song: Song): void {
         song.canUndoFinal && { label: "최종본 지정 되돌리기", icon: "undo", disabled: busy, run: () => void undoFinal(song) },
         { label: "Finder에서 곡 폴더 보기", icon: "folder", run: () => reveal({ kind: "song", songId: song.songId }) },
       ]),
-      h(
-        "button",
-        {
-          type: "button",
-          class: "button primary",
-          disabled: !exporting || busy,
-          "data-tip": exporting ? `${exporting.name}${final ? " (최종본)" : " (자동 추천)"}을 WAV로 저장해요` : "버전이 준비되면 WAV로 저장할 수 있어요",
-          onClick: (event: Event) => void exportFinal(event.currentTarget as HTMLButtonElement, song.songId),
-        },
-        icon("export", 16),
-        "WAV 내보내기",
-      ),
+      exporting && (song.inputs.purpose === "bgm" || exporting.version.loop?.status === "ready")
+        ? exportMenu(song, exporting.version, exporting.name, Boolean(final), busy)
+        : h(
+          "button",
+          {
+            type: "button",
+            class: "button primary",
+            disabled: !exporting || busy,
+            "data-tip": exporting ? `${exporting.name}${final ? " (최종본)" : " (자동 추천)"}을 WAV로 저장해요` : "버전이 준비되면 WAV로 저장할 수 있어요",
+            onClick: (event: Event) => void exportFinal(event.currentTarget as HTMLButtonElement, song.songId),
+          },
+          icon("export", 16),
+          "WAV 내보내기",
+        ),
     ),
   );
+}
+
+// A BGM song exports either the whole song or its seamless loop.
+function exportMenu(song: Song, version: Version, name: string, final: boolean, busy: boolean): HTMLElement {
+  const loop = version.loop;
+  const trigger = menu({ label: "WAV 내보내기", icon: "export", className: "button primary", tip: `${name}${final ? " (최종본)" : " (자동 추천)"}을 WAV로 저장해요` }, [
+    { label: "곡 전체", icon: "export", disabled: busy, tip: "처음부터 끝까지, 듣는 그대로 저장해요", run: () => void exportFinal(trigger.querySelector("summary") as HTMLElement, song.songId, "song") },
+    {
+      label: loop?.status === "ready" ? `반복용 (${loopSummaryText(loop)?.replace("반복용 ", "")})` : "반복용",
+      icon: "loop",
+      disabled: busy || loop?.status !== "ready",
+      tip: loop?.status === "ready" ? "끝이 처음으로 끊김 없이 이어지는 파일이에요. 반복 재생하면 돼요" : loop?.reason ?? "이 버전에는 반복용이 없어요",
+      run: () => void exportFinal(trigger.querySelector("summary") as HTMLElement, song.songId, "loop"),
+    },
+  ]);
+  return trigger;
 }
 
 function renderBanner(state: State, song: Song): void {
@@ -476,9 +503,13 @@ function renderPlayer(state: State, song: Song): void {
     mount(els.nowPlaying, h("b", { class: "np-title" }, making ? "첫 버전을 만드는 중이에요" : "아직 버전이 없어요"),
       h("span", { class: "np-sub" }, making ? "끝나는 대로 여기서 바로 들을 수 있어요" : "아래 ‘더 만들기’로 버전을 만들어 보세요"));
     player.unavailable = making ? "버전이 끝나는 대로 여기서 들을 수 있어요" : "아직 들을 버전이 없어요";
+    player.loopSpan = null;
     void player.load(null);
     els.selectionBar.replaceChildren();
     els.compare.replaceChildren();
+    loopPreview.stop();
+    loopBarVersion = null;
+    els.loopBar.replaceChildren();
     return;
   }
   const version = current.version;
@@ -507,6 +538,9 @@ function renderPlayer(state: State, song: Song): void {
   );
   const source = listeningComparison ? compare!.version : version;
   player.editRange = version.editRange;
+  const loop = !listeningComparison && version.loop?.status === "ready" ? version.loop : null;
+  player.loopSpan = loop ? { startSeconds: loop.startSeconds, endSeconds: loop.endSeconds, label: `반복 구간 · ${loopSummaryText(loop)?.replace("반복용 ", "")}` } : null;
+  renderLoopBar(version);
   player.overlay = listeningComparison ? `비교 중: ${compare!.name}` : null;
   player.unavailable = source.fileOk ? null : "이 버전의 음원 파일을 쓸 수 없어요";
   player.selection = state.selection;
@@ -514,6 +548,75 @@ function renderPlayer(state: State, song: Song): void {
   void player.load({ key: source.id, url: source.audioUrl, peaks: source.waveform, duration: source.durationSeconds });
   renderSelectionBar(state);
   renderCompare(state, song, version, current);
+}
+
+// Under the waveform of a BGM version: where its loop is and a seamless listen, or why it has none.
+function renderLoopBar(version: Version): void {
+  if (!els) return;
+  loopBarVersion = version;
+  const loop = version.loop;
+  const url = loop?.status === "ready" ? loop.audioUrl : null;
+  if (loopPreview.playingUrl && loopPreview.playingUrl !== url) loopPreview.stop();
+  if (!loop) {
+    els.loopBar.replaceChildren();
+    return;
+  }
+  if (loop.status !== "ready") {
+    mount(els.loopBar, icon("loop", 15), h("span", { class: "hint" }, `반복용 없음 · ${loop.reason}`));
+    return;
+  }
+  const playing = loopPreview.playingUrl === loop.audioUrl;
+  mount(
+    els.loopBar,
+    icon("loop", 15),
+    h("span", null, h("b", null, loopSummaryText(loop)), ` · ${clock(loop.startSeconds)}–${clock(loop.endSeconds)}`),
+    h("button", {
+      type: "button",
+      class: `button ${playing ? "secondary" : "ghost"} small`,
+      "aria-pressed": playing ? "true" : "false",
+      "data-tip": "반복용을 이음새 6초 앞부터 끊김 없이 계속 돌려요",
+      onClick: () => void toggleLoopPreview(loop),
+    }, icon(playing ? "pause" : "play", 14), playing ? "멈추기" : "이음새 반복 듣기"),
+  );
+}
+
+async function toggleLoopPreview(loop: Extract<VersionLoop, { status: "ready" }>): Promise<void> {
+  if (loopPreview.playingUrl === loop.audioUrl) {
+    loopPreview.stop();
+    return;
+  }
+  player?.audio.pause();
+  try {
+    await loopPreview.start(loop.audioUrl, loop.sampleRate);
+  } catch (error) {
+    toast(errorText(error), { tone: "error" });
+  }
+}
+
+export function stopLoopPreview(): void {
+  loopPreview.stop();
+}
+
+// Screenshot fixture only (?demo=loop-check): read and decode the loop the way the preview
+// does (fetch through the audio scheme, then Web Audio), without playing it.
+export async function demoLoopCheck(): Promise<void> {
+  const loop = activeVersion()?.loop;
+  if (loop?.status !== "ready") {
+    toast("이 버전에는 반복용이 없어요.", { tone: "error" });
+    return;
+  }
+  try {
+    const response = await fetch(loop.audioUrl);
+    const context = new AudioContext({ sampleRate: loop.sampleRate });
+    const buffer = await context.decodeAudioData(await response.arrayBuffer());
+    await context.close();
+    const message = `반복용을 읽었어요: ${buffer.duration.toFixed(3)}초 · ${buffer.sampleRate} Hz · ${buffer.numberOfChannels}채널`;
+    console.info(`[loop-check] ${message}`);
+    toast(message, { tone: "ok" });
+  } catch (error) {
+    console.info(`[loop-check] 반복용을 읽지 못했어요: ${errorText(error)}`);
+    toast(`반복용을 읽지 못했어요: ${errorText(error)}`, { tone: "error" });
+  }
 }
 
 function renderCompare(state: State, song: Song, version: Version, current: VersionNode): void {
@@ -692,6 +795,7 @@ function versionRow(song: Song, item: VersionNode, state: State, busy: boolean):
       h("small", null,
         version.fileOk ? (version.editRange && !version.quality?.repair ? `${rangeLabel(version.editRange)} 수정` : lengthLabel(version.durationSeconds)) : "파일 없음",
         quality ? ` · ${quality.label}` : "",
+        !automatic && version.loop ? h("span", { "data-tip": version.loop.status === "ready" ? undefined : version.loop.reason }, ` · ${loopSummaryText(version.loop)}`) : "",
       ),
     ),
     h(
@@ -1095,8 +1199,15 @@ function qualityReport(version: Version): Child {
 
 function checksPanel(song: Song, version: Version): Child {
   const exports = song.exports.filter((item) => item.candidateId === version.id);
+  const loopLines = loopReportLines(version.loop);
   return [
     qualityReport(version),
+    loopLines.length > 0 && h("div", { class: "check loop-check" },
+      h("span", { class: "sublabel" }, "반복용"),
+      loopLines.map((line) => h("p", { class: line.tone === "warning" ? "notice tone-warn" : "" }, line.text)),
+      version.loop?.status === "ready" && version.loop.warnings.length > 0
+        && h("button", { type: "button", class: "button ghost small", onClick: () => { const loop = version.loop; if (loop?.status === "ready") void toggleLoopPreview(loop); } }, icon("play", 14), "이음새 반복 듣기"),
+    ),
     h(
       "div",
       { class: `file-state ${version.fileOk ? "tone-ok" : "tone-danger"}` },
@@ -1111,7 +1222,7 @@ function checksPanel(song: Song, version: Version): Child {
           h("span", { class: "sublabel" }, "내보낸 파일"),
           exports.map((item) =>
             h("div", { class: "export-row" },
-              h("span", null, relativeTime(item.createdAt), item.externalPath ? ` · ${item.externalPath.split("/").pop()}` : ""),
+              h("span", null, relativeTime(item.createdAt), item.variant === "loop" ? " · 반복용" : "", item.externalPath ? ` · ${item.externalPath.split("/").pop()}` : ""),
               h("button", { type: "button", class: "button ghost small", disabled: !(item.externalExists || item.exists), onClick: () => reveal({ kind: "export", artifactId: item.artifactId }) }, icon("folder", 14), "보기"),
             )),
         )
@@ -1527,7 +1638,8 @@ function openRegenerateSong(song: Song, version: Version, sourceName: string): v
     h("h2", { class: "dialog-title" }, "가사·편곡으로 새로 만들기"),
     h("p", { class: "dialog-text" }, `「${sourceName}」의 가사와 편곡으로 새 전체 곡을 만들어요. 선율과 목소리는 달라질 수 있고, 원본은 그대로 남아요.`),
     h("label", { class: "field" }, h("span", { class: "label" }, "스타일"), style),
-    h("label", { class: "field" }, h("span", { class: "label" }, "가사"), lyrics),
+    // A BGM song has no lyrics; its new versions are BGM too and get their own loop.
+    version.purpose === "bgm" ? h("p", { class: "hint" }, "BGM이라 가사 없이 만들고, 새 버전도 반복용을 함께 잘라요.") : h("label", { class: "field" }, h("span", { class: "label" }, "가사"), lyrics),
     h("label", { class: "field" }, h("span", { class: "label" }, "만들 버전"), versions),
     h("div", { class: "dialog-actions" }, h("button", { type: "submit", value: "cancel", class: "button ghost" }, "취소"), button),
   ));
@@ -1536,10 +1648,10 @@ function openRegenerateSong(song: Song, version: Version, sourceName: string): v
   dialog.showModal();
 }
 
-async function exportFinal(button: HTMLButtonElement, songId: string): Promise<void> {
+async function exportFinal(button: HTMLElement, songId: string, variant: ExportVariant = "song"): Promise<void> {
   const ticket = songTicket(songId);
   if (!ticket) return;
-  const result = await withBusy(button, "내보내는 중", () => api.exportFinal(songId));
+  const result = await withBusy(button as HTMLButtonElement, "내보내는 중", () => api.exportFinal(songId, variant));
   if (!result || !applySongForContext(result.state, ticket)) return;
   const artifact = result.state.song?.exports.at(-1);
   toast(`WAV로 내보냈어요: ${result.path.split("/").pop()}`, {
@@ -1555,7 +1667,8 @@ function openSongSettings(song: Song): void {
   const title = h("input", { class: "input", value: song.title, maxlength: 100 });
   const style = h("textarea", { class: "input mono-input", rows: 3, value: song.inputs.stylePrompt, maxlength: 1500 });
   const lyrics = h("textarea", { class: "input lyrics-input", rows: 10, value: song.inputs.lyrics, maxlength: 4096 });
-  const duration = h("input", { class: "input", type: "number", min: "10", max: "300", step: "5", value: String(Math.round(song.inputs.durationSeconds)) });
+  const bgm = song.inputs.purpose === "bgm";
+  const duration = h("input", { class: "input", type: "number", min: bgm ? "60" : "10", max: "300", step: "5", value: String(Math.round(song.inputs.durationSeconds)) });
   const bpm = h("input", { class: "input", type: "number", min: "30", max: "300", placeholder: "엔진에 맡기기", value: song.inputs.bpm ? String(song.inputs.bpm) : "" });
   const dialog = h(
     "dialog",
@@ -1567,7 +1680,7 @@ function openSongSettings(song: Song): void {
       h("p", { class: "dialog-text" }, "다음에 만드는 버전부터 적용돼요. 이미 만든 버전과 기록은 그대로 남아요."),
       h("label", { class: "field" }, h("span", { class: "label" }, "제목"), title),
       h("label", { class: "field" }, h("span", { class: "label" }, "스타일"), style),
-      h("label", { class: "field" }, h("span", { class: "label" }, "가사"), lyrics),
+      bgm ? h("p", { class: "hint" }, "BGM이라 가사 없이 만들어요. 반복용을 자르려면 1분 이상이어야 해요.") : h("label", { class: "field" }, h("span", { class: "label" }, "가사"), lyrics),
       h("div", { class: "field-row" }, h("label", { class: "field" }, h("span", { class: "label" }, "길이 (초)"), duration), h("label", { class: "field" }, h("span", { class: "label" }, "빠르기 (BPM)"), bpm)),
       h(
         "div",
@@ -1588,12 +1701,13 @@ function openSongSettings(song: Song): void {
       return;
     }
     try {
+      if (bgm && !(Number(duration.value) >= 60)) throw new Error("BGM은 1분 이상으로 만들어 주세요.");
       const bpmValue = bpm.value.trim() ? Number.parseInt(bpm.value, 10) : null;
       let next = await api.revise({
         songId: song.songId,
         title: title.value,
         stylePrompt: style.value,
-        lyrics: lyrics.value,
+        ...(bgm ? {} : { lyrics: lyrics.value }),
         durationSeconds: Number(duration.value),
         bpm: bpmValue,
       });

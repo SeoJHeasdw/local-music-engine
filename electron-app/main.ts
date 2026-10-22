@@ -10,7 +10,7 @@ import { MIN_HEIGHT, MIN_WIDTH, windowBounds, type WindowState } from "./main/wi
 protocol.registerSchemesAsPrivileged([
   {
     scheme: ARTIFACT_SCHEME,
-    privileges: { secure: true, standard: true, stream: true, supportFetchAPI: true },
+    privileges: { secure: true, standard: true, stream: true, supportFetchAPI: true, corsEnabled: true },
   },
 ]);
 

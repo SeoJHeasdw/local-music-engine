@@ -22,7 +22,7 @@ import type {
 } from "../shared.ts";
 import { runCli } from "./cli.ts";
 import { EngineManager } from "./engine.ts";
-import { aceGenerationArgs, aceRepaintArgs, requirePlanAction } from "./generation-arguments.ts";
+import { aceGenerationArgs, aceRepaintArgs, parseExportVariant, parseSongPurpose, requireBgmInput, requirePlanAction } from "./generation-arguments.ts";
 import { requireLoopbackUrl } from "./files.ts";
 import { engineRoot } from "./paths.ts";
 import { currentSettings, loadAppState, loadSettings, saveSettings, updateAppState } from "./settings.ts";
@@ -264,6 +264,8 @@ export class Controller {
       if (!Number.isFinite(duration) || duration < 10 || duration > 300) throw new Error("곡 길이는 10초에서 5분 사이여야 해요.");
       if (!Number.isInteger(versions) || versions < 1 || versions > 4) throw new Error("버전은 1~4개까지 만들 수 있어요.");
       if (input.bpm !== null && input.bpm !== undefined && (!Number.isInteger(input.bpm) || input.bpm < 30 || input.bpm > 300)) throw new Error("빠르기는 30~300 사이의 정수로 적어 주세요.");
+      const purpose = parseSongPurpose(input?.purpose);
+      requireBgmInput(purpose, lyrics, duration);
       const opening = this.session.beginOpen();
       try {
         await this.requireEngine();
@@ -274,6 +276,7 @@ export class Controller {
         if (input.bpm && Number.isInteger(input.bpm)) args.push("--bpm", String(input.bpm));
         if (input.keyScale?.trim()) args.push("--key", input.keyScale.trim().slice(0, 40));
         if (input.timeSignature?.trim()) args.push("--time-signature", input.timeSignature.trim().slice(0, 10));
+        if (purpose) args.push("--purpose", purpose);
         await runCli(args);
         await this.open(async () => folder, opening);
         return this.startTask({
@@ -321,7 +324,8 @@ export class Controller {
       void this.pushSongs();
       return this.songState(folder);
     });
-    handle("export-final", async (songId: unknown) => {
+    handle("export-final", async (songId: unknown, variantInput: unknown) => {
+      const variant = parseExportVariant(variantInput);
       const context = this.session.require(songId);
       const { folder } = context;
       this.requireIdle(folder);
@@ -329,21 +333,24 @@ export class Controller {
       this.session.assert(context);
       const sourceId = state.song?.finalVersionId ?? state.song?.recommendedVersionId;
       if (!sourceId || !state.song) throw new Error("내보낼 버전이 아직 없어요. 곡 만들기가 끝나면 추천본을 저장할 수 있어요.");
+      if (variant === "loop" && state.song.versions.find((version) => version.id === sourceId)?.loop?.status !== "ready") {
+        throw new Error("이 버전에는 반복용이 없어요.");
+      }
       const settings = currentSettings();
       const directory = settings.lastExportDir ?? app.getPath("music");
       const safeTitle = state.song.title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "").trim() || "song";
       const window = this.window();
       if (!window) return null;
       const result = await dialog.showSaveDialog(window, {
-        title: "최종본 WAV로 내보내기",
-        defaultPath: path.join(directory, `${safeTitle}.wav`),
+        title: variant === "loop" ? "반복용 WAV로 내보내기" : "최종본 WAV로 내보내기",
+        defaultPath: path.join(directory, variant === "loop" ? `${safeTitle} (반복용).wav` : `${safeTitle}.wav`),
         filters: [{ name: "WAV 오디오", extensions: ["wav"] }],
       });
       if (result.canceled || !result.filePath) return null;
       this.session.assert(context);
       this.requireIdle(folder);
       const output = result.filePath.toLowerCase().endsWith(".wav") ? result.filePath : `${result.filePath}.wav`;
-      await runCli(["export", folder, "--candidate-id", sourceId, "--output", output]);
+      await runCli(["export", folder, "--candidate-id", sourceId, "--output", output, ...(variant === "loop" ? ["--loop"] : [])]);
       await saveSettings({ lastExportDir: path.dirname(output) });
       void this.pushSongs();
       return { state: await this.songState(folder), path: output };

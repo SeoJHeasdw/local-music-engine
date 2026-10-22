@@ -43,6 +43,8 @@ export class Player {
   private playWhenReady = false;
   selection: TimeRange | null = null;
   editRange: TimeRange | null = null;
+  // The stretch a BGM version's seamless loop is cut from, marked along the top edge.
+  loopSpan: (TimeRange & { label: string }) | null = null;
   loop = false;
   overlay: string | null = null;
   unavailable: string | null = null;
@@ -478,6 +480,20 @@ export class Player {
 
     ctx.fillStyle = p.line;
     ctx.fillRect(0, Math.round(middle), width, Math.max(1, Math.round(ratio)));
+
+    if (this.loopSpan && length) {
+      const x0 = toX(this.loopSpan.startSeconds);
+      const x1 = toX(this.loopSpan.endSeconds);
+      ctx.fillStyle = p.accent;
+      ctx.fillRect(x0, 3 * ratio, x1 - x0, 2 * ratio);
+      ctx.fillRect(x0, 3 * ratio, 2 * ratio, 8 * ratio);
+      ctx.fillRect(x1 - 2 * ratio, 3 * ratio, 2 * ratio, 8 * ratio);
+      ctx.fillStyle = p.text3;
+      ctx.font = `600 ${10.5 * ratio}px ${getComputedStyle(document.body).fontFamily}`;
+      ctx.textBaseline = "alphabetic";
+      ctx.textAlign = "left";
+      if (x1 - x0 > 150 * ratio) ctx.fillText(this.loopSpan.label, Math.max(0, x0) + 6 * ratio, 15 * ratio);
+    }
 
     if (this.editRange && length) {
       const x0 = toX(this.editRange.startSeconds);

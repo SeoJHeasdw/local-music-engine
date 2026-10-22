@@ -40,7 +40,7 @@ function row(song: SongSummary) {
       ),
       h("span", { class: "song-row-status" }, status(song)),
       h("span", { class: "song-row-num" }, song.error ? "—" : `${versions}${song.editCount ? ` + 수정 ${song.editCount}` : ""}`),
-      h("span", { class: "song-row-num" }, song.instrumental ? `${lengthLabel(song.durationSeconds)} · 연주곡` : lengthLabel(song.durationSeconds)),
+      h("span", { class: "song-row-num" }, song.purpose === "bgm" ? `${lengthLabel(song.durationSeconds)} · BGM` : song.instrumental ? `${lengthLabel(song.durationSeconds)} · 연주곡` : lengthLabel(song.durationSeconds)),
       h("span", { class: "song-row-time" }, relativeTime(song.updatedAt), song.external ? " · 다른 폴더" : ""),
     ),
     h("button", { type: "button", class: "icon-button", "data-tip": "Finder에서 곡 폴더 보기", "aria-label": "Finder에서 곡 폴더 보기", onClick: () => reveal(song.songId) }, icon("folder", 16)),

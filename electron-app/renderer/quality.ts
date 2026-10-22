@@ -1,4 +1,4 @@
-import type { ActiveTask, AutomaticQuality, Finding, RhythmDiagnosticCheck, RhythmDiagnosticEvent, TaskOutcome, Version } from "../shared.ts";
+import type { ActiveTask, AutomaticQuality, Finding, RhythmDiagnosticCheck, RhythmDiagnosticEvent, TaskOutcome, Version, VersionLoop } from "../shared.ts";
 
 export function isAutomaticAttempt(version: Version): boolean {
   return version.quality?.preferred === false && !version.isFinal && !version.recommended;
@@ -268,4 +268,38 @@ export function processingText(processing: Record<string, unknown> | null): stri
   if (typeof values.gain === "number" && values.gain < 1) changes.push("너무 큰 음량을 낮췄어요");
   if (Number(values.startFadeSeconds ?? 0) > 0 || Number(values.endFadeSeconds ?? 0) > 0) changes.push("시작·끝의 갑작스러운 소리를 줄였어요");
   return changes.length ? `${changes.join(". ")}. 원래 음원도 남아 있어요.` : "소리를 더 크게 만들거나 곡의 쉼을 잘라내지 않았어요. 원래 음원도 남아 있어요.";
+}
+
+// format.ts imports this module, so the loop length is written here: "1분 4초", "48초".
+function loopLength(seconds: number): string {
+  const rounded = Math.round(seconds);
+  const minutes = Math.floor(rounded / 60);
+  return minutes ? `${minutes}분${rounded % 60 ? ` ${rounded % 60}초` : ""}` : `${rounded}초`;
+}
+
+// What each loop warning asks the listener to check. They are hints from measurement; the
+// loop is still made and plays.
+const LOOP_WARNINGS: Record<string, string> = {
+  phase_ambiguous: "킥이 매 박 나오는 곡이라 마디 첫 박은 추정이에요. 이음새를 들어 확인해 주세요.",
+  meter_assumed: "박자 정보가 없어 4/4로 보고 잘랐어요.",
+  seam_level_differs: "이음새에서 소리 크기가 곡 안의 다른 마디 경계보다 크게 바뀌어요. 이음새를 들어 확인해 주세요.",
+  mastering_gain_differs: "반복 구간 양 끝의 음량이 조금 달라요. 이음새를 들어 확인해 주세요.",
+};
+
+/** One line for a version row: how long the loop is, or that there is none. */
+export function loopSummaryText(loop: VersionLoop | null | undefined): string | null {
+  if (!loop) return null;
+  return loop.status === "ready" ? `반복용 ${loopLength(loop.durationSeconds)} · ${loop.bars}마디` : "반복용 없음";
+}
+
+/** The loop's place in the song and anything to listen for, for the checks tab. */
+export function loopReportLines(loop: VersionLoop | null | undefined): Array<{ text: string; tone: "ok" | "warning" }> {
+  if (!loop) return [];
+  if (loop.status !== "ready") return [{ text: loop.reason, tone: "warning" }];
+  const lines: Array<{ text: string; tone: "ok" | "warning" }> = [{
+    tone: "ok",
+    text: `${loop.startSeconds.toFixed(2)}초부터 ${loop.endSeconds.toFixed(2)}초까지 ${loop.bars}마디(${loopLength(loop.durationSeconds)})를 마디 첫 박의 킥에 맞춰 잘랐어요. 실제 빠르기 ${Math.round(loop.bpm * 10) / 10} BPM.`,
+  }];
+  for (const warning of loop.warnings) lines.push({ text: LOOP_WARNINGS[warning] ?? warning, tone: "warning" });
+  return lines;
 }

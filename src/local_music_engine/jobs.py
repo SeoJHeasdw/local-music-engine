@@ -11,7 +11,9 @@ from .storage import ProjectStore, fingerprint, sha256_file
 
 ACTIVE_STATUSES = {"queued", "running", "cancelling"}
 GENERATION_KINDS = {"candidate-batch", "cover-batch", "generate-candidate", "repaint-candidate", "quality-check", "audio-finish",
-                    "listening-copy"}
+                    "listening-copy", "loop-copy"}
+# Jobs that publish a rendered file through a staged temporary link.
+RENDER_KINDS = {"audio-finish", "listening-copy", "loop-copy"}
 RECOVERABLE_KINDS = GENERATION_KINDS | {"export"}
 
 
@@ -90,18 +92,18 @@ def recover_jobs(store: ProjectStore, project: dict[str, Any]) -> list[str]:
 
     recovered = [] if store.export_active() else recover_export_jobs(store, project)
     for job in project["jobs"]:
-        if job["status"] == "succeeded" and (job["kind"] in {"audio-finish", "listening-copy"}
+        if job["status"] == "succeeded" and (job["kind"] in RENDER_KINDS
                 or (job["kind"] == "export" and not store.export_active())):
             # A crash can occur after success is durable but before staging links
             # are released. Historical published artifacts are never removed.
             cleanup_export_outputs(job, include_published=False)
         if job["kind"] in GENERATION_KINDS and job["status"] in ACTIVE_STATUSES:
-            if job["kind"] in {"audio-finish", "listening-copy"}:
+            if job["kind"] in RENDER_KINDS:
                 job["outputCleanupErrors"] = cleanup_export_outputs(job)
             store.transition_job(
                 job, "interrupted", stage="interrupted",
                 error=("Local quality inspection or finishing ended before recording completion"
-                       if job["kind"] in {"quality-check", "audio-finish", "listening-copy"}
+                       if job["kind"] in {"quality-check"} | RENDER_KINDS
                        else "Local generation process ended before recording completion; remote task may still run"),
             )
             recovered.append(job["jobId"])

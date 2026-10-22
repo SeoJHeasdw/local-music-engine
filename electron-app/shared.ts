@@ -26,7 +26,11 @@ export type ProductionPreset = {
   timeSignature: string | null;
   ruleIds: string[];
 };
-export type ProductionCatalog = { version: 1; presets: ProductionPreset[]; rules: ProductionRule[]; captionBudgetCharacters?: number; captionBudgetScope?: "api_prompt_character_limit" | "guidance_advisory"; captionTokenBudgetMeasured?: boolean };
+// What a song is for when that changes how it is made: a BGM song is an instrumental that
+// also gets a seamless loop cut on its bars.
+export type SongPurpose = "bgm";
+export type ProductionPurpose = { id: SongPurpose; label: string; description: string; caption: string };
+export type ProductionCatalog = { version: 1; presets: ProductionPreset[]; rules: ProductionRule[]; purposes?: ProductionPurpose[]; captionBudgetCharacters?: number; captionBudgetScope?: "api_prompt_character_limit" | "guidance_advisory"; captionTokenBudgetMeasured?: boolean };
 export type ProductionSnapshot = {
   version: 1;
   selection: ProductionRuleSelection;
@@ -38,6 +42,7 @@ export type ProductionSnapshot = {
   skippedRuleIds: string[];
   inputMetas: Record<string, unknown>;
   songPlan?: SongPlanResult;
+  purpose?: { id: SongPurpose; caption: string };
 };
 
 export type SongPlanInput = {
@@ -204,6 +209,12 @@ export type EditSplice = {
   peakReductionDb?: number | null;
 };
 
+/** The seamless loop of a BGM version, or why it has none. */
+export type VersionLoop =
+  | { status: "ready"; startSeconds: number; endSeconds: number; durationSeconds: number; bars: number; bpm: number;
+      sampleRate: number; warnings: string[]; audioUrl: string }
+  | { status: "none" | "failed" | "missing"; code: string; reason: string };
+
 export type Version = {
   id: string;
   kind: "full" | "edit" | "cover";
@@ -237,6 +248,8 @@ export type Version = {
   songPlan?: SongPlanResult | null;
   coverSource?: { candidateId: string; artifactId: string; sha256: string; bytes: number; durationSeconds: number } | null;
   lyricsOriginal?: string;
+  purpose?: SongPurpose | null;
+  loop?: VersionLoop | null;
 };
 
 export type TagChange = { op: "add" | "remove"; term: string; label?: string };
@@ -295,9 +308,12 @@ export type JobView = {
   resumeBlockedReason?: string | null;
 };
 
+export type ExportVariant = "song" | "loop";
+
 export type ExportView = {
   artifactId: string;
   candidateId: string | null;
+  variant: ExportVariant;
   createdAt: string | null;
   exists: boolean;
   externalPath: string | null;
@@ -313,6 +329,7 @@ export type SongInputs = {
   keyScale: string | null;
   timeSignature: string | null;
   productionRules?: ProductionRuleSelection | null;
+  purpose?: SongPurpose | null;
 };
 
 export type Song = {
@@ -348,6 +365,7 @@ export type SongSummary = {
   stylePrompt: string;
   durationSeconds: number | null;
   instrumental: boolean;
+  purpose: SongPurpose | null;
   versionCount: number;
   editCount: number;
   liked: number;
@@ -456,6 +474,7 @@ export type CreateSongInput = {
   keyScale: string | null;
   timeSignature: string | null;
   productionRules?: ProductionRuleSelection;
+  purpose?: SongPurpose;
 };
 
 export type DraftResult = {
@@ -526,7 +545,7 @@ export type MusicAppApi = {
   review(input: ReviewInput): Promise<SongState>;
   setFinal(songId: string, versionId: string): Promise<SongState>;
   undoFinal(songId: string): Promise<SongState>;
-  exportFinal(songId: string): Promise<ExportResult | null>;
+  exportFinal(songId: string, variant?: ExportVariant): Promise<ExportResult | null>;
   revise(input: ReviseInput): Promise<SongState>;
   draft(query: string, instrumental: boolean, durationSeconds: number, productionRules?: ProductionRuleSelection, vocalLanguage?: "ko" | "en"): Promise<DraftResult>;
   songPlan(input: SongPlanInput): Promise<SongPlanResult>;

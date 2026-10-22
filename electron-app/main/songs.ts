@@ -20,6 +20,7 @@ import type {
   RhythmDiagnostics,
   ProductionSnapshot,
   SongPlanResult,
+  VersionLoop,
 } from "../shared.ts";
 import { runCli } from "./cli.ts";
 import { audioUrlFor, wavPeaks } from "./audio.ts";
@@ -57,6 +58,10 @@ type RawCandidate = {
   coverSource?: Version["coverSource"];
   songPlan?: SongPlanResult | null;
   lyricsOriginal?: string | null;
+  purpose?: string | null;
+  loop?: unknown;
+  // The seamless loop file of a BGM version; empty when it has none that verifies.
+  loopPath?: string;
 };
 
 type RawExport = ExportView & { path: string; externalPath: string | null };
@@ -88,6 +93,7 @@ type RawSummary = {
   stylePrompt?: string;
   durationSeconds?: number | null;
   instrumental?: boolean;
+  purpose?: string | null;
   versionCount?: number;
   editCount?: number;
   liked?: number;
@@ -279,6 +285,27 @@ export function qualityFromStatus(report: Partial<AutomaticQuality> | null | und
   };
 }
 
+const LOOP_REASONS = new Set(["none", "failed", "missing"]);
+
+// A loop the engine verified gets an audio token; anything else is only a reason to show.
+export function loopFromStatus(raw: unknown, loopPath: string | undefined): VersionLoop | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const loop = raw as Record<string, unknown>;
+  const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  if (loop.status === "ready") {
+    const fields = ["startSeconds", "endSeconds", "durationSeconds", "bars", "bpm", "sampleRate"].map((key) => number(loop[key]));
+    if (!loopPath || fields.some((value) => value === null)) return null;
+    const [startSeconds, endSeconds, durationSeconds, bars, bpm, sampleRate] = fields as number[];
+    const warnings = Array.isArray(loop.warnings) ? loop.warnings.filter((item): item is string => typeof item === "string").slice(0, 10) : [];
+    return { status: "ready", startSeconds, endSeconds, durationSeconds, bars, bpm, sampleRate, warnings, audioUrl: audioUrlFor(loopPath) };
+  }
+  if (typeof loop.status === "string" && LOOP_REASONS.has(loop.status)) {
+    const text = (value: unknown, fallback: string) => (typeof value === "string" && value ? value.slice(0, 200) : fallback);
+    return { status: loop.status as "none" | "failed" | "missing", code: text(loop.code, "unknown"), reason: text(loop.reason, "반복용이 없어요.") };
+  }
+  return null;
+}
+
 export async function validateSongFolder(input: string): Promise<string> {
   const resolved = await realpath(input);
   try {
@@ -307,6 +334,7 @@ export async function listSongs(
     stylePrompt: item.stylePrompt ?? "",
     durationSeconds: item.durationSeconds ?? null,
     instrumental: Boolean(item.instrumental),
+    purpose: item.purpose === "bgm" ? "bgm" : null,
     versionCount: item.versionCount ?? 0,
     editCount: item.editCount ?? 0,
     liked: item.liked ?? 0,
@@ -360,6 +388,8 @@ export async function loadSong(folder: string, read: typeof runCli = runCli): Pr
           coverSource: candidate.coverSource ?? null,
           songPlan: candidate.songPlan ?? null,
           lyricsOriginal: candidate.lyricsOriginal ?? undefined,
+          purpose: candidate.purpose === "bgm" ? "bgm" : null,
+          loop: loopFromStatus(candidate.loop, candidate.loopPath),
         } satisfies Version;
       }),
     );
@@ -369,6 +399,7 @@ export async function loadSong(folder: string, read: typeof runCli = runCli): Pr
       return {
         artifactId: item.artifactId,
         candidateId: item.candidateId,
+        variant: item.variant === "loop" ? "loop" : "song",
         createdAt: item.createdAt,
         exists: item.exists,
         externalPath: item.externalPath,

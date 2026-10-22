@@ -1,4 +1,4 @@
-import type { ProductionCatalog, ProductionRuleSelection } from "./shared.ts";
+import type { ProductionCatalog, ProductionRuleSelection, SongPurpose } from "./shared.ts";
 
 export function emptyProductionRules(): ProductionRuleSelection {
   return { version: 1, presetId: null, ruleIds: [] };
@@ -46,7 +46,11 @@ export type ProductionPreviewInput = {
   keyScale: string;
   timeSignature: string;
   productionRules?: ProductionRuleSelection;
+  purpose?: SongPurpose | null;
 };
+
+// The engine skips these for a song without vocals (production_rules.freeze_guidance).
+const VOCAL_RULES = ["clear-vocal", "phrase-breathing", "expressive-performance"];
 
 export function productionPreview(input: ProductionPreviewInput, catalog?: ProductionCatalog) {
   const selection = input.productionRules ?? emptyProductionRules();
@@ -55,14 +59,17 @@ export function productionPreview(input: ProductionPreviewInput, catalog?: Produ
   const captions: Array<{ id: string; label: string; caption: string }> = [];
   for (const rule of catalog?.rules ?? []) {
     if (!selection.ruleIds.includes(rule.id)) continue;
-    if (input.instrumental && ["clear-vocal", "phrase-breathing"].includes(rule.id)) continue;
+    if (input.instrumental && VOCAL_RULES.includes(rule.id)) continue;
     let caption = input.instrumental ? rule.instrumentalCaption ?? rule.caption : rule.caption;
     if (input.durationSeconds <= 45) caption = (input.instrumental ? rule.shortInstrumentalCaption : rule.shortCaption) ?? caption;
     if (caption) captions.push({ id: rule.id, label: rule.label, caption });
   }
   const baseStyle = input.stylePrompt.trim();
   const additions = [preset?.caption, ...captions.map((rule) => rule.caption)].filter((caption): caption is string => Boolean(caption) && !baseStyle.toLowerCase().includes(caption!.toLowerCase()));
-  const stylePrompt = [baseStyle, ...additions].filter(Boolean).join(", ");
+  // A purpose leads the prompt, as the engine sends it (production_rules.guided_prompt).
+  const purpose = input.purpose ? catalog?.purposes?.find((item) => item.id === input.purpose) : undefined;
+  const lead = purpose && !baseStyle.toLowerCase().includes(purpose.caption.toLowerCase()) ? [purpose.caption] : [];
+  const stylePrompt = [...lead, baseStyle, ...additions].filter(Boolean).join(", ");
   const warnings: string[] = [];
   // The engine's catalog sets this bound (ACE 650 characters for its short caption,
   // Music 3 16,000). This preview contains style plus rules; character counts do not
@@ -78,6 +85,7 @@ export function productionPreview(input: ProductionPreviewInput, catalog?: Produ
   }
   return {
     preset,
+    purpose,
     captions,
     stylePrompt,
     bpm: input.bpm.trim() || (preset?.bpm ? String(preset.bpm) : plannedTiming ? "96" : ""),

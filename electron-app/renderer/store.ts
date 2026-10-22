@@ -1,17 +1,4 @@
-import type {
-  ActiveTask,
-  AppInfo,
-  EngineStatus,
-  Plan,
-  ProductionCatalog,
-  ProductionRuleSelection,
-  RuleHint,
-  Settings,
-  SongState,
-  SongSummary,
-  Strength,
-  TimeRange,
-} from "../shared.ts";
+import type { ActiveTask, AppInfo, EngineStatus, Plan, ProductionCatalog, ProductionRuleSelection, RuleHint, Settings, SongState, SongSummary, Strength, TimeRange, SongPurpose } from "../shared.ts";
 
 export type View = "library" | "create" | "studio" | "settings";
 export type InspectorTab = "prompt" | "lyrics" | "checks" | "notes";
@@ -30,6 +17,8 @@ export type CreateDraft = {
   drafted: boolean;
   productionRules?: ProductionRuleSelection;
   vocalLanguage?: "ko" | "en";
+  // BGM: an instrumental that also gets a seamless loop cut on its bars.
+  purpose?: SongPurpose | null;
   // Style tags of instruments picked in step 1 (see instruments.ts).
   instruments?: string[];
 };

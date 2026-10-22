@@ -16,6 +16,7 @@ from .audio_quality import AudioFinishPolicy, analyze_audio_quality, finish_audi
 from .execution import execute_candidate
 from .jobs import ACTIVE_STATUSES, batch_lineage, cleanup_export_outputs, validate_seed
 from .listening import ensure_listening_copy
+from .loops import ensure_loop_copy, version_purpose
 from .lyric_quality import assess_lyric_suitability, evaluate_lyric_transcript, reread_requests, reread_starts
 from .qc import artifact_and_findings
 from .quality_backend import AudioOnlyBackend, LocalQualityBackend
@@ -601,7 +602,14 @@ def finalize_candidate(store: ProjectStore, candidate_id: str, *, batch_id: str)
         ensure_listening_copy(store, finished, parent_job_id=batch_id)
     except Exception:
         # The failed listening-copy job keeps the reason; the app plays the version itself.
-        pass
+        return finished
+    project = store.load()
+    if version_purpose(project, store.find_by_id(project, "candidates", "candidateId", finished)) == "bgm":
+        try:
+            ensure_loop_copy(store, finished, parent_job_id=batch_id)
+        except Exception:
+            # The failed loop-copy job keeps the reason; the whole song still plays and exports.
+            pass
     return finished
 
 
